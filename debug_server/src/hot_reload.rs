@@ -1285,6 +1285,11 @@ fn find_type(path: &str) -> Result<u32, String> {
 		.ok_or_else(|| format!("there's no type {} in the running world", path))
 }
 
+/// Resolve a type path from the runtime table.
+pub(crate) fn type_id(path: &str) -> Option<u32> {
+	find_type(path).ok()
+}
+
 /// Resolve `/image` and its subtypes directly from the type table.
 /// text2path("/image") can return null before a rebooted world starts
 /// executing.

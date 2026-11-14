@@ -51,6 +51,19 @@ fn last_definition(path: &str) -> Option<Proc> {
 	last
 }
 
+/// Resolve a type from the runtime table, using the value tag of its nearest
+/// ancestor that text2path() can resolve.
+fn added_type(path: &str) -> Option<(u8, u32)> {
+	let id = crate::hot_reload::type_id(path)?;
+	let tag = ancestry(path)
+		.iter()
+		.skip(1)
+		.find_map(|parent| AssembleEnv::eval_with_name("text2path(name)", parent))?
+		.raw
+		.tag as u8;
+	Some((tag, id))
+}
+
 /// Type paths from `ty` through its actual parents, nearest first.
 /// Follow the runtime table, including builtin and explicit parent_type
 /// ancestry. Fall back to path prefixes if the table is unavailable.
@@ -164,6 +177,11 @@ impl dmasm::assembler::AssembleEnv for AssembleEnv {
 		}
 		if let Some(id) = crate::hot_reload::image_type(path) {
 			return Some((raw_types::values::ValueTag::ImageTypepath as u8, id));
+		}
+		// text2path() caches failed lookups. Check the runtime type table for
+		// types added since the lookup.
+		if let Some(found) = added_type(path) {
+			return Some(found);
 		}
 
 		// Without `/proc/`, a proc path names the last definition, matching
