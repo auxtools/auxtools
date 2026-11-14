@@ -1,13 +1,13 @@
 //! Client events for reload state, refused changes and potentially unapplied
 //! edits.
 
-use dmasm::reload::Refusal;
+use dmasm::reload::{Refusal, Until};
 
 use super::*;
 
 /// Reload state: `reading`, `active`, `reloading`, `reloaded`, `refused`,
-/// `failed` or `off`. `summary` describes a reload; `problems` explain
-/// refusals.
+/// `failed` or `off`. `summary` describes a reload; `problems` lists held
+/// changes.
 #[derive(serde::Serialize)]
 struct ReloadEvent {
 	state: &'static str,
@@ -19,13 +19,15 @@ impl Event for ReloadEvent {
 	const EVENT: &'static str = "auxtoolsReload";
 }
 
-/// Refused change with its source location.
+/// Held change with its source location.
 #[derive(serde::Serialize)]
 struct Problem {
 	/// Absolute path; fall back to the `.dme` when no source file is known.
 	file: Option<String>,
 	line: Option<u32>,
-	message: String
+	message: String,
+	/// Required action: `reboot` or `rebuild`.
+	until: &'static str
 }
 
 /// Files newer than the build whose edits may be missing from the world.
@@ -70,7 +72,11 @@ impl Adapter {
 			.map(|refusal| Problem {
 				file: refusal.file.clone().or_else(|| dme.clone()),
 				line: refusal.line,
-				message: format!("{:#}", refusal)
+				message: format!("{:#}", refusal),
+				until: match refusal.until {
+					Until::Reboot => "reboot",
+					Until::Rebuild => "rebuild"
+				}
 			})
 			.collect();
 		self.out.event(ReloadEvent {
@@ -112,10 +118,15 @@ impl Adapter {
 		}
 	}
 
-	/// Group refusals by subject and reason for the console. The client
+	/// Group held changes by subject and reason for the console. The client
 	/// gets them with the outstanding set (`outstanding`).
 	pub(super) fn refused(&mut self, refused: Vec<Refusal>, warnings: Vec<String>) {
-		self.out.console("Hot reload requires a rebuild:");
+		let reboot = refused.iter().all(|refusal| refusal.until == Until::Reboot);
+		self.out.console(if reboot {
+			"Hot reload requires a reboot:"
+		} else {
+			"Hot reload requires a rebuild:"
+		});
 		for group in grouped(&refused) {
 			let text = format!("    {:#}", group);
 			match &group.file {
@@ -125,7 +136,7 @@ impl Adapter {
 		}
 		self.journal_reload(
 			false,
-			"rebuild required".to_owned(),
+			if reboot { "reboot required" } else { "rebuild required" }.to_owned(),
 			refused.iter().map(ToString::to_string).collect(),
 			warnings
 		);
@@ -148,9 +159,9 @@ impl Adapter {
 fn grouped(refused: &[Refusal]) -> Vec<Refusal> {
 	let mut groups: Vec<Refusal> = vec![];
 	for refusal in refused {
-		let same = groups
-			.iter_mut()
-			.find(|group| group.path == refusal.path && group.why == refusal.why && group.name.is_some() && refusal.name.is_some());
+		let same = groups.iter_mut().find(|group| {
+			group.path == refusal.path && group.why == refusal.why && group.until == refusal.until && group.name.is_some() && refusal.name.is_some()
+		});
 		match (same, &refusal.name) {
 			(Some(group), Some(name)) => {
 				let names = group.name.as_mut().expect("grouped by name");

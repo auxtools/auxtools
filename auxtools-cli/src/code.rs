@@ -16,7 +16,7 @@ use auxtools_cli::server_types::{
 	HotReloadInitProc, HotReloadLines, HotReloadNewProc, HotReloadProc, HotReloadRequest, HotReloadResource, HotReloadVarDefault, Macro, ProcRef,
 	ReloadedResource, RemovedVar, ScriptRequest, SkinRequest
 };
-use dmasm::reload::{diff, Changes, ParseOptions, ProcKey, Refusal, Snapshot};
+use dmasm::reload::{diff, Changes, ParseOptions, ProcKey, Refusal, Snapshot, Until};
 
 use crate::{adapter::Input, dap::Output, resources::Resources, script::Script, skin::Skin};
 
@@ -65,8 +65,8 @@ pub enum Event {
 		notes: Vec<String>,
 		world: u64
 	},
-	/// Unapplied changes: `refused` changes need a rebuild; `errors` explain
-	/// source-read failures. Both are journaled.
+	/// Unapplied changes and source-read errors. `Refusal::until` gives the
+	/// required action. Both are journaled.
 	NotReloaded {
 		summary: String,
 		errors: Vec<String>,
@@ -342,8 +342,9 @@ impl Code {
 
 	/// Reload the changed DM files. Return false on adapter disconnect.
 	fn reload_code(&self, watching: &mut Watching, changed: HashSet<PathBuf>) -> bool {
-		// Reparse a single file when only its proc bodies changed.
-		if let [file] = changed.iter().collect::<Vec<_>>().as_slice() {
+		// Held changes require a full diff so edits in other files wait too.
+		let held = !self.refusals.borrow().is_empty();
+		if let (false, [file]) = (held, changed.iter().collect::<Vec<_>>().as_slice()) {
 			let file = (*file).clone();
 			// Use the last applied snapshot, including incremental file parses.
 			let current = match watching.applied.as_mut() {
@@ -353,7 +354,7 @@ impl Code {
 			match current.reload_file(&self.root, &file) {
 				Ok(reload) => {
 					watching.edited_since_built.insert(file);
-					return match self.reload(&reload.changes, current, vec![], false, &changed) {
+					return match self.reload(&reload.changes, current, vec![], false, true) {
 						None => false,
 						Some(true) => {
 							let current = match watching.applied.as_mut() {
@@ -393,7 +394,7 @@ impl Code {
 			watching.files.add(&self.root, &file, self.parse_started.get());
 		}
 
-		match self.reload(&changes, watching.applied.as_ref().unwrap_or(&watching.built), vec![], false, &changed) {
+		match self.reload(&changes, watching.applied.as_ref().unwrap_or(&watching.built), vec![], false, true) {
 			None => false,
 			Some(true) => {
 				self.watch_named(watching);
@@ -483,8 +484,7 @@ impl Code {
 		};
 		let mut changes = diff(&watching.built, &current, Some(&watching.edited_since_built));
 		refuse_hidden(&watching.built, &current, &mut changes);
-		restarted(&mut changes);
-		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, &watching.edited_since_built) else {
+		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, true) else {
 			return false;
 		};
 		if applied {
@@ -551,8 +551,7 @@ impl Code {
 			});
 		}
 		self.reloaded_resources.borrow_mut().clear();
-		let files: HashSet<PathBuf> = changed.iter().map(|(path, _)| path.clone()).collect();
-		match self.reload(&changes, current, resources, false, &files) {
+		match self.reload(&changes, current, resources, false, false) {
 			None => false,
 			Some(true) => {
 				let reloaded = self.reloaded_resources.take();
@@ -668,33 +667,35 @@ impl Code {
 	/// Apply `changes` from runtime snapshot `before` through the adapter.
 	/// Return `None` on disconnect. After reboot, install the replacement
 	/// global init proc before global initialization.
-	/// `changed` are the edited files whose changes these are: refusals
-	/// placed in them are replaced by this reload's result.
-	fn reload(
-		&self,
-		changes: &Changes,
-		before: &Snapshot,
-		resources: Vec<HotReloadResource>,
-		restarted: bool,
-		changed: &HashSet<PathBuf>
-	) -> Option<bool> {
-		if !changes.refused.is_empty() {
+	/// Refused or deferred changes hold the whole set. `whole` replaces all
+	/// outstanding problems; resource reloads report only a partial diff.
+	fn reload(&self, changes: &Changes, before: &Snapshot, resources: Vec<HotReloadResource>, restarted: bool, whole: bool) -> Option<bool> {
+		// A reboot satisfies deferred initializers, but not rebuild
+		// requirements.
+		let applies_now = |deferred: &&Refusal| restarted && deferred.until == Until::Reboot;
+		if !changes.refused.is_empty() || !changes.deferred.iter().all(|d| applies_now(&d)) {
 			// Clients use absolute source paths.
 			let refused = changes
 				.refused
 				.iter()
+				.chain(&changes.deferred)
 				.map(|refusal| Refusal {
 					file: refusal.file.as_ref().map(|file| self.root.join(file).display().to_string()),
 					..refusal.clone()
 				})
 				.collect::<Vec<_>>();
+			let summary = if refused.iter().all(|refusal| refusal.until == Until::Reboot) {
+				"reboot required"
+			} else {
+				"rebuild required"
+			};
 			let event = Event::NotReloaded {
-				summary: "rebuild required".to_owned(),
+				summary: summary.to_owned(),
 				errors: vec![],
 				refused: refused.clone(),
 				warnings: changes.warnings.clone()
 			};
-			return (self.send(event) && self.refused_by(changed, refused)).then_some(false);
+			return (self.send(event) && self.refused_by(refused, whole)).then_some(false);
 		}
 		let mut request = reload_request(changes);
 		if restarted {
@@ -715,7 +716,7 @@ impl Code {
 			let sent = self.send(Event::NothingChanged {
 				warnings: changes.warnings.clone()
 			});
-			return (sent && self.refused_by(changed, vec![])).then_some(true);
+			return (sent && self.refused_by(vec![], whole)).then_some(true);
 		}
 
 		if !self.send(Event::Reload {
@@ -736,33 +737,23 @@ impl Code {
 				Err(_) => return None
 			}
 		};
-		if applied && !self.refused_by(changed, vec![]) {
+		if applied && !self.refused_by(vec![], whole) {
 			return None;
 		}
 		Some(applied)
 	}
 
-	/// Update the outstanding refusals after a reload of `changed`: drop
-	/// those placed in its files (and, if it was applied, those placed
-	/// nowhere), add `refused`, and send the set if it changed. Return false
-	/// on disconnect.
-	fn refused_by(&self, changed: &HashSet<PathBuf>, refused: Vec<Refusal>) -> bool {
+	/// Replace outstanding problems for a full diff, or append partial results.
+	/// Send the set if changed. Return false on disconnect.
+	fn refused_by(&self, refused: Vec<Refusal>, whole: bool) -> bool {
 		let before = self.outstanding();
-		{
-			let files: HashSet<String> = changed.iter().map(|file| self.root.join(file).display().to_string()).collect();
-			let applied = refused.is_empty();
-			let mut refusals = self.refusals.borrow_mut();
-			refusals.retain(|refusal| match &refusal.file {
-				Some(file) => !files.contains(file),
-				None => !applied
-			});
-			for refusal in refused {
-				if !refusals.contains(&refusal) {
-					refusals.push(refusal);
-				}
+		let mut now = if whole { vec![] } else { before.clone() };
+		for refusal in refused {
+			if !now.contains(&refusal) {
+				now.push(refusal);
 			}
 		}
-		let now = self.outstanding();
+		*self.refusals.borrow_mut() = now.clone();
 		now == before || self.send(Event::Refusals(now))
 	}
 
@@ -839,14 +830,6 @@ impl Code {
 			}
 		}
 	}
-}
-
-/// Use the current global and static initializers after reboot
-/// (see `HotReloadRequest::global_init`).
-pub fn restarted(changes: &mut Changes) {
-	changes
-		.warnings
-		.retain(|note| !note.ends_with(": changed global initializer applies only after a restart"));
 }
 
 /// Resource literals referenced by a reload's code and defaults.
