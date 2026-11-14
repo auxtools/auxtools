@@ -1058,6 +1058,20 @@ fn main() {
 	assert_eq!(eval(&mut client, "istype(old_puppy, /datum/animal/dog)"), "1");
 	println!("ok: new types");
 
+	// Cache a failed lookup before adding the type.
+	assert_eq!(eval(&mut client, "text2path(\"/datum/sought\")"), "null");
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/crate_report(type)\n",
+		"/datum/sought\n\tvar/found = 1\n\n/proc/sought_maker()\n\tvar/datum/sought/s = new /datum/sought\n\treturn \
+		 s.found\n\n/proc/crate_report(type)\n"
+	);
+	assert_eq!(changes.new_types.len(), 1, "{:?}", changes.new_types);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "sought_maker()"), "1");
+	assert_eq!(eval(&mut client, "istype(new /datum/sought, /datum/sought)"), "1");
+	println!("ok: reload after cached path lookup failures");
+
 	// Globals and statics whose initial values aren't constants get them once,
 	// as when the world starts
 	let changes = source.edit(

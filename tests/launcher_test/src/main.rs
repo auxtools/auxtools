@@ -1474,7 +1474,17 @@ fn attach_host_copy(name: &str) -> (PathBuf, PathBuf) {
 	// for this one
 	let _ = std::fs::remove_dir_all(&dir);
 	std::fs::create_dir_all(&dir).unwrap();
-	for left in ["stop", "fail", "reboot", "call", "refuse_del", "fail_del", "slow_del"] {
+	for left in [
+		"stop",
+		"fail",
+		"reboot",
+		"call",
+		"refuse_del",
+		"fail_del",
+		"slow_del",
+		"slow_reboot",
+		"refuse_reboot"
+	] {
 		let _ = std::fs::remove_file(dir.join(left));
 		assert!(
 			!dir.join(left).exists(),
@@ -1967,6 +1977,29 @@ fn launch_from_the_command_line(server: &str) {
 	);
 	println!("ok: reboot throughout world execution");
 
+	// A sleeping reboot resumes the world; breakpoints work after reboot.
+	std::fs::write(dir.join("slow_reboot"), "yes").unwrap();
+	run(&["wait", "pause", "--break", "/proc/value", "--timeout", "60"], 0);
+	run(&["reboot", "--timeout", "60"], 0);
+	std::fs::remove_file(dir.join("slow_reboot")).unwrap();
+	run(&["wait", "pause", "--break", "/proc/value", "--timeout", "60"], 0);
+	println!("ok: paused reboot with sleeping world/Reboot");
+
+	// Pauses resume after a sleeping reboot declines or a sleeping world/Del()
+	// fails.
+	for (files, command) in [(["slow_reboot", "refuse_reboot"], "reboot"), (["slow_del", "fail_del"], "stop")] {
+		for file in files {
+			std::fs::write(dir.join(file), "yes").unwrap();
+		}
+		run(&[command, "--timeout", "6"], 2);
+		for file in files {
+			std::fs::remove_file(dir.join(file)).unwrap();
+		}
+		run(&["wait", "pause", "--break", "/proc/value", "--timeout", "20"], 0);
+	}
+	println!("ok: pauses after declined reboot and failed shutdown");
+
+	// Still paused
 	let before = read_log().len();
 	std::fs::write(dir.join("slow_del"), "yes").unwrap();
 	let printed = run(&["stop"], 0);
@@ -1989,7 +2022,7 @@ fn launch_from_the_command_line(server: &str) {
 	);
 	let _ = std::fs::remove_file(dir.join("slow_del"));
 	drop(started);
-	println!("ok: shutdown with sleeping world/Del");
+	println!("ok: paused shutdown with sleeping world/Del");
 
 	// A world whose world/Del() doesn't end it
 	let mut started = Started::default();

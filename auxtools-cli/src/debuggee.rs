@@ -14,7 +14,7 @@ use std::{
 
 use auxtools_cli::{
 	local::{self, Shared, Stream},
-	server_types::{BreakpointReason, DataChange, InstructionRef, Request, Response, Stop, WORLD_SHUTTING_DOWN}
+	server_types::{BreakpointReason, DataChange, InstructionRef, Request, Response, Stop, ENDING_CONTEXT, WORLD_SHUTTING_DOWN}
 };
 use dap_types::{ContinuedEvent, StoppedEvent as Reasons};
 
@@ -384,14 +384,14 @@ impl Debuggee {
 		local::send(&mut self.writer, request).map_err(|e| format!("couldn't reach the world: {}", e))
 	}
 
-	/// Sends an evaluation without waiting for its answer, which is thrown
-	/// away when it comes
+	/// Send world.Del() or world.Reboot(), resuming paused worlds as needed.
+	/// Discard the response when it arrives.
 	pub fn eval_unanswered(&mut self, command: String) -> Result<(), String> {
 		self.unanswered.fetch_add(1, Ordering::Relaxed);
 		let sent = self.send(&Request::Eval {
 			frame_id: None,
 			command,
-			context: None
+			context: Some(ENDING_CONTEXT.to_owned())
 		});
 		if sent.is_err() {
 			self.unanswered.fetch_sub(1, Ordering::Relaxed);

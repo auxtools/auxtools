@@ -91,6 +91,12 @@ struct State {
 /// are depths in the running stack, innermost first.
 const SLEEPING_FRAMES: u32 = 1 << 30;
 
+/// Maximum time a shutdown or reboot suppresses pauses.
+const ENDING_LIMIT: Duration = Duration::from_secs(60);
+
+/// Error prefix for evaluations that slept or continued in the background.
+const EVAL_ABORTED: &str = "evaluation aborted";
+
 /// Stable sleeping-frame reference: stack ID, depth and proc instance.
 /// Evaluations can end or create sleeping procs, changing queue positions.
 /// The reference must still resolve to the same frame or become invalid.
@@ -360,6 +366,9 @@ pub struct Server {
 	spawn_stub_locals: Option<u32>,
 	/// Active spawned evaluations, with source text and first runtime error.
 	spawned: HashMap<u64, (String, Option<String>)>,
+	/// Suppress pauses while a client-requested shutdown or reboot is
+	/// pending, for at most `ENDING_LIMIT`.
+	ending: Option<Instant>,
 	/// Client retaining a pause after all clients disconnect.
 	hold: Option<ClientId>,
 	/// How long that pause lasts with no client that debugs connected
@@ -460,6 +469,7 @@ impl Server {
 			spawn_inbox: None,
 			spawn_stub_locals: None,
 			spawned: HashMap::new(),
+			ending: None,
 			hold: None,
 			hold_max: None,
 			stepper: None,
@@ -2723,7 +2733,21 @@ impl Server {
 				.any(|instance| on(unsafe { (*instance).context }))
 	}
 
-	fn handle_eval(&mut self, frame_id: Option<u32>, command: &str) {
+	/// Suppress pauses during shutdown and reboot evaluations.
+	fn handle_eval_request(&mut self, frame_id: Option<u32>, command: &str, context: Option<&str>) {
+		let ending = context == Some(ENDING_CONTEXT);
+		if ending {
+			self.ending = Some(Instant::now());
+		}
+		let still_running = self.handle_eval(frame_id, command);
+		if ending && !still_running {
+			self.ending = None;
+		}
+	}
+
+	/// Evaluate and send the response. Return true if execution continues
+	/// after sleeping or moving to the background.
+	fn handle_eval(&mut self, frame_id: Option<u32>, command: &str) -> bool {
 		if let Some(command) = command.strip_prefix('#') {
 			let response = self.handle_command(frame_id, command);
 			self.send_or_disconnect(Response::Eval(Ok(EvalResponse {
@@ -2732,7 +2756,7 @@ impl Server {
 				kind: None,
 				entries: None
 			})));
-			return;
+			return false;
 		}
 
 		// Retain access expressions only for single expressions. Expanding
@@ -2744,8 +2768,10 @@ impl Server {
 			kind: Self::kind(&result),
 			entries: Self::entries(&result)
 		});
+		let still_running = matches!(&response, Err(error) if error.starts_with(EVAL_ABORTED));
 		self.send_callee_errors();
 		self.send_or_disconnect(Response::Eval(response));
+		still_running
 	}
 
 	/// What `Request::EvalOn` asks for: an expression with `src` an object
@@ -3243,7 +3269,7 @@ impl Server {
 				self.send_callee_errors();
 				self.send_or_disconnect(Response::SetVariable(result));
 			}
-			Request::Eval { frame_id, command, .. } => self.handle_eval(frame_id, &command),
+			Request::Eval { frame_id, command, context } => self.handle_eval_request(frame_id, &command, context.as_deref()),
 
 			Request::StackFrames {
 				stack_id,
@@ -3632,7 +3658,7 @@ impl Server {
 			}),
 			_ => self.has_debuggers() || self.hold.is_some()
 		};
-		if !wanted {
+		if !wanted || self.ending() {
 			return None;
 		}
 
@@ -3741,8 +3767,18 @@ impl Server {
 			}
 
 			// Hijack eval too so that we can refresh our state after it
-			if let Request::Eval { frame_id, command, .. } = request {
-				self.handle_eval(frame_id, &command);
+			if let Request::Eval { frame_id, command, context } = request {
+				self.handle_eval_request(frame_id, &command, context.as_deref());
+				// Resume so sleeping shutdown or reboot code can finish.
+				if self.ending() {
+					self.broadcast(Response::Resumed, None);
+					self.state = None;
+					self.paused = None;
+					self.hold = None;
+					self.hold_max = None;
+					self.stepper = None;
+					return Some(ContinueKind::Continue);
+				}
 				self.state.as_mut().unwrap().invalidate_stacks();
 				continue;
 			}
@@ -3941,6 +3977,18 @@ impl Server {
 			let _ = Self::send(&mut connection, &Response::Disconnect);
 		});
 		(outbox, writer)
+	}
+
+	/// Re-enable pauses after a sleeping world/Del() fails, or world/Reboot()
+	/// returns without rebooting.
+	pub fn world_carries_on(&mut self) {
+		self.ending = None;
+	}
+
+	/// Return whether a shutdown or reboot suppresses pauses. The time limit
+	/// covers worlds without launcher helpers to report declined reboots.
+	fn ending(&self) -> bool {
+		self.ending.is_some_and(|since| since.elapsed() < ENDING_LIMIT)
 	}
 
 	/// Notify clients of shutdown, disconnect them, and briefly wait for

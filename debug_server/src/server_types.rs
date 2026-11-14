@@ -11,6 +11,10 @@ pub const PROTOCOL_VERSION: u32 = 11;
 /// reboot.
 pub const WORLD_SHUTTING_DOWN: &str = "The world is shutting down";
 
+/// Evaluation context for shutdown and reboot. Resume the world and suppress
+/// pauses so sleeping code can finish. Older servers ignore this context.
+pub const ENDING_CONTEXT: &str = "ending";
+
 /// Display and lookup name for the unnamed global and static initializer proc.
 pub const GLOBAL_INIT: &str = "(global init)";
 
