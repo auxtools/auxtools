@@ -321,9 +321,9 @@ async function reconnectClients(session) {
 	}
 }
 
-// Reboot the active session's world without relaunching its process.
-async function reboot() {
-	const session = vscode.debug.activeDebugSession;
+// Reboot the given or active session without rebuilding or relaunching.
+async function reboot(given) {
+	const session = given && given.customRequest ? given : vscode.debug.activeDebugSession;
 	if (!session || session.type !== DEBUG_TYPE) {
 		vscode.window.showErrorMessage("No active auxtools debug session.");
 		return;
@@ -380,6 +380,11 @@ async function worldStarted(event) {
 	}
 }
 
+// Launchers before 3.0.4 omit `until`; treat that as requiring a rebuild.
+function rebootOnly(problem) {
+	return problem.until === "reboot";
+}
+
 // Status bar labels and tooltips by reload state.
 const STATES = {
 	reading: { text: "$(sync~spin) Reading source", tooltip: "Reading source for hot reload." },
@@ -389,6 +394,11 @@ const STATES = {
 	refused: {
 		text: "$(warning) Rebuild needed",
 		tooltip: "Rebuild required. See the Problems panel, then rebuild and restart.",
+		background: "statusBarItem.warningBackground",
+	},
+	held: {
+		text: "$(debug-restart) Reboot needed",
+		tooltip: "Reboot required. See the Problems panel, then reboot.",
 		background: "statusBarItem.warningBackground",
 	},
 	failed: { text: "$(error) Hot reload failed", tooltip: "The last hot reload failed: ", background: "statusBarItem.errorBackground" },
@@ -422,16 +432,20 @@ class ReloadStatus {
 		);
 	}
 
-	// Update the session's reload state and its outstanding refusals.
+	// Update the session's reload state and its held changes.
 	changed(event) {
-		const { state, summary, problems } = event.body;
+		const { summary, problems } = event.body;
+		let { state } = event.body;
+		if (state === "refused" && problems && problems.length && problems.every(rebootOnly)) {
+			state = "held";
+		}
 		const known = this.sessions.get(event.session.id) || {};
 		this.sessions.set(event.session.id, { state, summary, said: known.said, shown: known.shown });
 		this.refused(event.session, problems || []);
 		this.show();
 	}
 
-	// Show outstanding refusals in Problems, and notify once per distinct set.
+	// Show held changes in Problems and notify once per distinct set.
 	refused(session, problems) {
 		const known = this.sessions.get(session.id);
 		if (!problems.length) {
@@ -453,7 +467,7 @@ class ReloadStatus {
 			const line = Math.max((problem.line || 1) - 1, 0);
 			const diagnostic = new vscode.Diagnostic(
 				new vscode.Range(line, 0, line, 1000),
-				`${problem.message}. Rebuild required.`,
+				`${problem.message}. ${rebootOnly(problem) ? "Reboot" : "Rebuild"} required.`,
 				vscode.DiagnosticSeverity.Warning
 			);
 			diagnostic.source = "hot reload";
@@ -466,21 +480,30 @@ class ReloadStatus {
 			this.problems.set(uri, diagnostics);
 		}
 
-		const said = problems.map((problem) => problem.message).join("\n");
+		// Notify again if the required action changes.
+		const said = problems.map((problem) => `${problem.message} (${problem.until})`).join("\n");
 		if (!notifies("rebuild") || known.said === said) {
 			return;
 		}
 		known.said = said;
 		const more = problems.length > 1 ? ` (and ${problems.length - 1} more)` : "";
-		vscode.window
-			.showWarningMessage(`Rebuild required: ${problems[0].message}${more}. Restart after rebuilding.`, "Restart", "Show Problems")
-			.then((action) => {
-				if (action === "Restart") {
+		const shown = (message, button) =>
+			vscode.window.showWarningMessage(message, button, "Show Problems").then((action) => {
+				if (action === "Reboot") {
+					reboot(session);
+				} else if (action === "Rebuild and Restart") {
 					vscode.commands.executeCommand("workbench.action.debug.restart");
 				} else if (action === "Show Problems") {
 					vscode.commands.executeCommand("workbench.actions.view.problems");
 				}
 			});
+		if (problems.every(rebootOnly)) {
+			shown(`Reboot required: ${problems[0].message}${more}.`, "Reboot");
+		} else {
+			// Restart runs the configured preLaunchTask.
+			const first = problems.find((problem) => !rebootOnly(problem));
+			shown(`Rebuild required: ${first.message}${more}.`, "Rebuild and Restart");
+		}
 	}
 
 	show() {
@@ -528,7 +551,7 @@ async function worldMenu(status) {
 		{ label: "$(refresh) Reboot world", run: () => reboot() },
 		{ label: "$(debug-stop) Stop", run: () => vscode.commands.executeCommand("workbench.action.debug.stop") },
 	];
-	if (status.state(session).state === "refused") {
+	if (["refused", "held"].includes(status.state(session).state)) {
 		items.unshift({ label: "$(warning) Show Problems", run: () => vscode.commands.executeCommand("workbench.actions.view.problems") });
 	}
 	const picked = await vscode.window.showQuickPick(items, { placeHolder: session.name });

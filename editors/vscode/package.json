@@ -157,7 +157,7 @@
 						},
 						"rebuild": {
 							"type": "boolean",
-							"description": "Warn when hot reload cannot apply a change."
+							"description": "Warn when changes require a reboot or rebuild."
 						},
 						"outdated": {
 							"type": "boolean",

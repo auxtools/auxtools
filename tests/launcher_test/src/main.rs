@@ -6,6 +6,10 @@
 //! selects the host (default `dreamdaemon`, meaning dd.exe). DreamSeeker and
 //! windowed DreamDaemon need a display. `LAUNCHER_TEST_ARGS` overrides host
 //! arguments, including trusted-mode options.
+//!
+//! Arguments select groups (see `GROUPS`); no arguments runs all groups.
+//! `ATTACHED` groups share a world within one process. Parallel runs need
+//! separate copies of `tests`, since each run builds its worlds in place.
 
 // The debug client, which dap_test uses more of
 #[allow(dead_code)]
@@ -21,7 +25,10 @@ use std::{
 	io::{BufRead, BufReader, Read},
 	path::{Path, PathBuf},
 	process::{Child, Command, Stdio},
-	sync::{Arc, Mutex},
+	sync::{
+		atomic::{AtomicBool, Ordering},
+		Arc, Mutex
+	},
 	time::{Duration, Instant}
 };
 
@@ -87,7 +94,28 @@ fn at_runtime(launcher: &mut Launcher) {
 	launcher.resume();
 }
 
+/// Test groups in execution order.
+const GROUPS: &[&str] = &[
+	"launch",
+	"attach",
+	"inspect",
+	"inspect_breakpoints",
+	"inspect_spawned",
+	"trace",
+	"journal",
+	"edited",
+	"command_line",
+	"builds"
+];
+
+/// Groups sharing the attached world.
+const ATTACHED: &[&str] = &["attach", "inspect", "inspect_breakpoints", "inspect_spawned", "trace", "journal"];
+
 fn main() {
+	let wanted: Vec<String> = std::env::args().skip(1).collect();
+	for name in &wanted {
+		assert!(GROUPS.contains(&name.as_str()), "unknown group {}; available groups: {:?}", name, GROUPS);
+	}
 	let res = Command::new(paths::find_dm())
 		.with_byond_paths()
 		.arg(host_file("launcher_test_host.dme"))
@@ -96,6 +124,59 @@ fn main() {
 	assert!(res.success(), "dreammaker build failed");
 	let _ = std::fs::remove_file(host_file("rebooted"));
 
+	let server = client::server();
+	let library = library_path();
+	let mut attached: Option<Attached> = None;
+	for group in GROUPS {
+		if !wanted.is_empty() && !wanted.iter().any(|w| w == group) {
+			continue;
+		}
+		println!("--- {}", group);
+		if !ATTACHED.contains(group) {
+			if let Some(world) = attached.take() {
+				world.finish();
+			}
+		}
+		if ATTACHED.contains(group) && attached.is_none() {
+			attached = Some(attach_and_reload(&server, &library));
+		}
+		match (*group, &attached) {
+			("launch", _) => launch(&server, &library),
+			("attach", Some(world)) => {
+				command_line(world.pid, &world.code);
+				command_line_more(world.pid, &world.dir);
+			}
+			("inspect", Some(world)) => inspect::evaluations(world.pid, &world.dir, &world.code),
+			("inspect_breakpoints", Some(world)) => inspect::breakpoints(world.pid, &world.dir, &world.code),
+			("inspect_spawned", Some(world)) => inspect::spawned_and_steps(world.pid, &world.dir, &world.code),
+			("trace", Some(world)) => {
+				command_line_trace(world.pid, &world.code);
+				journal::runtimes(world.pid, &world.dir);
+			}
+			("journal", Some(world)) => {
+				journal::reloads(world.pid, &world.code);
+				journal::hold_max(world.pid);
+				journal::reboot(world.pid, &world.dir);
+			}
+			("edited", _) => edited_after_build(&server),
+			("command_line", _) => launch_from_the_command_line(&server),
+			("builds", _) => {
+				without_debug_info(&server);
+				unread_statics(&server);
+				errored_baseline(&server);
+				dmb_elsewhere(&server);
+			}
+			_ => unreachable!("group {} has no world", group)
+		}
+	}
+	if let Some(world) = attached.take() {
+		world.finish();
+	}
+	println!("all ok");
+}
+
+/// Launch, protocol compatibility and breakpoint persistence across reboot.
+fn launch(server: &str, library: &Path) {
 	command_line_shape();
 	another_version();
 	no_debugger();
@@ -103,8 +184,6 @@ fn main() {
 	let mut launcher = Launcher::start();
 	launcher.initialize();
 
-	let server = client::server();
-	let library = library_path();
 	launcher.request(
 		"launch",
 		json!({
@@ -163,15 +242,6 @@ fn main() {
 	launcher.disconnect(json!({}));
 	println!("ok: launcher exit");
 	let _ = std::fs::remove_file(host_file("rebooted"));
-
-	attach_and_reload(&server, &library);
-	edited_after_build(&server);
-	launch_from_the_command_line(&server);
-	without_debug_info(&server);
-	unread_statics(&server);
-	errored_baseline(&server);
-	dmb_elsewhere(&server);
-	println!("all ok");
 }
 
 /// The command line, a command at a time: each connects, does it and leaves,
@@ -518,30 +588,22 @@ fn protocol(version: &str) -> u32 {
 /// stand-in is a BYOND server with no debug library, and this test listening
 /// where the library of the version before ours would.
 fn another_version() {
-	use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
-
-	let mut plain = Command::new(paths::find_dreamdaemon())
-		.with_byond_paths()
-		.arg(host_file("launcher_test_host.dmb"))
-		.args(test_args().unwrap_or_else(|| vec!["-trusted".to_owned()]))
-		.stdout(std::process::Stdio::null())
-		.stderr(std::process::Stdio::null())
-		.spawn()
-		.unwrap();
+	let (dir, dme) = attach_host_copy("another_version");
+	let mut plain = KilledOnDrop(
+		Command::new(paths::find_dreamdaemon())
+			.with_byond_paths()
+			.arg(dme.with_extension("dmb"))
+			.args(test_args().unwrap_or_else(|| vec!["-trusted".to_owned()]))
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null())
+			.spawn()
+			.unwrap()
+	);
 	let pid = plain.id();
 	let ours = protocol(&launcher_command(&["version"]).1);
 	let theirs = ours - 1;
-	let name = format!("auxtools-debug-v{}-{}", theirs, pid);
-	let listener = ListenerOptions::new()
-		.name(name.to_ns_name::<GenericNamespaced>().unwrap())
-		.create_sync()
-		.unwrap();
 	// Whoever connects is let in, and told nothing
-	std::thread::spawn(move || {
-		for client in listener.incoming() {
-			drop(client);
-		}
-	});
+	let stand_in = StandIn::listen(format!("auxtools-debug-v{}-{}", theirs, pid), drop);
 
 	let (code, list) = launcher_command(&["list", "--json"]);
 	assert_eq!(code, 0, "{}", list);
@@ -588,9 +650,93 @@ fn another_version() {
 		"attaching to another version's world said {}",
 		printed
 	);
+	// Release the listener before the PID can be reused.
+	drop(stand_in);
 	let _ = plain.kill();
 	let _ = plain.wait();
+	let _ = std::fs::remove_dir_all(&dir);
 	println!("ok: incompatible protocol discovery and attach rejection");
+}
+
+/// Mock debugger listener, closed on drop to prevent stale responses when
+/// Wine reuses the world's PID.
+struct StandIn {
+	name: String,
+	done: Arc<AtomicBool>,
+	listening: Option<std::thread::JoinHandle<()>>
+}
+
+impl StandIn {
+	fn listen(name: String, answer: fn(interprocess::local_socket::Stream)) -> Self {
+		use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+		let listener = ListenerOptions::new()
+			.name(name.clone().to_ns_name::<GenericNamespaced>().unwrap())
+			.create_sync()
+			.unwrap();
+		let done = Arc::new(AtomicBool::new(false));
+		let stop = done.clone();
+		let listening = std::thread::spawn(move || {
+			for client in listener.incoming().flatten() {
+				if stop.load(Ordering::SeqCst) {
+					return;
+				}
+				std::thread::spawn(move || answer(client));
+			}
+		});
+		StandIn {
+			name,
+			done,
+			listening: Some(listening)
+		}
+	}
+}
+
+impl Drop for StandIn {
+	fn drop(&mut self) {
+		use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream};
+		self.done.store(true, Ordering::SeqCst);
+		// Wake the listener so it sees the stop flag. Windows pipes can miss
+		// clients that disconnect before acceptance, so retry until it exits.
+		let Some(listening) = self.listening.take() else {
+			return;
+		};
+		let deadline = Instant::now() + Duration::from_secs(10);
+		while !listening.is_finished() && Instant::now() < deadline {
+			if let Ok(name) = self.name.clone().to_ns_name::<GenericNamespaced>() {
+				let _ = Stream::connect(name);
+			}
+			std::thread::sleep(Duration::from_millis(20));
+		}
+		if listening.is_finished() {
+			let _ = listening.join();
+		}
+	}
+}
+
+/// Kill and reap the child on drop, including after a failed assertion.
+/// `Child::kill` leaves an already reaped process alone, even if its PID is
+/// reused.
+struct KilledOnDrop(Child);
+
+impl std::ops::Deref for KilledOnDrop {
+	type Target = Child;
+
+	fn deref(&self) -> &Child {
+		&self.0
+	}
+}
+
+impl std::ops::DerefMut for KilledOnDrop {
+	fn deref_mut(&mut self) -> &mut Child {
+		&mut self.0
+	}
+}
+
+impl Drop for KilledOnDrop {
+	fn drop(&mut self) {
+		let _ = self.0.kill();
+		let _ = self.0.wait();
+	}
 }
 
 /// An unavailable debugger reports its initialization failure once and
@@ -598,32 +744,28 @@ fn another_version() {
 /// allow stop to terminate the world.
 fn no_debugger() {
 	use auxtools_cli::{local, server_types::Response};
-	use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
 
 	const WHY: &str = "Couldn't find current_execution_context (BYOND 516.1600 is outside the checked range 1637..=1688)";
-	let mut plain = Command::new(paths::find_dreamdaemon())
-		.with_byond_paths()
-		.arg(host_file("launcher_test_host.dmb"))
-		.args(test_args().unwrap_or_else(|| vec!["-trusted".to_owned()]))
-		.stdout(std::process::Stdio::null())
-		.stderr(std::process::Stdio::null())
-		.spawn()
-		.unwrap();
+	// The normal host can exit before these checks finish or leave a reboot
+	// marker if killed mid-reboot. This host runs until explicitly stopped.
+	let (dir, dme) = attach_host_copy("no_debugger");
+	let mut plain = KilledOnDrop(
+		Command::new(paths::find_dreamdaemon())
+			.with_byond_paths()
+			.arg(dme.with_extension("dmb"))
+			.args(test_args().unwrap_or_else(|| vec!["-trusted".to_owned()]))
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null())
+			.spawn()
+			.unwrap()
+	);
 	let pid = plain.id();
-	let listener = ListenerOptions::new()
-		.name(local::world_name(pid).to_ns_name::<GenericNamespaced>().unwrap())
-		.create_sync()
-		.unwrap();
 	// Match the debug library's initialization-failure response; keep the
 	// connection until the client closes it.
-	std::thread::spawn(move || {
-		for mut client in listener.incoming().flatten() {
-			std::thread::spawn(move || {
-				let _ = local::send(&mut client, &Response::Unavailable { reason: WHY.to_owned() });
-				let _ = local::send(&mut client, &Response::Disconnect);
-				let _ = std::io::copy(&mut client, &mut std::io::sink());
-			});
-		}
+	let stand_in = StandIn::listen(local::world_name(pid), |mut client| {
+		let _ = local::send(&mut client, &Response::Unavailable { reason: WHY.to_owned() });
+		let _ = local::send(&mut client, &Response::Disconnect);
+		let _ = std::io::copy(&mut client, &mut std::io::sink());
 	});
 
 	let mut launcher = Launcher::start();
@@ -673,12 +815,15 @@ fn no_debugger() {
 		"stop said {}",
 		printed
 	);
+	// Release the listener before the PID can be reused.
+	drop(stand_in);
 	let deadline = Instant::now() + Duration::from_secs(10);
 	while plain.try_wait().unwrap().is_none() {
 		assert!(Instant::now() < deadline, "the world is still running after stop");
 		std::thread::sleep(Duration::from_millis(100));
 	}
 	println!("ok: stop without debugger");
+	let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The rest of the command line: the other steps, the stacks, a frame's
@@ -1181,9 +1326,17 @@ fn line_of(file: &Path, text: &str) -> u64 {
 	source.lines().position(|line| line.starts_with(text)).expect("no such line") as u64 + 1
 }
 
-/// A world launched without debugging, found with `--list`, attached to by
-/// two launchers at once, and hot reloaded by the one that launched it
-fn attach_and_reload(server: &str, library: &Path) {
+/// Shared test world and its launcher.
+struct Attached {
+	runner: Launcher,
+	pid: u64,
+	dir: PathBuf,
+	code: PathBuf
+}
+
+/// Launch and discover a world, attach two launchers, then reload its code
+/// to return 2 instead of 1.
+fn attach_and_reload(server: &str, library: &Path) -> Attached {
 	let (dir, dme) = attach_host_copy("attach");
 	let code = dir.join("attach_host.dm");
 
@@ -1257,60 +1410,58 @@ fn attach_and_reload(server: &str, library: &Path) {
 	let seen = runner.output.matches("attach test: 2").count();
 	runner.wait_count("attach test: 2", seen + 2);
 	println!("ok: attached-session disconnect preserves world");
+	Attached { runner, pid, dir, code }
+}
 
-	command_line(pid, &code);
-	command_line_more(pid, &dir);
-	inspect::command_line_inspect(pid, &dir, &code);
-	command_line_trace(pid, &code);
-	journal::runtimes(pid, &dir);
-	journal::reloads(pid, &code);
-	journal::hold_max(pid);
-	journal::reboot(pid, &dir);
+impl Attached {
+	/// Check attachment while paused and trace termination, then stop the
+	/// world.
+	fn finish(self) {
+		let Attached { mut runner, pid, dir, .. } = self;
+		// Newly attached launchers receive the existing pause.
+		let (code_given, printed) = launcher_command(&["--pid", &pid.to_string(), "pause"]);
+		assert_eq!(code_given, 0, "unexpected pause output: {}", printed);
+		let mut late = Launcher::start();
+		late.initialize();
+		late.request("attach", json!({ "processId": pid.to_string() }));
+		late.event("initialized");
+		late.request("configurationDone", json!({}));
+		late.stopped("pause");
+		late.resume();
+		late.disconnect(json!({}));
+		println!("ok: attach to a retained pause");
+		let seen = runner.output.matches("attach test: 2").count();
+		runner.wait_count("attach test: 2", seen + 1);
+		println!("ok: CLI resume");
 
-	// A launcher that attaches to a world that's paused hears it is
-	let (code_given, printed) = launcher_command(&["--pid", &pid.to_string(), "pause"]);
-	assert_eq!(code_given, 0, "unexpected pause output: {}", printed);
-	let mut late = Launcher::start();
-	late.initialize();
-	late.request("attach", json!({ "processId": pid.to_string() }));
-	late.event("initialized");
-	late.request("configurationDone", json!({}));
-	late.stopped("pause");
-	late.resume();
-	late.disconnect(json!({}));
-	println!("ok: attach to a retained pause");
-	let seen = runner.output.matches("attach test: 2").count();
-	runner.wait_count("attach test: 2", seen + 1);
-	println!("ok: CLI resume");
-
-	let waiting = journal::wait_for_reboot(pid);
-	// A trace with no end of its own ends with the world, and says what it
-	// counted
-	let tracing = Command::new(client::launcher_path())
-		.args(["--pid", &pid.to_string(), "trace", "/proc/value", "--by", "caller"])
-		.stdout(Stdio::piped())
-		.stderr(Stdio::piped())
-		.spawn()
-		.unwrap();
-	let seen = runner.output.matches("attach test: 2").count();
-	runner.wait_count("attach test: 2", seen + 2);
-	std::fs::write(dir.join("stop"), "yes").unwrap();
-	let traced = tracing.wait_with_output().unwrap();
-	let (out, err) = (String::from_utf8_lossy(&traced.stdout), String::from_utf8_lossy(&traced.stderr));
-	assert_eq!(traced.status.code(), Some(3), "unexpected trace output: {}{}", out, err);
-	assert!(
-		out.contains("; ended: world\n") && err.starts_with("error: world connection ended before the operation completed"),
-		"unexpected trace output: {}{}",
-		out,
-		err
-	);
-	println!("ok: world exit ends trace with code 3");
-	runner.event("terminated");
-	journal::world_went_away(waiting);
-	assert!(runner.output.contains("attach test: done"), "world did not complete the test");
-	runner.disconnect(json!({}));
-	println!("ok: world and launcher exit");
-	let _ = std::fs::remove_dir_all(&dir);
+		let waiting = journal::wait_for_reboot(pid);
+		// An open-ended trace reports its counts when the world exits.
+		let tracing = Command::new(client::launcher_path())
+			.args(["--pid", &pid.to_string(), "trace", "/proc/value", "--by", "caller"])
+			.stdout(Stdio::piped())
+			.stderr(Stdio::piped())
+			.spawn()
+			.unwrap();
+		let seen = runner.output.matches("attach test: 2").count();
+		runner.wait_count("attach test: 2", seen + 2);
+		std::fs::write(dir.join("stop"), "yes").unwrap();
+		let traced = tracing.wait_with_output().unwrap();
+		let (out, err) = (String::from_utf8_lossy(&traced.stdout), String::from_utf8_lossy(&traced.stderr));
+		assert_eq!(traced.status.code(), Some(3), "unexpected trace output: {}{}", out, err);
+		assert!(
+			out.contains("; ended: world\n") && err.starts_with("error: world connection ended before the operation completed"),
+			"unexpected trace output: {}{}",
+			out,
+			err
+		);
+		println!("ok: world exit ends trace with code 3");
+		runner.event("terminated");
+		journal::world_went_away(waiting);
+		assert!(runner.output.contains("attach test: done"), "world did not complete the test");
+		runner.disconnect(json!({}));
+		println!("ok: world and launcher exit");
+		let _ = std::fs::remove_dir_all(&dir);
+	}
 }
 
 /// A copy of the world that runs until told to stop, built, in a directory of

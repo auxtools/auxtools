@@ -77,7 +77,8 @@ follow the [attach behavior](#attach-to-a-running-world) below.
 **Restart** runs the configuration's `preLaunchTask`, then reboots the world
 with `world.Reboot()`. The process and port stay the same, players reconnect,
 and the world loads the `.dmb` and restores reloads. A build task can therefore
-rebuild the world before it reboots.
+rebuild the world before it reboots. To skip the build task, use **auxtools:
+Reboot world** or the hot reload notification's **Reboot**.
 
 If launch settings changed or the debugger disconnected, Restart stops the
 old process and launches a replacement. **auxtools: Reboot world** skips the
@@ -237,11 +238,20 @@ Debugging**. The status bar shows reload progress and results; click it for
 join, reconnect, restart, reboot and stop actions. The Debug Console reports
 each reload.
 
-Unsupported changes appear at their source lines in the Problems panel.
-The notification offers **Restart**, which runs `preLaunchTask` before
-restarting. The launcher does not build the world itself: configure a build
-task or rebuild manually. Startup warnings also identify files newer than
-the `.dmb`, whose edits may be missing from the world.
+Changes requiring a reboot or rebuild hold the save and subsequent code
+edits. The Problems panel shows their source locations, and a notification
+offers the required action:
+
+- **Reboot required**: changed initializers of existing globals and statics.
+  **Reboot** applies them without running `preLaunchTask`.
+- **Rebuild required**: unsupported changes, code hot reload can't compile,
+  and changed world or client settings stored in the `.dmb`.
+  **Rebuild and Restart** runs `preLaunchTask`, then restarts. Configure a
+  build task or rebuild manually; the launcher does not build the world.
+
+Fixing or reverting a blocking change applies the remaining edits.
+Startup warnings also identify files newer than the `.dmb`, whose edits may
+be missing from the world.
 
 After reboot, reloads are restored before world code runs. Reloads introducing
 resources absent from the build wait until `world/New`, so map atoms run the
@@ -270,9 +280,9 @@ copied quirks are reported as warnings.
 Active calls finish on their original code. Existing instances retain their
 verbs and built-in values. Computed defaults apply to new instances; new
 computed vars are null on existing instances, including their `initial()`
-values, until restart. Running globals and statics keep their values when
-initializers change. Changed world settings and client settings stored in the
-world record, such as `client.control_freak`, take effect after restart.
+values, until restart. Changed initializers of globals and statics wait for a
+reboot, and changed world settings and client settings stored in the world
+record, such as `client.control_freak`, for a rebuild (see above).
 
 Breakpoints follow statements after edits from VS Code, other editors or checkouts.
 The VS Code extension reports unsaved files to the launcher. Other DAP clients
@@ -372,7 +382,7 @@ for attach sessions to avoid competing with the launching session's reloads.
 - `auxtools.notifications`: set any category to `false` to hide its notifications:
   - `reconnect`: reconnect players after a skin or script reload.
   - `join`: join offers when not joined automatically; copy the address if DreamSeeker is unavailable.
-  - `rebuild`: changes that hot reload cannot apply.
+  - `rebuild`: changes requiring a reboot or rebuild.
   - `outdated`: edits that may be missing from the build.
 
 ## License

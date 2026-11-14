@@ -578,6 +578,103 @@ var/rb_late = rb_a
 	return list(H.held, 'lamp.dmi')
 ";
 
+/// The held changes the launcher last reported, as (message, until)
+fn held_changes(world: &mut World) -> Vec<(String, String)> {
+	let state = last_reload_state(world);
+	let mut held: Vec<(String, String)> = state["problems"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.map(|p| (p["message"].as_str().unwrap().to_owned(), p["until"].as_str().unwrap().to_owned()))
+		.collect();
+	held.sort();
+	held
+}
+
+/// Save an edit and wait for the held-reload report.
+fn edit_held(world: &mut World, file: &str, old: &str, new: &str) {
+	let said = |output: &str| output.matches("Hot reload requires a reboot:").count() + output.matches("Hot reload requires a rebuild:").count();
+	let before = said(&world.output);
+	world.marks.edit(file, old, new);
+	world.wait_until("the held reload", |output| said(output) > before);
+}
+
+/// Hold code edits until blocking changes are applied or reverted.
+fn held_until_reboot() {
+	let dir = copy_of_the_world("held_until_reboot");
+	std::fs::write(dir.join("held_b.dm"), "#define HELD_K 1\n\n/proc/held_b()\n\treturn 1\n").unwrap();
+	std::fs::write(
+		dir.join("held.dm"),
+		"var/held_n = 1\nvar/held_k = HELD_K + 1\n\n/proc/held_value()\n\treturn 1\n"
+	)
+	.unwrap();
+	let dme = dir.join("dap_test_host.dme");
+	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"held_b.dm\"\n#include \"held.dm\"\n";
+	std::fs::write(&dme, text).unwrap();
+	let built = Command::new(crate::paths::find_dm()).with_byond_paths().arg(&dme).status().unwrap();
+	assert!(built.success(), "dreammaker build of {} failed", dir.display());
+	let mut world = World::launch_in(dir.clone(), json!({ "hotReload": true }));
+	world.catch_runtimes(false);
+	world.configure();
+	world.wait_output("Hot reload active");
+	let values = "\"[held_n] [held_value()]\"";
+	let held = |message: &str, until: &str| vec![(message.to_owned(), until.to_owned())];
+
+	// A proc's code and a global's initializer, saved together
+	edit_held(
+		&mut world,
+		"held.dm",
+		"var/held_n = 1\nvar/held_k = HELD_K + 1\n\n/proc/held_value()\n\treturn 1\n",
+		"var/held_n = 2\nvar/held_k = HELD_K + 1\n\n/proc/held_value()\n\treturn 2\n"
+	);
+	assert_eq!(held_changes(&mut world), held("(global): held_n: changed initializer", "reboot"));
+	assert!(world.output.contains("Hot reload requires a reboot:"), "{}", world.output);
+	assert_eq!(world.eval_global(values), "\"1 1\"");
+	ok("held save preserves running code");
+
+	// The initializer as built again: the proc's code applies
+	edit(&mut world, "held.dm", "var/held_n = 2\n", "var/held_n = 1\n");
+	assert_eq!(world.eval_global(values), "\"1 2\"");
+	assert_eq!(held_changes(&mut world), []);
+	ok("reverted initializer releases pending edits");
+
+	// Later saves wait for the same reboot.
+	edit_held(&mut world, "held.dm", "var/held_n = 1\n", "var/held_n = 3\n");
+	edit_held(&mut world, "held.dm", "\treturn 2\n", "\treturn 4\n");
+	assert_eq!(world.eval_global(values), "\"1 2\"");
+	reboot(&mut world, 2);
+	assert_eq!(world.eval_global(values), "\"3 4\"");
+	assert_eq!(held_changes(&mut world), []);
+	ok("reboot applies held changes");
+
+	// Held edits in another file apply when the blocker is reverted.
+	edit_held(&mut world, "held.dm", "var/held_n = 3\n", "var/held_n = 5\n");
+	edit_held(&mut world, "held_b.dm", "\treturn 1\n", "\treturn 6\n");
+	assert_eq!(world.eval_global("held_b()"), "1");
+	assert_eq!(held_changes(&mut world), held("(global): held_n: changed initializer", "reboot"));
+	edit(&mut world, "held.dm", "var/held_n = 5\n", "var/held_n = 3\n");
+	assert_eq!(world.eval_global("held_b()"), "6");
+	assert_eq!(held_changes(&mut world), []);
+	ok("held edits span files");
+
+	// Reverting a macro clears problems in files that use it.
+	edit_held(&mut world, "held_b.dm", "#define HELD_K 1\n", "#define HELD_K 2\n");
+	assert_eq!(held_changes(&mut world), held("(global): held_k: changed initializer", "reboot"));
+	edit_nothing_to_run(&mut world, "held_b.dm", "#define HELD_K 2\n", "#define HELD_K 1\n");
+	assert_eq!(held_changes(&mut world), []);
+	ok("reverted macro clears dependent problems");
+
+	// A world setting waits for a rebuild; saved back as built, nothing waits
+	edit_held(&mut world, "held.dm", "var/held_n = 3\n", "var/held_n = 3\n\n/world\n\tfps = 25\n");
+	assert_eq!(held_changes(&mut world), held("/world: fps: changed setting", "rebuild"));
+	assert!(world.output.contains("Hot reload requires a rebuild:"), "{}", world.output);
+	edit_nothing_to_run(&mut world, "held.dm", "\n\n/world\n\tfps = 25\n", "\n");
+	assert_eq!(held_changes(&mut world), []);
+	ok("world setting requires rebuild");
+	world.end();
+	let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Save a source change with no immediate runtime effect.
 fn edit_nothing_to_run(world: &mut World, file: &str, old: &str, new: &str) {
 	let before = world.count("Hot reload: no changes to the running code");
@@ -585,10 +682,8 @@ fn edit_nothing_to_run(world: &mut World, file: &str, old: &str, new: &str) {
 	world.wait_count("Hot reload: no changes to the running code", before + 1);
 }
 
-/// Running globals and statics retain their values. After reboot, run
-/// changed initializers once, in the build's order, before map creation.
-/// Cover dependent globals, additions, constructor side effects and
-/// type/proc statics, then repeat after another reboot.
+/// Held initializers run once per reboot, in build order, before map creation.
+/// Cover dependencies, additions, constructor effects and type/proc statics.
 fn initializers_after_reboot() {
 	let dir = copy_of_the_world("initializers_after_reboot");
 	std::fs::write(dir.join("inits.dm"), INITIALIZERS).unwrap();
@@ -608,16 +703,32 @@ fn initializers_after_reboot() {
 	world.configure();
 	world.wait_output("Hot reload active");
 	const VALUES: &str = "\"[rb_a] [rb_b] [rb_news] [rb_made.n] [(new /datum/rb_static).s] [rb_local()] [rb_c] [rb_seen]\"";
-	// Only initializers changed; no immediate runtime effect.
-	edit_nothing_to_run(&mut world, "inits.dm", "var/rb_a = 5\n", "var/rb_a = 7\n");
-	edit_nothing_to_run(&mut world, "inits.dm", "new(1)", "new(2)");
-	edit_nothing_to_run(&mut world, "inits.dm", "\tvar/static/s = rb_a + 1\n", "\tvar/static/s = rb_a + 10\n");
-	edit(&mut world, "inits.dm", "\tvar/static/l = rb_a + 2\n", "\tvar/static/l = rb_a + 20\n");
-	edit(&mut world, "inits.dm", "var/rb_news = 0\n", "var/rb_news = 0\nvar/rb_c = rb_late_set()\n");
-	assert_eq!(world.eval_global(VALUES), "\"5 10 1 1 6 7 set 10\"");
+	// Existing initializers and later additions wait for reboot.
+	edit_held(&mut world, "inits.dm", "var/rb_a = 5\n", "var/rb_a = 7\n");
+	edit_held(&mut world, "inits.dm", "new(1)", "new(2)");
+	edit_held(&mut world, "inits.dm", "\tvar/static/s = rb_a + 1\n", "\tvar/static/s = rb_a + 10\n");
+	edit_held(&mut world, "inits.dm", "\tvar/static/l = rb_a + 2\n", "\tvar/static/l = rb_a + 20\n");
+	edit_held(&mut world, "inits.dm", "var/rb_news = 0\n", "var/rb_news = 0\nvar/rb_c = rb_late_set()\n");
+	let held: Vec<String> = held_changes(&mut world).into_iter().map(|(message, _)| message).collect();
+	assert_eq!(
+		held,
+		[
+			"(global): rb_a: changed initializer",
+			"(global): rb_made: changed initializer",
+			"/datum/rb_static: s: changed initializer",
+			"/proc/rb_local: l: changed initializer"
+		],
+		"held"
+	);
+	assert_eq!(
+		world.eval_global("\"[rb_a] [rb_b] [rb_news] [rb_made.n] [(new /datum/rb_static).s] [rb_local()] [rb_seen]\""),
+		"\"5 10 1 1 6 7 10\""
+	);
+	ok("changed initializers held until reboot");
 	for count in 2..=3 {
 		reboot(&mut world, count);
 		assert_eq!(world.eval_global(VALUES), "\"7 14 1 2 17 27 null 14\"", "after reboot {}", count - 1);
+		assert_eq!(held_changes(&mut world), [], "after reboot {}", count - 1);
 	}
 	ok("updated global initialization after reboot");
 	// A new resource defers restoration until world/New. New proc statics
@@ -679,7 +790,7 @@ fn initializer_added_to_a_world_without() {
 		"var/bare_n = 1\n",
 		"var/bare_n = 1\nvar/list/bare_list = list(bare_n, 2)\n"
 	);
-	edit_nothing_to_run(&mut world, "bare.dm", "var/bare_n = 1\n", "var/bare_n = 3\n");
+	edit_held(&mut world, "bare.dm", "var/bare_n = 1\n", "var/bare_n = 3\n");
 	assert_eq!(world.eval_global("\"[bare_n] [length(bare_list)] [bare_list[1]]\""), "\"1 2 1\"");
 	for count in 2..=3 {
 		let restarts = world.count("The world restarted");
@@ -833,20 +944,28 @@ fn nothing_to_run() {
 	let _ = std::fs::remove_dir_all(&dir);
 }
 
-pub fn run() {
+/// Code and type edits tested in separate worlds, including held reloads.
+pub fn edits() {
+	held_until_reboot();
 	saved_without_reloading();
 	built_in_taken_away();
 	behind_the_clients_back();
 	starting_at_world_new();
 	parent_changed_alone();
 	types_changed_before_reboot();
+}
+
+/// Initializer, file and resource reloads tested in separate worlds.
+pub fn files() {
 	override_restored_before_map();
 	initializers_after_reboot();
 	initializer_added_to_a_world_without();
 	file_named_by_a_reload();
 	resource_files();
 	nothing_to_run();
+}
 
+pub fn run() {
 	let dir = copy_of_the_world("reloading");
 	let mut world = World::launch_as(json!({ "supportsInvalidatedEvent": true }), dir.clone(), json!({ "hotReload": true }));
 	world.catch_runtimes(false);
@@ -1107,7 +1226,7 @@ pub fn run() {
 	world.drop_events("breakpoint");
 	ok("rejected reload preserves code and breakpoints");
 
-	// A refusal outlasts reloads of other files, until its own file reloads.
+	// Fixing a refusal releases pending edits in other files.
 	let before = world.count("Hot reload requires a rebuild");
 	world.drop_events("auxtoolsReload");
 	world
@@ -1116,8 +1235,7 @@ pub fn run() {
 	world.wait_count("Hot reload requires a rebuild", before + 1);
 	let refused = last_reload_state(&mut world);
 	assert_eq!(refused["state"], "refused", "{}", refused);
-	// A proc body edit reloads only its file.
-	edit(&mut world, "errors.dm", "return fail_null() + 1", "return fail_null() + 2");
+	edit_held(&mut world, "errors.dm", "return fail_null() + 1", "return fail_null() + 2");
 	let still = last_reload_state(&mut world);
 	assert_eq!(
 		(&still["state"], &still["problems"]),
@@ -1125,11 +1243,20 @@ pub fn run() {
 		"{}",
 		still
 	);
+	let reloaded = reloads(&world.output);
 	world.marks.edit("stepping.dm", "/mob/refused\n\tckey = \"someone\"\n\n", "");
+	world.wait_until("the held reload", |output| reloads(output) > reloaded);
+	let last = world
+		.output
+		.lines()
+		.rfind(|line| line.starts_with("Hot reload: ") && line.ends_with(" ms"))
+		.unwrap()
+		.to_owned();
+	assert!(last.contains("/fail_deep"), "the fix's reload: {}", last);
 	let fixed = last_reload_state(&mut world);
 	assert_eq!(fixed["problems"], json!([]), "{}", fixed);
 	edit(&mut world, "errors.dm", "return fail_null() + 2", "return fail_null() + 1");
-	ok("refusal outlasts unrelated reloads");
+	ok("refusal holds edits in other files");
 
 	// The next world is loaded from the .dmb, and gets the reloads again
 	world.break_on(&["leaf_2"]);
