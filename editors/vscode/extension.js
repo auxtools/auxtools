@@ -351,7 +351,7 @@ async function join(session) {
 		return;
 	}
 	try {
-		const joined = await session.customRequest("auxtoolsJoin", { closeWithWorld: settings().get("closeDreamSeeker") });
+		const joined = await session.customRequest("auxtoolsJoin", { open: true, closeWithWorld: settings().get("closeDreamSeeker") !== false });
 		if (!joined.opened) {
 			await offerAddress(joined.address, false);
 		}

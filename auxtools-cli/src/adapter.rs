@@ -567,8 +567,12 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 	adapter.joined.world_ended();
 }
 
+/// Treat omitted or null request arguments as an empty object.
 fn arguments<T: for<'de> Deserialize<'de>>(arguments: Option<Value>) -> Result<T, String> {
-	serde_json::from_value(arguments.unwrap_or(Value::Null)).map_err(|e| format!("bad arguments: {}", e))
+	let arguments = arguments
+		.filter(|arguments| !arguments.is_null())
+		.unwrap_or_else(|| Value::Object(Default::default()));
+	serde_json::from_value(arguments).map_err(|e| format!("bad arguments: {}", e))
 }
 
 fn json(value: impl serde::Serialize) -> Handled {
@@ -2971,6 +2975,13 @@ mod tests {
 	use auxtools_cli::server_types::{HitCondition, LogPart, RuntimeFilter};
 
 	use super::{changes_things, completion_place, hover_refuses, instruction_window, named_proc, parse_address, runtime_place, shown};
+
+	// VS Code may omit arguments when every property is undefined.
+	#[test]
+	fn missing_arguments_are_empty() {
+		assert!(super::arguments::<super::join::JoinArguments>(None).is_ok());
+		assert!(super::arguments::<super::join::JoinArguments>(Some(serde_json::Value::Null)).is_ok());
+	}
 
 	#[test]
 	fn byond_says_where_a_runtime_error_was() {
