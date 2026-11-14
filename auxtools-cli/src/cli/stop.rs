@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use auxtools_cli::{
 	local,
-	server_types::{Reconnected, Request, Response}
+	server_types::{Reconnected, Request, Response, ENDING_CONTEXT}
 };
 use serde_json::json;
 
@@ -18,12 +18,13 @@ const INTERVAL: Duration = Duration::from_millis(50);
 /// Prefix identifying an evaluation's runtime error.
 const RUNTIME_ERROR: &str = "runtime error: ";
 
-/// Has the world evaluate `expression`, without waiting for an answer
+/// Send world.Del() or world.Reboot() without waiting for a response.
+/// Resume paused worlds so sleeping shutdown code can finish.
 fn ask(world: &mut World, expression: &str) -> Result<()> {
 	let request = Request::Eval {
 		frame_id: None,
 		command: expression.to_owned(),
-		context: None
+		context: Some(ENDING_CONTEXT.to_owned())
 	};
 	local::send(&mut world.stream, &request).map_err(|_| super::hung_up())
 }

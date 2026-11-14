@@ -79,9 +79,18 @@ const HELPER_PROCS: &str = r#"
 /proc/auxtools_launched_world_reboot()
 	CRASH("the debugger's library isn't loaded")
 
+/proc/auxtools_launched_world_reboot_declined()
+	CRASH("the debugger's library isn't loaded")
+
 /world/Reboot()
 	auxtools_launched_world_reboot()
-	return ..()
+	try
+		. = ..()
+	catch(var/exception/e)
+		auxtools_launched_world_reboot_declined()
+		throw e
+	// Successful reboots do not return from ..().
+	auxtools_launched_world_reboot_declined()
 
 /proc/auxtools_launched_world_new()
 	CRASH("the debugger's library isn't loaded")
@@ -263,6 +272,9 @@ fn ready() {
 	if let Some(proc) = Proc::find("/proc/auxtools_launched_world_reboot") {
 		let _ = proc.hook(world_reboot);
 	}
+	if let Some(proc) = Proc::find("/proc/auxtools_launched_world_reboot_declined") {
+		let _ = proc.hook(world_reboot_declined);
+	}
 	// Without the hook nothing would say the world has read its resources
 	if !Proc::find("/proc/auxtools_launched_world_new").is_some_and(|proc| proc.hook(world_new).is_ok()) {
 		crate::world_resources::loaded();
@@ -333,6 +345,8 @@ fn world_del(_: &Value, _: &Value, args: Vec<Value>) -> auxtools::DMResult {
 			server.world_shutting_down();
 		}
 		auxtools::shut_down_with_world();
+	} else if let Some(server) = unsafe { &mut *crate::DEBUG_SERVER.get() } {
+		server.world_carries_on();
 	}
 	// A failed Del leaves the world running and must preserve its debugger.
 	Ok(Value::NULL)
@@ -340,6 +354,15 @@ fn world_del(_: &Value, _: &Value, args: Vec<Value>) -> auxtools::DMResult {
 
 fn world_reboot(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
 	REBOOTING.store(true, Ordering::Relaxed);
+	Ok(Value::NULL)
+}
+
+/// Re-enable pauses after world/Reboot() returns or fails without rebooting.
+fn world_reboot_declined(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
+	REBOOTING.store(false, Ordering::Relaxed);
+	if let Some(server) = unsafe { &mut *crate::DEBUG_SERVER.get() } {
+		server.world_carries_on();
+	}
 	Ok(Value::NULL)
 }
 

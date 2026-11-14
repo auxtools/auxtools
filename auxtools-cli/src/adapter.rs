@@ -18,7 +18,9 @@ use auxtools_cli::{
 	byond::{self, Server},
 	game::{Game, Launch},
 	local::{self, Stream},
-	server_types::{self as aux, ContinueKind, InstructionRef, ProcRef, Request as AuxRequest, Response as AuxResponse, GLOBAL_INIT, HELPER_FILE}
+	server_types::{
+		self as aux, ContinueKind, InstructionRef, ProcRef, Request as AuxRequest, Response as AuxResponse, ENDING_CONTEXT, GLOBAL_INIT, HELPER_FILE
+	}
 };
 use dap_types::*;
 use serde::Deserialize;
@@ -2434,7 +2436,8 @@ impl Adapter {
 		match self.request(&AuxRequest::Eval {
 			frame_id: args.frameId.map(|id| id as u32),
 			command: args.expression,
-			context: args.context
+			// Only world.Del() and world.Reboot() use the ending context.
+			context: args.context.filter(|context| context != ENDING_CONTEXT)
 		})? {
 			AuxResponse::Eval(Ok(result)) => json(EvaluateResponse {
 				result: shown(result.value, hex),

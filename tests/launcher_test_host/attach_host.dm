@@ -44,14 +44,22 @@ var/datum/held/held = new
 // A world whose shutdown code doesn't shut it down, when the test asks for one
 /world/Del()
 	world.log << "attach test: world/Del"
+	// Sleeping shutdown ends the evaluation before world.Del() finishes.
+	if (fexists("slow_del"))
+		sleep(3)
 	if (fexists("refuse_del"))
 		return
 	if (fexists("fail_del"))
 		CRASH("attach test: world/Del failed")
-	// Sleeping shutdown ends the evaluation before world.Del() finishes.
-	if (fexists("slow_del"))
-		sleep(3)
 	..()
+
+/world/Reboot()
+	// Sleeping reboot ends the evaluation before world.Reboot() finishes.
+	if (fexists("slow_reboot"))
+		sleep(3)
+	if (fexists("refuse_reboot"))
+		return
+	return ..()
 
 /proc/run_until_stopped()
 	var/said = 0
