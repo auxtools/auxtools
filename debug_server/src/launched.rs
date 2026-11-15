@@ -166,6 +166,17 @@ fn on_load() {
 #[no_mangle]
 pub extern "C" fn auxtools_debug_attach() {
 	if launched() {
+		if std::env::var(crate::socket_hold_windows::HOLD_VAR).is_ok_and(|value| value == "0") {
+			eprintln!("auxtools: socket reuse workaround disabled ({}=0)", crate::socket_hold_windows::HOLD_VAR);
+		} else {
+			match crate::socket_hold_windows::install() {
+				Ok(_) => eprintln!(
+					"auxtools: socket reuse workaround enabled (90s hold; {}=0 to disable)",
+					crate::socket_hold_windows::HOLD_VAR
+				),
+				Err(e) => eprintln!("auxtools: socket reuse workaround failed: {}", e)
+			}
+		}
 		attach();
 	}
 }

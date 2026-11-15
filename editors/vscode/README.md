@@ -64,8 +64,10 @@ provides templates:
 
 With an API-enabled version of SS13 Build Flags, selected flags are added
 when `preLaunchTask` matches `ss13BuildFlags.baseTask`. The build and debugger
-use these flags on launch and restart. Changing the selection holds reloads
-until you rebuild and restart, or restore the previous selection.
+use these flags on launch and restart. Code changes from new flags wait for
+a reboot; flags with no code changes apply immediately. Map and world-setting
+changes require a rebuild and restart. Reverting the selection releases held
+edits.
 
 With older versions, launches and attaches without `defines` use the selected
 flags. Set `"defines": []` to disable them, or combine them with other defines

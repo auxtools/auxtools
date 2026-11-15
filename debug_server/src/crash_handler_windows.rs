@@ -1,14 +1,21 @@
 use auxtools::*;
 use winapi::{
-	shared::ntdef::LONG,
-	um::{errhandlingapi::SetUnhandledExceptionFilter, winnt::EXCEPTION_POINTERS},
+	shared::{minwindef::HMODULE, ntdef::LONG},
+	um::{
+		errhandlingapi::SetUnhandledExceptionFilter,
+		libloaderapi::{
+			GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
+		},
+		winnt::EXCEPTION_POINTERS
+	},
 	vc::excpt::EXCEPTION_EXECUTE_HANDLER
 };
 
 use crate::{server_types::BreakpointReason, DEBUG_SERVER};
 
-extern "system" fn exception_filter(_: *mut EXCEPTION_POINTERS) -> LONG {
+extern "system" fn exception_filter(info: *mut EXCEPTION_POINTERS) -> LONG {
 	unsafe {
+		report(info);
 		if let Some(dbg) = &mut *DEBUG_SERVER.get() {
 			let ctx = *raw_types::funcs::CURRENT_EXECUTION_CONTEXT;
 
@@ -20,6 +27,48 @@ extern "system" fn exception_filter(_: *mut EXCEPTION_POINTERS) -> LONG {
 	}
 
 	EXCEPTION_EXECUTE_HANDLER
+}
+
+/// Report native crash details before the handler exits without a Windows crash
+/// report.
+unsafe fn report(info: *mut EXCEPTION_POINTERS) {
+	let Some(record) = info.as_ref().and_then(|info| info.ExceptionRecord.as_ref()) else {
+		return;
+	};
+	let address = record.ExceptionAddress as usize;
+	let mut module: HMODULE = std::ptr::null_mut();
+	let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+	let place = if GetModuleHandleExW(flags, address as *const u16, &mut module) != 0 {
+		let mut name = [0u16; 260];
+		let length = GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) as usize;
+		let path = String::from_utf16_lossy(&name[..length]);
+		let file = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_owned();
+		format!("{}+{:#x}", file, address - module as usize)
+	} else {
+		format!("{:#x}", address)
+	};
+	// Access violation parameters: operation and target address.
+	let access = match (record.ExceptionCode, record.NumberParameters >= 2) {
+		(0xC000_0005, true) => {
+			let what = match record.ExceptionInformation[0] {
+				0 => "reading",
+				1 => "writing",
+				8 => "executing",
+				_ => "accessing"
+			};
+			format!(" {} {:#x}", what, record.ExceptionInformation[1])
+		}
+		_ => String::new()
+	};
+	eprintln!("auxtools: native exception {:#010x} at {}{}", record.ExceptionCode, place, access);
+	// Read the DM frame last because it may be corrupted.
+	let ctx = *raw_types::funcs::CURRENT_EXECUTION_CONTEXT;
+	if let Some(ctx) = ctx.as_ref() {
+		let instance = *ctx.proc_instance();
+		if let Some(proc) = instance.as_ref().and_then(|instance| Proc::from_id(instance.proc)) {
+			eprintln!("auxtools: running {} at line {}", proc.path, ctx.line());
+		}
+	}
 }
 
 #[init(full)]

@@ -107,7 +107,7 @@ pub enum Command {
 	Reloaded(bool),
 	/// Resources cached by the last reload; sent before `Reloaded`.
 	Resources(Vec<ReloadedResource>),
-	/// Selected build defines. Hold reloads until they match the running build.
+	/// Selected defines. Defer resulting code changes until reboot.
 	Defines(Vec<(String, Option<String>)>)
 }
 
@@ -128,7 +128,8 @@ pub fn start(mut options: Options, out: Arc<Output>, inputs: mpsc::Sender<Input>
 					byond: None
 				}),
 				wanted_defines: RefCell::new(None),
-				released: Cell::new(false),
+				defines_moved: Cell::new(false),
+				running_defines: RefCell::new(options.defines.clone()),
 				options,
 				out,
 				inputs,
@@ -142,7 +143,8 @@ pub fn start(mut options: Options, out: Arc<Output>, inputs: mpsc::Sender<Input>
 				resource_dirs: RefCell::new(vec![]),
 				reloaded_resources: RefCell::new(vec![]),
 				named_resources: RefCell::new(vec![]),
-				refusals: RefCell::new(vec![])
+				refusals: RefCell::new(vec![]),
+				reported: RefCell::new(vec![])
 			};
 			code.run();
 		})
@@ -154,10 +156,13 @@ struct Code {
 	options: Options,
 	/// Parse options matching the running build.
 	parse_options: RefCell<ParseOptions>,
-	/// Latest selected defines, pending adoption of a rebuilt `.dmb`.
+	/// Selected defines used to parse edits and adopt rebuilt worlds.
 	wanted_defines: RefCell<Option<Vec<(String, Option<String>)>>>,
-	/// Reverted defines allow pending edits to reload.
-	released: Cell<bool>,
+	/// The selection changed: compare the whole source again.
+	defines_moved: Cell<bool>,
+	/// Defines currently active in the world, including changes applied at
+	/// reboot.
+	running_defines: RefCell<Vec<(String, Option<String>)>>,
 	root: PathBuf,
 	out: Arc<Output>,
 	inputs: mpsc::Sender<Input>,
@@ -181,7 +186,9 @@ struct Code {
 	/// Resource names referenced by the last reload's code.
 	named_resources: RefCell<Vec<String>>,
 	/// Refused changes still missing from the world, with absolute paths.
-	refusals: RefCell<Vec<Refusal>>
+	refusals: RefCell<Vec<Refusal>>,
+	/// Outstanding problems last sent to the adapter.
+	reported: RefCell<Vec<Refusal>>
 }
 
 /// Track running source and pending disk changes.
@@ -217,10 +224,25 @@ impl Code {
 		self.inputs.send(Input::Code { worker: self.worker, event }).is_ok()
 	}
 
+	/// Parse with the running build's defines.
 	fn parse(&self) -> Result<Snapshot, String> {
+		let defines = self.parse_options.borrow().defines.clone();
+		self.parse_with(defines)
+	}
+
+	fn parse_with(&self, defines: Vec<(String, Option<String>)>) -> Result<Snapshot, String> {
 		self.parsed.set(true);
 		self.parse_started.set(SystemTime::now());
-		Snapshot::parse(&self.options.dme, &self.parse_options.borrow())
+		let byond = self.parse_options.borrow().byond;
+		Snapshot::parse(&self.options.dme, &ParseOptions { defines, byond })
+	}
+
+	/// Use selected defines for edits, falling back to the build defines.
+	fn selected_defines(&self) -> Vec<(String, Option<String>)> {
+		match &*self.wanted_defines.borrow() {
+			Some(defines) => defines.clone(),
+			None => self.parse_options.borrow().defines.clone()
+		}
 	}
 
 	fn run(self) {
@@ -310,7 +332,8 @@ impl Code {
 					return;
 				}
 			}
-			if self.released.take() && !watching.edited_since_built.is_empty() {
+			// Defines can change code in any file.
+			if self.defines_moved.take() {
 				let edited = watching.edited_since_built.clone();
 				if !self.send(Event::Reloading) || !self.reload_code(watching, edited) || !self.send(Event::Looked) {
 					return;
@@ -359,9 +382,12 @@ impl Code {
 
 	/// Reload the changed DM files. Return false on adapter disconnect.
 	fn reload_code(&self, watching: &mut Watching, changed: HashSet<PathBuf>) -> bool {
+		// Changed defines require a full source comparison.
+		let selected = self.selected_defines();
+		let other_defines = selected != *self.running_defines.borrow();
 		// Held changes require a full diff so edits in other files wait too.
 		let held = !self.outstanding().is_empty();
-		if let (false, [file]) = (held, changed.iter().collect::<Vec<_>>().as_slice()) {
+		if let (false, false, [file]) = (held, other_defines, changed.iter().collect::<Vec<_>>().as_slice()) {
 			let file = (*file).clone();
 			// Use the last applied snapshot, including incremental file parses.
 			let current = match watching.applied.as_mut() {
@@ -371,7 +397,7 @@ impl Code {
 			match current.reload_file(&self.root, &file) {
 				Ok(reload) => {
 					watching.edited_since_built.insert(file);
-					return match self.reload(&reload.changes, current, vec![], false, true) {
+					return match self.reload(&reload.changes, current, vec![], false, true, None) {
 						None => false,
 						Some(true) => {
 							let current = match watching.applied.as_mut() {
@@ -391,7 +417,7 @@ impl Code {
 			}
 		}
 
-		let new = match self.parse() {
+		let new = match self.parse_with(selected.clone()) {
 			Ok(new) => new,
 			Err(e) => {
 				self.log(format!("couldn't read the code: {}", e));
@@ -401,8 +427,9 @@ impl Code {
 		watching.skin.parsed(new.skin());
 		watching.script.parsed(new.client_script());
 		let current = watching.applied.as_ref().unwrap_or(&watching.built);
-		let mut changes = diff(current, &new, Some(&changed));
+		let mut changes = diff(current, &new, (!other_defines).then_some(&changed));
 		refuse_hidden(current, &new, &mut changes);
+		refuse_other_maps(&watching.built, &new, &mut changes);
 		changes.settings_as_built(&watching.built, &new);
 		watching.edited_since_built.extend(changed.iter().cloned());
 
@@ -411,7 +438,15 @@ impl Code {
 			watching.files.add(&self.root, &file, self.parse_started.get());
 		}
 
-		match self.reload(&changes, watching.applied.as_ref().unwrap_or(&watching.built), vec![], false, true) {
+		let read_with = other_defines.then_some(selected);
+		match self.reload(
+			&changes,
+			watching.applied.as_ref().unwrap_or(&watching.built),
+			vec![],
+			false,
+			true,
+			read_with
+		) {
 			None => false,
 			Some(true) => {
 				self.watch_named(watching);
@@ -436,11 +471,11 @@ impl Code {
 			}
 			self.log("using the rebuilt .dmb");
 			watching.dmb_modified = dmb_modified;
-			let held = !self.outstanding().is_empty();
 			// Adopt the latest selected defines with the rebuilt world.
 			if let Some(defines) = self.wanted_defines.take() {
 				self.parse_options.borrow_mut().defines = defines;
 			}
+			*self.running_defines.borrow_mut() = self.parse_options.borrow().defines.clone();
 			// Include pending edits in the baseline rather than reloading them.
 			watching.files.changed(&self.root);
 			match self.parse() {
@@ -462,7 +497,7 @@ impl Code {
 					};
 					watching.resources = resources;
 					watching.built = built;
-					if !self.rebuilt(held) {
+					if !self.rebuilt() {
 						return false;
 					}
 				}
@@ -476,6 +511,10 @@ impl Code {
 		// A reboot resets the resource cache. Restore edits once the world
 		// has loaded its own resources.
 		watching.applied = None;
+		// The world runs the build's code again until the restore applies.
+		*self.running_defines.borrow_mut() = self.parse_options.borrow().defines.clone();
+		let selected = self.selected_defines();
+		let other_defines = selected != *self.running_defines.borrow();
 		watching.built.clear_patches();
 		// Restore the skin before clients log in.
 		watching.skin.rebooted();
@@ -493,20 +532,22 @@ impl Code {
 			.into_iter()
 			.map(|(path, _)| path)
 			.collect();
-		if watching.edited_since_built.is_empty() {
+		if watching.edited_since_built.is_empty() && !other_defines {
 			return self.restore_resources(watching, &resource_files) && self.ready();
 		}
 
-		let current = match self.parse() {
+		let current = match self.parse_with(selected.clone()) {
 			Ok(current) => current,
 			Err(e) => {
 				self.log(format!("couldn't read the code: {}", e));
 				return self.not_reloaded(e) && self.ready();
 			}
 		};
-		let mut changes = diff(&watching.built, &current, Some(&watching.edited_since_built));
+		let mut changes = diff(&watching.built, &current, (!other_defines).then_some(&watching.edited_since_built));
 		refuse_hidden(&watching.built, &current, &mut changes);
-		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, true) else {
+		refuse_other_maps(&watching.built, &current, &mut changes);
+		let read_with = other_defines.then_some(selected);
+		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, true, read_with) else {
 			return false;
 		};
 		if applied {
@@ -573,7 +614,7 @@ impl Code {
 			});
 		}
 		self.reloaded_resources.borrow_mut().clear();
-		match self.reload(&changes, current, resources, false, false) {
+		match self.reload(&changes, current, resources, false, false, None) {
 			None => false,
 			Some(true) => {
 				let reloaded = self.reloaded_resources.take();
@@ -663,7 +704,11 @@ impl Code {
 
 	/// Send macros if they changed. Returns false if the adapter disconnected.
 	fn give_macros(&self) -> bool {
-		let macros = match macros(&self.options.dme, &self.parse_options.borrow()) {
+		let options = ParseOptions {
+			defines: self.running_defines.borrow().clone(),
+			byond: self.parse_options.borrow().byond
+		};
+		let macros = match macros(&self.options.dme, &options) {
 			Ok(macros) => macros,
 			Err(e) => {
 				self.log(format!("source macros unavailable for evaluation: {}", e));
@@ -693,11 +738,30 @@ impl Code {
 	/// global init proc before global initialization.
 	/// Refused or deferred changes hold the whole set. `whole` replaces all
 	/// outstanding problems; resource reloads report only a partial diff.
-	fn reload(&self, changes: &Changes, before: &Snapshot, resources: Vec<HotReloadResource>, restarted: bool, whole: bool) -> Option<bool> {
+	/// `read_with` identifies changed defines used for this diff. Adopt them
+	/// after applying the changes, deferring code changes until reboot.
+	fn reload(
+		&self,
+		changes: &Changes,
+		before: &Snapshot,
+		resources: Vec<HotReloadResource>,
+		restarted: bool,
+		whole: bool,
+		read_with: Option<Vec<(String, Option<String>)>>
+	) -> Option<bool> {
 		// A reboot satisfies deferred initializers, but not rebuild
 		// requirements.
 		let applies_now = |deferred: &&Refusal| restarted && deferred.until == Until::Reboot;
-		let defines = self.defines_refusal();
+		let mut request = reload_request(changes);
+		// Defines that change no code need no reboot.
+		let changes_nothing = changes.refused.is_empty()
+			&& changes.deferred.is_empty()
+			&& request.is_empty()
+			&& request.removed_vars.is_empty()
+			&& resources.is_empty();
+		let defines = self
+			.defines_refusal()
+			.filter(|refusal| !applies_now(&refusal) && !(read_with.is_some() && changes_nothing));
 		if !changes.refused.is_empty() || !changes.deferred.iter().all(|d| applies_now(&d)) || defines.is_some() {
 			// Clients use absolute source paths.
 			let refused = changes
@@ -709,7 +773,7 @@ impl Code {
 					..refusal.clone()
 				})
 				.collect::<Vec<_>>();
-			let summary = if defines.is_none() && refused.iter().all(|refusal| refusal.until == Until::Reboot) {
+			let summary = if refused.iter().chain(&defines).all(|refusal| refusal.until == Until::Reboot) {
 				"reboot required"
 			} else {
 				"rebuild required"
@@ -722,7 +786,6 @@ impl Code {
 			};
 			return (self.send(event) && self.refused_by(refused, whole)).then_some(false);
 		}
-		let mut request = reload_request(changes);
 		if restarted {
 			request.global_init = changes.global_init.clone();
 		}
@@ -738,6 +801,9 @@ impl Code {
 				self.out.console(format!("    note: {}", why));
 			}
 			self.log("no changes to the running code");
+			if let Some(defines) = read_with {
+				*self.running_defines.borrow_mut() = defines;
+			}
 			let sent = self.send(Event::NothingChanged {
 				warnings: changes.warnings.clone()
 			});
@@ -763,8 +829,13 @@ impl Code {
 				Err(_) => return None
 			}
 		};
-		if applied && !self.refused_by(vec![], whole) {
-			return None;
+		if applied {
+			if let Some(defines) = read_with {
+				*self.running_defines.borrow_mut() = defines;
+			}
+			if !self.refused_by(vec![], whole) {
+				return None;
+			}
 		}
 		Some(applied)
 	}
@@ -772,7 +843,6 @@ impl Code {
 	/// Replace outstanding problems for a full diff, or append partial results.
 	/// Send the set if changed. Return false on disconnect.
 	fn refused_by(&self, refused: Vec<Refusal>, whole: bool) -> bool {
-		let before = self.outstanding();
 		let mut now = if whole { vec![] } else { self.refusals.borrow().clone() };
 		for refusal in refused {
 			if !now.contains(&refusal) {
@@ -780,15 +850,25 @@ impl Code {
 			}
 		}
 		*self.refusals.borrow_mut() = now;
-		let after = self.outstanding();
-		after == before || self.send(Event::Refusals(after))
+		self.report()
 	}
 
-	/// Clear refusals after rebuilding. If `held`, update the reported
-	/// problems. Return false on disconnect.
-	fn rebuilt(&self, held: bool) -> bool {
+	/// Report problems that differ from the last report. Return false on
+	/// disconnect.
+	fn report(&self) -> bool {
+		let now = self.outstanding();
+		if *self.reported.borrow() == now {
+			return true;
+		}
+		*self.reported.borrow_mut() = now.clone();
+		self.send(Event::Refusals(now))
+	}
+
+	/// Clear refusals after rebuilding and report the change. Return false on
+	/// disconnect.
+	fn rebuilt(&self) -> bool {
 		self.refusals.borrow_mut().clear();
-		(!held || self.send(Event::Refusals(self.outstanding()))) && self.send(Event::Watching)
+		self.report() && self.send(Event::Watching)
 	}
 
 	/// Outstanding source changes and build-flag mismatches.
@@ -798,23 +878,19 @@ impl Code {
 		outstanding
 	}
 
-	/// Update selected defines and report changes to the reload hold.
+	/// Schedule a full source comparison with the selected defines.
 	fn defines_wanted(&self, defines: Vec<(String, Option<String>)>) {
-		let held = self.defines_refusal().is_some();
-		let before = self.outstanding();
-		*self.wanted_defines.borrow_mut() = Some(defines);
-		self.released.set(held && self.defines_refusal().is_none());
-		let after = self.outstanding();
-		if after != before {
-			let _ = self.send(Event::Refusals(after));
+		if self.wanted_defines.borrow().as_ref() != Some(&defines) {
+			*self.wanted_defines.borrow_mut() = Some(defines);
+			self.defines_moved.set(true);
 		}
 	}
 
-	/// Report selected defines that differ from the running build.
+	/// Report define changes pending reboot.
 	fn defines_refusal(&self) -> Option<Refusal> {
 		let wanted = self.wanted_defines.borrow();
 		let wanted = wanted.as_ref()?;
-		let built = &self.parse_options.borrow().defines;
+		let built = &*self.running_defines.borrow();
 		let listed = |defines: &[(String, Option<String>)], others: &[(String, Option<String>)]| {
 			defines
 				.iter()
@@ -833,7 +909,10 @@ impl Code {
 		if !removed.is_empty() {
 			changed.push(format!("removed {}", removed.join(", ")));
 		}
-		(!changed.is_empty()).then(|| Refusal::new("", format!("build flags changed ({})", changed.join("; "))))
+		(!changed.is_empty()).then(|| Refusal {
+			until: Until::Reboot,
+			..Refusal::new("", format!("build flags changed ({})", changed.join("; ")))
+		})
 	}
 
 	/// Update the skin if it differs from the world's. Return false on
@@ -1047,6 +1126,29 @@ fn refuse_hidden(old: &Snapshot, new: &Snapshot, changes: &mut Changes) {
 				)
 			)
 		});
+	}
+}
+
+/// Require a rebuild when included maps differ from the compiled world.
+fn refuse_other_maps(built: &Snapshot, new: &Snapshot, changes: &mut Changes) {
+	let listed = |maps: &[PathBuf], others: &[PathBuf]| {
+		maps.iter()
+			.filter(|map| !others.contains(map))
+			.map(|map| map.display().to_string())
+			.collect::<Vec<_>>()
+	};
+	let (added, removed) = (listed(new.maps(), built.maps()), listed(built.maps(), new.maps()));
+	let mut changed = vec![];
+	if !added.is_empty() {
+		changed.push(format!("added {}", added.join(", ")));
+	}
+	if !removed.is_empty() {
+		changed.push(format!("removed {}", removed.join(", ")));
+	}
+	if !changed.is_empty() {
+		changes
+			.refused
+			.push(Refusal::new("", format!("compiled maps changed ({})", changed.join("; "))));
 	}
 }
 

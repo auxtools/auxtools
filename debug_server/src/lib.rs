@@ -21,6 +21,9 @@ mod world_resources;
 mod crash_handler_windows;
 
 #[cfg(windows)]
+mod socket_hold_windows;
+
+#[cfg(windows)]
 mod mem_profiler;
 
 #[cfg(not(windows))]
