@@ -142,7 +142,8 @@ pub fn start(mut options: Options, out: Arc<Output>, inputs: mpsc::Sender<Input>
 				resource_dirs: RefCell::new(vec![]),
 				reloaded_resources: RefCell::new(vec![]),
 				named_resources: RefCell::new(vec![]),
-				refusals: RefCell::new(vec![])
+				refusals: RefCell::new(vec![]),
+				reported: RefCell::new(vec![])
 			};
 			code.run();
 		})
@@ -181,7 +182,9 @@ struct Code {
 	/// Resource names referenced by the last reload's code.
 	named_resources: RefCell<Vec<String>>,
 	/// Refused changes still missing from the world, with absolute paths.
-	refusals: RefCell<Vec<Refusal>>
+	refusals: RefCell<Vec<Refusal>>,
+	/// Outstanding problems last sent to the adapter.
+	reported: RefCell<Vec<Refusal>>
 }
 
 /// Track running source and pending disk changes.
@@ -436,7 +439,6 @@ impl Code {
 			}
 			self.log("using the rebuilt .dmb");
 			watching.dmb_modified = dmb_modified;
-			let held = !self.outstanding().is_empty();
 			// Adopt the latest selected defines with the rebuilt world.
 			if let Some(defines) = self.wanted_defines.take() {
 				self.parse_options.borrow_mut().defines = defines;
@@ -462,7 +464,7 @@ impl Code {
 					};
 					watching.resources = resources;
 					watching.built = built;
-					if !self.rebuilt(held) {
+					if !self.rebuilt() {
 						return false;
 					}
 				}
@@ -772,7 +774,6 @@ impl Code {
 	/// Replace outstanding problems for a full diff, or append partial results.
 	/// Send the set if changed. Return false on disconnect.
 	fn refused_by(&self, refused: Vec<Refusal>, whole: bool) -> bool {
-		let before = self.outstanding();
 		let mut now = if whole { vec![] } else { self.refusals.borrow().clone() };
 		for refusal in refused {
 			if !now.contains(&refusal) {
@@ -780,15 +781,25 @@ impl Code {
 			}
 		}
 		*self.refusals.borrow_mut() = now;
-		let after = self.outstanding();
-		after == before || self.send(Event::Refusals(after))
+		self.report()
 	}
 
-	/// Clear refusals after rebuilding. If `held`, update the reported
-	/// problems. Return false on disconnect.
-	fn rebuilt(&self, held: bool) -> bool {
+	/// Report problems that differ from the last report. Return false on
+	/// disconnect.
+	fn report(&self) -> bool {
+		let now = self.outstanding();
+		if *self.reported.borrow() == now {
+			return true;
+		}
+		*self.reported.borrow_mut() = now.clone();
+		self.send(Event::Refusals(now))
+	}
+
+	/// Clear refusals after rebuilding and report the change. Return false on
+	/// disconnect.
+	fn rebuilt(&self) -> bool {
 		self.refusals.borrow_mut().clear();
-		(!held || self.send(Event::Refusals(self.outstanding()))) && self.send(Event::Watching)
+		self.report() && self.send(Event::Watching)
 	}
 
 	/// Outstanding source changes and build-flag mismatches.
@@ -801,13 +812,9 @@ impl Code {
 	/// Update selected defines and report changes to the reload hold.
 	fn defines_wanted(&self, defines: Vec<(String, Option<String>)>) {
 		let held = self.defines_refusal().is_some();
-		let before = self.outstanding();
 		*self.wanted_defines.borrow_mut() = Some(defines);
 		self.released.set(held && self.defines_refusal().is_none());
-		let after = self.outstanding();
-		if after != before {
-			let _ = self.send(Event::Refusals(after));
-		}
+		let _ = self.report();
 	}
 
 	/// Report selected defines that differ from the running build.
