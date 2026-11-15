@@ -1001,9 +1001,41 @@ fn held_for_build_flags() {
 	let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Resolve defaults referencing procs added by the same reload.
+fn default_names_a_new_proc() {
+	let dir = copy_of_the_world("default_names_a_new_proc");
+	std::fs::write(dir.join("named.dm"), "/datum/rl_named\n\tvar/verb_path\n").unwrap();
+	let dme = dir.join("dap_test_host.dme");
+	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"named.dm\"\n";
+	std::fs::write(&dme, text).unwrap();
+	let built = Command::new(paths::find_dm()).with_byond_paths().arg(&dme).status().unwrap();
+	assert!(built.success(), "dreammaker build of {} failed", dir.display());
+
+	let mut world = World::launch_in(dir.clone(), json!({ "hotReload": true }));
+	world.catch_runtimes(false);
+	world.configure();
+	world.wait_output("Hot reload active");
+	edit(
+		&mut world,
+		"named.dm",
+		"\tvar/verb_path\n",
+		"\tvar/verb_path\n\n/datum/rl_named/one\n\tverb_path = /client/proc/rl_named_verb\n\n/client/proc/rl_named_verb()\n\tset name = \
+		 \"Named\"\n\treturn 5\n"
+	);
+	assert!(!world.output.contains("Hot reload failed"), "{}", world.output);
+	assert_eq!(
+		world.eval_global("\"[(new /datum/rl_named/one).verb_path == /client/proc/rl_named_verb]\""),
+		"\"1\""
+	);
+	ok("new proc references in type defaults");
+	world.end();
+	let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Code and type edits tested in separate worlds, including held reloads.
 pub fn edits() {
 	held_until_reboot();
+	default_names_a_new_proc();
 	held_for_build_flags();
 	saved_without_reloading();
 	built_in_taken_away();

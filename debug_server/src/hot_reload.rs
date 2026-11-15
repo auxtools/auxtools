@@ -483,6 +483,14 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	let mut world_globals = WorldGlobals::default();
 
 	let mut pending = Pending::default();
+	// Reserve proc IDs before resolving references in defaults and code.
+	let first_id = runtime_tables::proc_count();
+	let ids: Vec<u32> = (first_id..).take(new_procs.len()).collect();
+	pending.procs = new_procs
+		.iter()
+		.zip(&ids)
+		.map(|(new, &id)| (strip_path(&new.code.proc.path), id))
+		.collect();
 	let mut type_vars = TypeVars::default();
 	let mut staged = StagedProcs::default();
 	reparent::prepare(reparented, &mut type_vars, &mut staged, &mut prepared, &mut errors);
@@ -529,15 +537,6 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 			Err(e) => errors.push(e)
 		}
 	}
-
-	// New procs get the next ids, in order
-	let first_id = runtime_tables::proc_count();
-	let ids: Vec<u32> = (first_id..).take(new_procs.len()).collect();
-	pending.procs = new_procs
-		.iter()
-		.zip(&ids)
-		.map(|(new, &id)| (strip_path(&new.code.proc.path), id))
-		.collect();
 
 	for (new, &id) in new_procs.iter().zip(&ids) {
 		match prepare_new_proc(new, id, &pending, &mut world_globals, &mut added, &mut staged) {
@@ -636,7 +635,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	}
 
 	for default in var_defaults {
-		if let Err(e) = prepare_var_default(default, &mut type_vars, &mut added) {
+		if let Err(e) = prepare_var_default(default, &pending, &mut type_vars, &mut added) {
 			errors.push(e);
 		}
 	}
@@ -744,7 +743,7 @@ fn assemble_with(
 	let nodes = adapt_debug_info(&code.nodes, original);
 
 	let proc_globals = globals_in(original);
-	let new_statics = new_statics(code, &proc_globals, added).map_err(|e| format!("{}: {}", name, e))?;
+	let new_statics = new_statics(code, &proc_globals, pending, added).map_err(|e| format!("{}: {}", name, e))?;
 	let mut env = ReloadEnv {
 		proc_globals,
 		world_globals,
@@ -1738,6 +1737,7 @@ fn static_number(scope: &str) -> usize {
 fn new_statics(
 	code: &HotReloadProc,
 	proc_globals: &HashMap<Vec<u8>, Vec<u32>>,
+	pending: &Pending,
 	added: &mut AddedVars
 ) -> Result<HashMap<(String, Vec<u8>), u32>, String> {
 	let mut out = HashMap::new();
@@ -1747,7 +1747,7 @@ fn new_statics(
 			continue;
 		}
 		let value = match (&local.value, &local.init) {
-			(Some(value), _) => const_value(value).map_err(|e| format!("static local {}: {}", local.name, e))?,
+			(Some(value), _) => const_value(value, pending).map_err(|e| format!("static local {}: {}", local.name, e))?,
 			(None, Some(_)) => (0, 0),
 			(None, None) => return Err(format!("static local {} has no initial value to start with", local.name))
 		};
@@ -1917,7 +1917,7 @@ fn builtin_writes(var: &str, value: &ConstValue) -> Result<Vec<BuiltinWrite>, St
 		| "default_verb_category"
 		| "edge_limit"
 		| "mouse_pointer_icon" => {
-			let (tag, data) = const_value(value)?;
+			let (tag, data) = const_value(value, &Pending::default())?;
 			// As `PushVal` has it: a number's two halves after its tag, or
 			// the top byte of the data in the tag word
 			let words = if tag == 0x2A {
@@ -1976,12 +1976,15 @@ fn write_builtins(type_id: u32, writes: &[BuiltinWrite]) -> Result<(), String> {
 }
 
 /// Convert a constant to tag/data words. The destination retains any
-/// string reference permanently.
-fn const_value(value: &ConstValue) -> Result<(u32, u32), String> {
+/// string reference permanently. A path can name a proc in `pending`.
+fn const_value(value: &ConstValue, pending: &Pending) -> Result<(u32, u32), String> {
 	Ok(match value {
 		ConstValue::Null => (0, 0),
 		ConstValue::Number(n) => (0x2A, n.to_bits()),
 		ConstValue::String(text) => (0x06, leaked_string(text)?),
+		ConstValue::Path(path) if pending.procs.contains_key(&strip_path(path)) => {
+			(raw_types::values::ValueTag::ProcRef as u32, pending.procs[&strip_path(path)])
+		}
 		ConstValue::Path(path) => {
 			let (tag, data) = AssembleEnv
 				.get_type(path)
@@ -2039,7 +2042,7 @@ fn prepare_new_var(
 	}
 
 	let id = added.next_id();
-	let value = const_value(&new.value).map_err(fail)?;
+	let value = const_value(&new.value, pending).map_err(fail)?;
 	let name = leaked_string(&new.var).map_err(fail)?;
 	type_vars.new_names.insert(id, name);
 	if let Some(init) = &new.init {
@@ -2145,7 +2148,7 @@ fn prepare_redeclared(
 		if let Some(init) = &var.init {
 			added.run_once.push((id, format!("/var/{}", var.var), (**init).clone()));
 		} else if let Some(value) = &var.value {
-			global_values.push((id, const_value(value).map_err(fail)?));
+			global_values.push((id, const_value(value, pending).map_err(fail)?));
 		}
 		return Ok(());
 	}
@@ -2182,16 +2185,16 @@ fn prepare_redeclared(
 		if let Some(init) = &var.init {
 			added.run_once.push((id, format!("{}/var/{}", var.type_path, var.var), (**init).clone()));
 		} else if let Some(value) = &var.value {
-			global_values.push((id, const_value(value).map_err(fail)?));
+			global_values.push((id, const_value(value, pending).map_err(fail)?));
 		}
 	}
 	Ok(())
 }
 
-fn prepare_var_default(default: &HotReloadVarDefault, type_vars: &mut TypeVars, added: &mut AddedVars) -> Result<(), String> {
+fn prepare_var_default(default: &HotReloadVarDefault, pending: &Pending, type_vars: &mut TypeVars, added: &mut AddedVars) -> Result<(), String> {
 	let fail = |e: String| format!("var {}: {}", default.var, e);
 
-	let value = const_value(&default.value).map_err(fail)?;
+	let value = const_value(&default.value, pending).map_err(fail)?;
 	let key = StringRef::new(&default.var)
 		.map_err(|_| fail("couldn't make its name".to_owned()))?
 		.get_id()
