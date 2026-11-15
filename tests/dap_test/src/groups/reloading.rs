@@ -5,7 +5,7 @@ use std::{path::PathBuf, process::Command, time::Duration};
 use serde_json::{json, Value};
 
 use crate::{
-	client::value_of,
+	client::{launch_arguments, value_of},
 	ok,
 	paths::{self, ByondCommand},
 	world::{host_file, World}
@@ -961,7 +961,7 @@ fn held_for_build_flags() {
 	};
 	build(&[]);
 	let more = json!({ "hotReload": true, "buildFlags": [] });
-	let mut world = World::launch_in(dir.clone(), more);
+	let mut world = World::launch_in(dir.clone(), more.clone());
 	world.catch_runtimes(false);
 	world.configure();
 	world.wait_output("Hot reload active");
@@ -983,6 +983,20 @@ fn held_for_build_flags() {
 	assert_eq!(held_changes(&mut world), []);
 	ok("reverted build flags release held edits");
 
+	// Restart repeats the launch flags. Use the current selection without
+	// relaunching, and parse subsequent edits with the rebuilt world's flags.
+	world.request("auxtoolsBuildFlags", json!({ "flags": ["FLAG_A"] }));
+	build(&["-DFLAG_A"]);
+	world.drop_events("process");
+	world.request("restart", json!({ "arguments": launch_arguments(&paths::find_byond(), &dme, more) }));
+	world.wait_count("dap: world/New", 2);
+	world.wait_output("using the rebuilt .dmb");
+	assert!(!world.has_event("process"), "the restart relaunched the world");
+	assert_eq!(world.eval_global("flagged()"), "\"a\"");
+	edit(&mut world, "flags.dm", "\treturn \"a\"\n", "\treturn \"b\"\n");
+	assert_eq!(world.eval_global("flagged()"), "\"b\"");
+	assert_eq!(held_changes(&mut world), []);
+	ok("restart uses selected build flags");
 	world.end();
 	let _ = std::fs::remove_dir_all(&dir);
 }

@@ -24,10 +24,16 @@ impl Adapter {
 			// Attached sessions can reboot but cannot relaunch the process.
 			return self.reboot();
 		};
-		let wanted = match args.arguments {
+		let mut wanted = match args.arguments {
 			Some(config) => arguments::<LaunchArguments>(Some(config))?,
 			None => launched.clone()
 		};
+		// Replace stale launch flags with the selection used by the build task.
+		if wanted.build_flags == self.configured_flags {
+			wanted.build_flags = launched.build_flags.clone();
+		} else {
+			self.configured_flags = wanted.build_flags.clone();
+		}
 		if wanted == launched && self.debuggee.is_some() && !self.unavailable {
 			return self.reboot();
 		}

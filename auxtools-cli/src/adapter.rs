@@ -379,6 +379,9 @@ pub struct Adapter {
 	game: Option<Game>,
 	/// Configuration used to launch the current world.
 	launched: Option<LaunchArguments>,
+	/// Original launch flags, repeated by restart requests even after selection
+	/// changes.
+	configured_flags: Vec<String>,
 	/// Pending defines to send when the source worker starts.
 	wanted_defines: Option<Vec<String>>,
 	/// Pending configuration for relaunch after process exit.
@@ -511,6 +514,7 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 		game: None,
 		launched: None,
 		relaunching: None,
+		configured_flags: vec![],
 		wanted_defines: None,
 		rebooting: false,
 		joined: join::Joined::default(),
@@ -862,6 +866,7 @@ impl Adapter {
 			return Err("a world is already running".to_owned());
 		}
 		let prepared = Prepared::of(&args)?;
+		self.configured_flags = args.build_flags.clone();
 		self.start(args, prepared)?;
 		Ok(Value::Null)
 	}
