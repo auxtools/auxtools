@@ -944,14 +944,39 @@ fn nothing_to_run() {
 	let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Hold reloads until changed build flags are applied or reverted.
+/// Code and map includes controlled by build flags.
+const FLAGGED: &str = "/proc/flag_value()
+	return 1
+
+#ifdef FLAG_A
+/proc/flagged()
+	return \"a\"
+
+/datum/flag_only
+	var/n = 3
+#else
+/proc/flagged()
+	return \"none\"
+#endif
+
+#ifdef FLAG_MAP
+#include \"flag_map.dmm\"
+#endif
+";
+
+/// Change flags and wait for the reload hold.
+fn flags_held(world: &mut World, flags: &[&str]) {
+	let said = |output: &str| output.matches("Hot reload requires a reboot:").count() + output.matches("Hot reload requires a rebuild:").count();
+	let before = said(&world.output);
+	world.request("auxtoolsBuildFlags", json!({ "flags": flags }));
+	world.wait_until("the held build flags", |output| said(output) > before);
+}
+
+/// Apply flag changes at reboot; require a rebuild for map changes.
 fn held_for_build_flags() {
 	let dir = copy_of_the_world("held_for_build_flags");
-	std::fs::write(
-		dir.join("flags.dm"),
-		"/proc/flag_value()\n\treturn 1\n\n#ifdef FLAG_A\n/proc/flagged()\n\treturn \"a\"\n#else\n/proc/flagged()\n\treturn \"none\"\n#endif\n"
-	)
-	.unwrap();
+	std::fs::write(dir.join("flags.dm"), FLAGGED).unwrap();
+	std::fs::write(dir.join("flag_map.dmm"), "\"a\" = (/turf,/area)\n\n(1,1,1) = {\"\na\n\"}\n").unwrap();
 	let dme = dir.join("dap_test_host.dme");
 	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"flags.dm\"\n";
 	std::fs::write(&dme, text).unwrap();
@@ -965,12 +990,12 @@ fn held_for_build_flags() {
 	world.catch_runtimes(false);
 	world.configure();
 	world.wait_output("Hot reload active");
-	let changed = vec![("build flags changed (added FLAG_A)".to_owned(), "rebuild".to_owned())];
+	let added = |flag: &str| vec![(format!("build flags changed (added {})", flag), "reboot".to_owned())];
 
 	// Changed flags hold source edits.
-	world.drop_events("auxtoolsReload");
-	world.request("auxtoolsBuildFlags", json!({ "flags": ["FLAG_A"] }));
-	assert_eq!(held_changes(&mut world), changed);
+	flags_held(&mut world, &["FLAG_A"]);
+	assert_eq!(held_changes(&mut world), added("FLAG_A"));
+	assert_eq!(world.eval_global("flagged()"), "\"none\"");
 	edit_held(&mut world, "flags.dm", "\treturn 1\n", "\treturn 2\n");
 	assert_eq!(world.eval_global("flag_value()"), "1");
 	ok("changed build flags hold reloads");
@@ -983,18 +1008,58 @@ fn held_for_build_flags() {
 	assert_eq!(held_changes(&mut world), []);
 	ok("reverted build flags release held edits");
 
+	// Reboot applies the selected flags to code and subsequent edits.
+	flags_held(&mut world, &["FLAG_A"]);
+	reboot(&mut world, 2);
+	assert_eq!(
+		world.eval_global("\"[flagged()] [(new /datum/flag_only).n] [flag_value()]\""),
+		"\"a 3 2\""
+	);
+	assert_eq!(held_changes(&mut world), []);
+	edit(&mut world, "flags.dm", "\treturn \"a\"\n", "\treturn \"b\"\n");
+	assert_eq!(world.eval_global("flagged()"), "\"b\"");
+	ok("reboot applies selected flags");
+
+	// Removing them waits for a reboot too.
+	flags_held(&mut world, &[]);
+	assert_eq!(held_changes(&mut world), [(
+		"build flags changed (removed FLAG_A)".to_owned(),
+		"reboot".to_owned()
+	)]);
+	assert_eq!(world.eval_global("flagged()"), "\"b\"");
+	reboot(&mut world, 3);
+	assert_eq!(world.eval_global("flagged()"), "\"none\"");
+	assert_eq!(held_changes(&mut world), []);
+	ok("reboot applies removed flags");
+
+	// Unused flags apply immediately.
+	let said = |output: &str| output.matches("no changes to the running code").count();
+	let before = said(&world.output);
+	world.request("auxtoolsBuildFlags", json!({ "flags": ["FLAG_UNUSED"] }));
+	world.wait_until("the unchanged code", |output| said(output) > before);
+	assert_eq!(held_changes(&mut world), []);
+	ok("unused flags apply immediately");
+
+	// Changed map includes require a rebuild.
+	flags_held(&mut world, &["FLAG_UNUSED", "FLAG_MAP"]);
+	assert_eq!(held_changes(&mut world), [
+		("build flags changed (added FLAG_MAP)".to_owned(), "reboot".to_owned()),
+		("compiled maps changed (added flag_map.dmm)".to_owned(), "rebuild".to_owned())
+	]);
+	ok("map flags require rebuild");
+
 	// Restart repeats the launch flags. Use the current selection without
 	// relaunching, and parse subsequent edits with the rebuilt world's flags.
 	world.request("auxtoolsBuildFlags", json!({ "flags": ["FLAG_A"] }));
 	build(&["-DFLAG_A"]);
 	world.drop_events("process");
 	world.request("restart", json!({ "arguments": launch_arguments(&paths::find_byond(), &dme, more) }));
-	world.wait_count("dap: world/New", 2);
+	world.wait_count("dap: world/New", 4);
 	world.wait_output("using the rebuilt .dmb");
 	assert!(!world.has_event("process"), "the restart relaunched the world");
-	assert_eq!(world.eval_global("flagged()"), "\"a\"");
-	edit(&mut world, "flags.dm", "\treturn \"a\"\n", "\treturn \"b\"\n");
 	assert_eq!(world.eval_global("flagged()"), "\"b\"");
+	edit(&mut world, "flags.dm", "\treturn \"b\"\n", "\treturn \"c\"\n");
+	assert_eq!(world.eval_global("flagged()"), "\"c\"");
 	assert_eq!(held_changes(&mut world), []);
 	ok("restart uses selected build flags");
 	world.end();
