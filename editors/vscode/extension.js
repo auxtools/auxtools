@@ -213,8 +213,11 @@ class ConfigurationProvider {
 		if (!config.debugLibrary && settings().get("debugLibrary")) {
 			config.debugLibrary = settings().get("debugLibrary");
 		}
-		// Hot reload needs the same defines used for the build.
-		if (config.defines === undefined) {
+		// Match parser defines to the flags used by the launch build task.
+		const flags = config.request === "launch" && (await buildFlags.api(vscode));
+		if (flags) {
+			config.buildFlags = buildFlags.launchFlags(flags, config);
+		} else if (config.defines === undefined) {
 			const selected = await buildFlags.selected(vscode);
 			if (selected) {
 				config.defines = selected;
@@ -267,6 +270,30 @@ async function debugInDreamDaemon() {
 		return;
 	}
 	await vscode.debug.startDebugging(vscode.workspace.getWorkspaceFolder(dmb), launchConfiguration(dmb.fsPath));
+}
+
+// Forward flag changes to sessions with matching build tasks.
+async function followBuildFlags(context) {
+	const flags = await buildFlags.api(vscode);
+	if (!flags) {
+		return;
+	}
+	const sessions = new Set();
+	context.subscriptions.push(
+		vscode.debug.onDidStartDebugSession((session) => {
+			if (session.type === DEBUG_TYPE) {
+				sessions.add(session);
+			}
+		}),
+		vscode.debug.onDidTerminateDebugSession((session) => sessions.delete(session)),
+		flags.onDidChangeFlags(() => {
+			for (const session of sessions) {
+				if (flags.buildsWithFlags(session.configuration.preLaunchTask)) {
+					session.customRequest("auxtoolsBuildFlags", { flags: flags.current() }).then(undefined, () => {});
+				}
+			}
+		})
+	);
 }
 
 // Report unsaved files so the launcher can distinguish editor line numbers
@@ -594,6 +621,7 @@ function activate(context) {
 	const provider = new ConfigurationProvider(context);
 	const status = new ReloadStatus(context);
 	trackUnsavedFiles(context);
+	followBuildFlags(context);
 	exposeLauncher(context);
 	context.subscriptions.push(
 		vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new AdapterFactory(context)),

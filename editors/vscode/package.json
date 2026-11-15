@@ -215,7 +215,7 @@
 								"items": {
 									"type": "string"
 								},
-								"description": "Build defines as NAME, NAME=VALUE or DreamMaker -D arguments. Must match the build. If omitted, uses flags from the SS13 Build Flags extension if present. Use [] to disable automatic flags.",
+								"description": "Defines matching the build: NAME, NAME=VALUE or DreamMaker -D arguments. SS13 Build Flags adds selected flags for matching build tasks. Older versions use selected flags only when defines is omitted.",
 								"default": []
 							},
 							"hotReload": {

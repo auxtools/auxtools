@@ -52,7 +52,7 @@ provides templates:
 | `dmb` | Compiled world to run. |
 | `dme` | Project environment; defaults to the `.dme` beside the `.dmb`. Its directory is the source root. |
 | `server` | Default: `dreamdaemon` (`dd.exe` on Windows). Windows also supports `dreamdaemon-gui` for windowed DreamDaemon and `dreamseeker` to host in DreamSeeker. `dd` remains an alias for `dreamdaemon`. |
-| `defines` | Match the build's defines: `NAME`, `NAME=VALUE` or strings of DreamMaker arguments such as `-DA -DB=2`. When omitted, uses flags from the [SS13 Build Flags extension](https://github.com/spacestation13/SS13-BuildFlags) if present. |
+| `defines` | Match the build's defines: `NAME`, `NAME=VALUE` or strings of DreamMaker arguments such as `-DA -DB=2`. Flags selected in the [SS13 Build Flags extension](https://github.com/spacestation13/SS13-BuildFlags) are added for matching build tasks (below). |
 | `noDebug` | Disable debugging. Default: `false`. |
 | `hotReload` | Reload source changes on save. Default: `true`. |
 | `sleepingThreads` | Maximum sleeping procs shown in the call stack. Default: `100`. |
@@ -62,8 +62,14 @@ provides templates:
 | `env` | Environment variables for the world. |
 | `debugLibrary` | Override `auxtools.debugLibrary` for this launch. If neither is set, use the library bundled with the extension. |
 
-Set `"defines": []` to disable automatic flags. To combine SS13 Build Flags
-with additional defines, use `"defines": ["${command:ss13BuildFlags.current}", "MORE"]`.
+With an API-enabled version of SS13 Build Flags, selected flags are added
+when `preLaunchTask` matches `ss13BuildFlags.baseTask`. The build and debugger
+use these flags on launch and restart. Changing the selection holds reloads
+until you rebuild and restart, or restore the previous selection.
+
+With older versions, launches and attaches without `defines` use the selected
+flags. Set `"defines": []` to disable them, or combine them with other defines
+using `"defines": ["${command:ss13BuildFlags.current}", "MORE"]`.
 
 DreamDaemon sends output to the Debug Console. DreamSeeker and `dreamdaemon-gui`
 display output in their own windows.
