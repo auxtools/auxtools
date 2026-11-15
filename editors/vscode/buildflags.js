@@ -48,4 +48,23 @@ async function selected(vscode) {
 	}
 }
 
-module.exports = { defines, selected };
+// Load the API for build-task detection and flag-change notifications.
+async function api(vscode) {
+	const extension = vscode.extensions.getExtension(EXTENSION);
+	if (!extension) {
+		return undefined;
+	}
+	try {
+		const exports = extension.isActive ? extension.exports : await extension.activate();
+		return exports && typeof exports.buildsWithFlags === "function" ? exports : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+// Use selected flags only when the launch build task uses them.
+function launchFlags(flags, config) {
+	return flags.buildsWithFlags(config.preLaunchTask) ? flags.current() : [];
+}
+
+module.exports = { api, defines, launchFlags, selected };
