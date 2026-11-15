@@ -1013,10 +1013,64 @@ pub fn edits() {
 	types_changed_before_reboot();
 }
 
+/// Reproduce tgstation's startup: map areas initialize before globals, and
+/// proc statics reference earlier statics whose names occur in other procs.
+const STARTS_AT_AN_AREA: &str = "/area
+	var/list/things = list()
+
+var/global/list/rb_base = list(\"x\")
+
+/datum/rb_reader/proc/tgm()
+	var/static/list/default_list = rb_base
+	var/static/list/wrapped_default_list = list(default_list)
+	return wrapped_default_list[1] == default_list
+
+/datum/rb_reader/proc/dmm()
+	var/static/list/default_list = list(rb_base)
+	return length(default_list)
+
+/proc/rb_other(index)
+	var/static/list/default_list = rb_base
+	if (index == default_list)
+		return 1
+	return index == default_list
+
+/datum/rb_flags
+	var/static/auto_reset = TRUE
+";
+
+/// Restore held initializers when startup begins in an area initializer.
+fn initializers_after_reboot_at_an_area() {
+	let dir = copy_of_the_world("initializers_after_reboot_at_an_area");
+	std::fs::write(dir.join("area_inits.dm"), STARTS_AT_AN_AREA).unwrap();
+	std::fs::write(dir.join("area_inits.dmm"), "\"a\" = (/turf,/area)\n\n(1,1,1) = {\"\na\n\"}\n").unwrap();
+	let dme = dir.join("dap_test_host.dme");
+	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"area_inits.dm\"\n#include \"area_inits.dmm\"\n";
+	std::fs::write(&dme, text).unwrap();
+	let built = Command::new(crate::paths::find_dm()).with_byond_paths().arg(&dme).status().unwrap();
+	assert!(built.success(), "dreammaker build of {} failed", dir.display());
+
+	let mut world = World::launch_in(dir.clone(), json!({ "hotReload": true }));
+	world.catch_runtimes(false);
+	world.configure();
+	world.wait_output("Hot reload active");
+	const VALUES: &str = "\"[(new /datum/rb_flags).auto_reset] [(new /datum/rb_reader).tgm()] [(new /datum/rb_reader).dmm()] [rb_other(rb_base)]\"";
+	edit_held(&mut world, "area_inits.dm", "auto_reset = TRUE", "auto_reset = FALSE");
+	assert_eq!(world.eval_global(VALUES), "\"1 1 1 1\"");
+	reboot(&mut world, 2);
+	assert_eq!(world.eval_global(VALUES), "\"0 1 1 1\"");
+	assert_eq!(held_changes(&mut world), []);
+	assert!(!world.output.contains("global initialization has already run"), "{}", world.output);
+	ok("held initializers after area startup");
+	world.end();
+	let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Initializer, file and resource reloads tested in separate worlds.
 pub fn files() {
 	override_restored_before_map();
 	initializers_after_reboot();
+	initializers_after_reboot_at_an_area();
 	initializer_added_to_a_world_without();
 	file_named_by_a_reload();
 	resource_files();

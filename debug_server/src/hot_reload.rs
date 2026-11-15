@@ -17,7 +17,7 @@ use std::{
 };
 
 use auxtools::{
-	raw_types,
+	debug, raw_types,
 	runtime_tables::{self, type_fields, ProcEntryWords, NONE},
 	shutdown, Proc, StringRef
 };
@@ -841,7 +841,7 @@ enum StartingInit {
 }
 
 /// Prepare replacement global initialization before the original runs.
-/// The world starts at an earlier internal call or at the init proc's call.
+/// The world starts at an earlier call or at the init proc's call.
 /// If no original exists, run the replacement immediately. If the original
 /// has already run, return none and warn.
 fn prepare_global_init(
@@ -871,7 +871,9 @@ fn prepare_global_init(
 		let bytecode = assemble_with(NAME, &code, &[], known, pending, world_globals, added)?;
 		return Ok(Some(StartingInit::Now(bytecode)));
 	};
-	if proc.id != start && Proc::from_id(start).is_some() {
+	// Map areas can initialize before global init, as in tgstation.
+	// A different start proc is too late only if global init is on the stack.
+	if proc.id != start && debug::CallStacks::active().iter().any(|frame| frame.proc.id == proc.id) {
 		warnings.push(ran());
 		return Ok(None);
 	}
