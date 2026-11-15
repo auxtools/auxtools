@@ -443,6 +443,14 @@ fn output_and_exit() {
 	let log = category(&world, "dap: to the log");
 	assert!(log == "stdout" || log == "stderr", "the world's log came as {:?}", log);
 	ok("world output forwarding");
+	if cfg!(windows) {
+		assert!(
+			world.output.contains("socket reuse workaround enabled"),
+			"socket reuse workaround not enabled:\n{}",
+			world.output
+		);
+		ok("socket reuse workaround");
+	}
 
 	let pid = client::listed_world("dap_test_host.dmb");
 	world.run("quit");
