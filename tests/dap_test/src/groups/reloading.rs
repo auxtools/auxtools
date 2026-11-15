@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use crate::{
 	client::value_of,
 	ok,
-	paths::ByondCommand,
+	paths::{self, ByondCommand},
 	world::{host_file, World}
 };
 
@@ -944,9 +944,53 @@ fn nothing_to_run() {
 	let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Hold reloads until changed build flags are applied or reverted.
+fn held_for_build_flags() {
+	let dir = copy_of_the_world("held_for_build_flags");
+	std::fs::write(
+		dir.join("flags.dm"),
+		"/proc/flag_value()\n\treturn 1\n\n#ifdef FLAG_A\n/proc/flagged()\n\treturn \"a\"\n#else\n/proc/flagged()\n\treturn \"none\"\n#endif\n"
+	)
+	.unwrap();
+	let dme = dir.join("dap_test_host.dme");
+	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"flags.dm\"\n";
+	std::fs::write(&dme, text).unwrap();
+	let build = |flags: &[&str]| {
+		let built = Command::new(paths::find_dm()).with_byond_paths().args(flags).arg(&dme).status().unwrap();
+		assert!(built.success(), "dreammaker build of {} failed", dir.display());
+	};
+	build(&[]);
+	let more = json!({ "hotReload": true, "buildFlags": [] });
+	let mut world = World::launch_in(dir.clone(), more);
+	world.catch_runtimes(false);
+	world.configure();
+	world.wait_output("Hot reload active");
+	let changed = vec![("build flags changed (added FLAG_A)".to_owned(), "rebuild".to_owned())];
+
+	// Changed flags hold source edits.
+	world.drop_events("auxtoolsReload");
+	world.request("auxtoolsBuildFlags", json!({ "flags": ["FLAG_A"] }));
+	assert_eq!(held_changes(&mut world), changed);
+	edit_held(&mut world, "flags.dm", "\treturn 1\n", "\treturn 2\n");
+	assert_eq!(world.eval_global("flag_value()"), "1");
+	ok("changed build flags hold reloads");
+
+	// Reverting the flags releases pending edits.
+	let before = reloads(&world.output);
+	world.request("auxtoolsBuildFlags", json!({ "flags": [] }));
+	world.wait_until("the released reload", |output| reloads(output) > before);
+	assert_eq!(world.eval_global("flag_value()"), "2");
+	assert_eq!(held_changes(&mut world), []);
+	ok("reverted build flags release held edits");
+
+	world.end();
+	let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Code and type edits tested in separate worlds, including held reloads.
 pub fn edits() {
 	held_until_reboot();
+	held_for_build_flags();
 	saved_without_reloading();
 	built_in_taken_away();
 	behind_the_clients_back();

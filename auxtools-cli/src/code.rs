@@ -106,7 +106,9 @@ pub enum Command {
 	/// Whether the last reload was applied
 	Reloaded(bool),
 	/// Resources cached by the last reload; sent before `Reloaded`.
-	Resources(Vec<ReloadedResource>)
+	Resources(Vec<ReloadedResource>),
+	/// Selected build defines. Hold reloads until they match the running build.
+	Defines(Vec<(String, Option<String>)>)
 }
 
 /// Start source worker `worker`, which tags its events with that number.
@@ -121,10 +123,12 @@ pub fn start(mut options: Options, out: Arc<Output>, inputs: mpsc::Sender<Input>
 		.spawn(move || {
 			let code = Code {
 				root: options.dme.parent().map(Path::to_owned).unwrap_or_default(),
-				parse_options: ParseOptions {
+				parse_options: RefCell::new(ParseOptions {
 					defines: options.defines.clone(),
 					byond: None
-				},
+				}),
+				wanted_defines: RefCell::new(None),
+				released: Cell::new(false),
 				options,
 				out,
 				inputs,
@@ -148,7 +152,12 @@ pub fn start(mut options: Options, out: Arc<Output>, inputs: mpsc::Sender<Input>
 
 struct Code {
 	options: Options,
-	parse_options: ParseOptions,
+	/// Parse options matching the running build.
+	parse_options: RefCell<ParseOptions>,
+	/// Latest selected defines, pending adoption of a rebuilt `.dmb`.
+	wanted_defines: RefCell<Option<Vec<(String, Option<String>)>>>,
+	/// Reverted defines allow pending edits to reload.
+	released: Cell<bool>,
 	root: PathBuf,
 	out: Arc<Output>,
 	inputs: mpsc::Sender<Input>,
@@ -211,10 +220,10 @@ impl Code {
 	fn parse(&self) -> Result<Snapshot, String> {
 		self.parsed.set(true);
 		self.parse_started.set(SystemTime::now());
-		Snapshot::parse(&self.options.dme, &self.parse_options)
+		Snapshot::parse(&self.options.dme, &self.parse_options.borrow())
 	}
 
-	fn run(mut self) {
+	fn run(self) {
 		// Parse after connecting: DM_VERSION and conditional compilation depend
 		// on the running world's BYOND build.
 		let byond = loop {
@@ -223,11 +232,12 @@ impl Code {
 					self.world.set(world);
 					break byond;
 				}
+				Ok(Command::Defines(defines)) => self.defines_wanted(defines),
 				Ok(Command::Reloaded(_) | Command::Resources(_)) => {}
 				Err(_) => return
 			}
 		};
-		self.parse_options.byond = Some(byond);
+		self.parse_options.borrow_mut().byond = Some(byond);
 		// Record this before parsing so a rebuild during the parse is detected
 		// as a new baseline on the next connection.
 		let dmb_modified = self.dmb_modified();
@@ -286,6 +296,7 @@ impl Code {
 			let wait = INTERVAL.max(watching.files.took * (LOOKING_SHARE - 1));
 			match self.commands.recv_timeout(wait) {
 				Ok(Command::Connected { world, .. }) => self.connected(world),
+				Ok(Command::Defines(defines)) => self.defines_wanted(defines),
 				Ok(Command::Reloaded(_) | Command::Resources(_)) => {}
 				Err(mpsc::RecvTimeoutError::Disconnected) => return,
 				Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -296,6 +307,12 @@ impl Code {
 			}
 			while self.reconnected.take() {
 				if !self.catch_up(watching) {
+					return;
+				}
+			}
+			if self.released.take() && !watching.edited_since_built.is_empty() {
+				let edited = watching.edited_since_built.clone();
+				if !self.send(Event::Reloading) || !self.reload_code(watching, edited) || !self.send(Event::Looked) {
 					return;
 				}
 			}
@@ -343,7 +360,7 @@ impl Code {
 	/// Reload the changed DM files. Return false on adapter disconnect.
 	fn reload_code(&self, watching: &mut Watching, changed: HashSet<PathBuf>) -> bool {
 		// Held changes require a full diff so edits in other files wait too.
-		let held = !self.refusals.borrow().is_empty();
+		let held = !self.outstanding().is_empty();
 		if let (false, [file]) = (held, changed.iter().collect::<Vec<_>>().as_slice()) {
 			let file = (*file).clone();
 			// Use the last applied snapshot, including incremental file parses.
@@ -419,6 +436,11 @@ impl Code {
 			}
 			self.log("using the rebuilt .dmb");
 			watching.dmb_modified = dmb_modified;
+			let held = !self.outstanding().is_empty();
+			// Adopt the latest selected defines with the rebuilt world.
+			if let Some(defines) = self.wanted_defines.take() {
+				self.parse_options.borrow_mut().defines = defines;
+			}
 			// Include pending edits in the baseline rather than reloading them.
 			watching.files.changed(&self.root);
 			match self.parse() {
@@ -440,7 +462,7 @@ impl Code {
 					};
 					watching.resources = resources;
 					watching.built = built;
-					if !self.rebuilt() {
+					if !self.rebuilt(held) {
 						return false;
 					}
 				}
@@ -630,8 +652,10 @@ impl Code {
 	/// Return false if sending `Event::Ready` fails.
 	fn ready(&self) -> bool {
 		while let Ok(command) = self.commands.try_recv() {
-			if let Command::Connected { world, .. } = command {
-				self.connected(world);
+			match command {
+				Command::Connected { world, .. } => self.connected(world),
+				Command::Defines(defines) => self.defines_wanted(defines),
+				Command::Reloaded(_) | Command::Resources(_) => {}
 			}
 		}
 		self.reconnected.get() || self.send(Event::Ready)
@@ -639,7 +663,7 @@ impl Code {
 
 	/// Send macros if they changed. Returns false if the adapter disconnected.
 	fn give_macros(&self) -> bool {
-		let macros = match macros(&self.options.dme, &self.parse_options) {
+		let macros = match macros(&self.options.dme, &self.parse_options.borrow()) {
 			Ok(macros) => macros,
 			Err(e) => {
 				self.log(format!("source macros unavailable for evaluation: {}", e));
@@ -673,7 +697,8 @@ impl Code {
 		// A reboot satisfies deferred initializers, but not rebuild
 		// requirements.
 		let applies_now = |deferred: &&Refusal| restarted && deferred.until == Until::Reboot;
-		if !changes.refused.is_empty() || !changes.deferred.iter().all(|d| applies_now(&d)) {
+		let defines = self.defines_refusal();
+		if !changes.refused.is_empty() || !changes.deferred.iter().all(|d| applies_now(&d)) || defines.is_some() {
 			// Clients use absolute source paths.
 			let refused = changes
 				.refused
@@ -684,7 +709,7 @@ impl Code {
 					..refusal.clone()
 				})
 				.collect::<Vec<_>>();
-			let summary = if refused.iter().all(|refusal| refusal.until == Until::Reboot) {
+			let summary = if defines.is_none() && refused.iter().all(|refusal| refusal.until == Until::Reboot) {
 				"reboot required"
 			} else {
 				"rebuild required"
@@ -692,7 +717,7 @@ impl Code {
 			let event = Event::NotReloaded {
 				summary: summary.to_owned(),
 				errors: vec![],
-				refused: refused.clone(),
+				refused: refused.iter().cloned().chain(defines).collect(),
 				warnings: changes.warnings.clone()
 			};
 			return (self.send(event) && self.refused_by(refused, whole)).then_some(false);
@@ -734,6 +759,7 @@ impl Code {
 				// The adapter rejects reloads prepared before a reboot;
 				// `catch_up` will prepare them for the new world.
 				Ok(Command::Connected { world, .. }) => self.connected(world),
+				Ok(Command::Defines(defines)) => self.defines_wanted(defines),
 				Err(_) => return None
 			}
 		};
@@ -747,27 +773,67 @@ impl Code {
 	/// Send the set if changed. Return false on disconnect.
 	fn refused_by(&self, refused: Vec<Refusal>, whole: bool) -> bool {
 		let before = self.outstanding();
-		let mut now = if whole { vec![] } else { before.clone() };
+		let mut now = if whole { vec![] } else { self.refusals.borrow().clone() };
 		for refusal in refused {
 			if !now.contains(&refusal) {
 				now.push(refusal);
 			}
 		}
-		*self.refusals.borrow_mut() = now.clone();
-		now == before || self.send(Event::Refusals(now))
+		*self.refusals.borrow_mut() = now;
+		let after = self.outstanding();
+		after == before || self.send(Event::Refusals(after))
 	}
 
-	/// Forget all refusals: a rebuilt `.dmb` includes or replaces their
-	/// changes. Return false on disconnect.
-	fn rebuilt(&self) -> bool {
-		let had = !self.refusals.borrow().is_empty();
+	/// Clear refusals after rebuilding. If `held`, update the reported
+	/// problems. Return false on disconnect.
+	fn rebuilt(&self, held: bool) -> bool {
 		self.refusals.borrow_mut().clear();
-		(!had || self.send(Event::Refusals(vec![]))) && self.send(Event::Watching)
+		(!held || self.send(Event::Refusals(self.outstanding()))) && self.send(Event::Watching)
 	}
 
-	/// Refused changes still missing from the world.
+	/// Outstanding source changes and build-flag mismatches.
 	fn outstanding(&self) -> Vec<Refusal> {
-		self.refusals.borrow().clone()
+		let mut outstanding = self.refusals.borrow().clone();
+		outstanding.extend(self.defines_refusal());
+		outstanding
+	}
+
+	/// Update selected defines and report changes to the reload hold.
+	fn defines_wanted(&self, defines: Vec<(String, Option<String>)>) {
+		let held = self.defines_refusal().is_some();
+		let before = self.outstanding();
+		*self.wanted_defines.borrow_mut() = Some(defines);
+		self.released.set(held && self.defines_refusal().is_none());
+		let after = self.outstanding();
+		if after != before {
+			let _ = self.send(Event::Refusals(after));
+		}
+	}
+
+	/// Report selected defines that differ from the running build.
+	fn defines_refusal(&self) -> Option<Refusal> {
+		let wanted = self.wanted_defines.borrow();
+		let wanted = wanted.as_ref()?;
+		let built = &self.parse_options.borrow().defines;
+		let listed = |defines: &[(String, Option<String>)], others: &[(String, Option<String>)]| {
+			defines
+				.iter()
+				.filter(|define| !others.contains(define))
+				.map(|(name, value)| match value {
+					Some(value) => format!("{}={}", name, value),
+					None => name.clone()
+				})
+				.collect::<Vec<_>>()
+		};
+		let (added, removed) = (listed(wanted, built), listed(built, wanted));
+		let mut changed = vec![];
+		if !added.is_empty() {
+			changed.push(format!("added {}", added.join(", ")));
+		}
+		if !removed.is_empty() {
+			changed.push(format!("removed {}", removed.join(", ")));
+		}
+		(!changed.is_empty()).then(|| Refusal::new("", format!("build flags changed ({})", changed.join("; "))))
 	}
 
 	/// Update the skin if it differs from the world's. Return false on
@@ -795,6 +861,7 @@ impl Code {
 				}
 				Ok(Command::Resources(_)) => {}
 				Ok(Command::Connected { world, .. }) => self.connected(world),
+				Ok(Command::Defines(defines)) => self.defines_wanted(defines),
 				Err(_) => return false
 			}
 		}
@@ -826,6 +893,7 @@ impl Code {
 				}
 				Ok(Command::Resources(_)) => {}
 				Ok(Command::Connected { world, .. }) => self.connected(world),
+				Ok(Command::Defines(defines)) => self.defines_wanted(defines),
 				Err(_) => return false
 			}
 		}

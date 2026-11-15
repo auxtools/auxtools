@@ -161,6 +161,10 @@ struct LaunchArguments {
 	/// Build defines (`NAME` or `NAME=VALUE`) used to parse the source.
 	#[serde(default)]
 	defines: Vec<String>,
+	/// Selected build flags, combined with `defines` for parsing.
+	/// Updated by `auxtoolsBuildFlags` when the build task uses these flags.
+	#[serde(default)]
+	build_flags: Vec<String>,
 	/// Swap changed code into the world as files are saved
 	#[serde(default = "yes")]
 	hot_reload: bool,
@@ -375,6 +379,8 @@ pub struct Adapter {
 	game: Option<Game>,
 	/// Configuration used to launch the current world.
 	launched: Option<LaunchArguments>,
+	/// Pending defines to send when the source worker starts.
+	wanted_defines: Option<Vec<String>>,
 	/// Pending configuration for relaunch after process exit.
 	relaunching: Option<(LaunchArguments, Prepared)>,
 	/// Session-requested reboot; suppress its expected disconnect message.
@@ -505,6 +511,7 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 		game: None,
 		launched: None,
 		relaunching: None,
+		wanted_defines: None,
 		rebooting: false,
 		joined: join::Joined::default(),
 		reload_status: status::ReloadStatus::default(),
@@ -567,6 +574,24 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 		game.kill();
 	}
 	adapter.joined.world_ended();
+}
+
+/// Arguments for `auxtoolsBuildFlags`.
+#[derive(Deserialize)]
+struct BuildFlagsArguments {
+	/// Selected defines: `NAME` or `NAME=VALUE`.
+	flags: Vec<String>
+}
+
+/// Combine launch defines and build flags without duplicates.
+fn all_defines(args: &LaunchArguments) -> Vec<String> {
+	let mut all = args.defines.clone();
+	for flag in &args.build_flags {
+		if !all.contains(flag) {
+			all.push(flag.clone());
+		}
+	}
+	all
 }
 
 /// Treat omitted or null request arguments as an empty object.
@@ -716,6 +741,7 @@ impl Adapter {
 			"auxtoolsReconnect" => self.reconnect_clients(),
 			"auxtoolsJoin" => arguments(args).and_then(|args| self.join(args)),
 			"auxtoolsReboot" => self.reboot(),
+			"auxtoolsBuildFlags" => arguments(args).and_then(|args| self.build_flags_changed(args)),
 			"restart" => arguments(args).and_then(|args| self.restart(args)),
 			"setFunctionBreakpoints" => arguments(args).and_then(|args| self.set_function_breakpoints(args)),
 			"setInstructionBreakpoints" => arguments(args).and_then(|args| self.set_instruction_breakpoints(args)),
@@ -847,8 +873,8 @@ impl Adapter {
 		self.sleeping_threads = args.sleeping_threads.unwrap_or(aux::DEFAULT_SLEEPING_STACKS);
 		let same_code = self.launched.as_ref().is_some_and(|old| {
 			// Parse options depend on the BYOND build.
-			(&old.dme, &old.dmb, &old.defines, old.hot_reload, &old.byond_path)
-				== (&args.dme, &args.dmb, &args.defines, args.hot_reload, &args.byond_path)
+			(&old.dme, &old.dmb, &old.defines, &old.build_flags, old.hot_reload, &old.byond_path)
+				== (&args.dme, &args.dmb, &args.defines, &args.build_flags, args.hot_reload, &args.byond_path)
 		});
 		if !same_code {
 			self.drop_code();
@@ -858,9 +884,10 @@ impl Adapter {
 			self.watching = false;
 			self.code_settings = Some(CodeSettings {
 				dme: prepared.dme.clone().filter(|dme| dme.is_file()),
-				defines: args.defines.clone(),
+				defines: all_defines(&args),
 				hot_reload: args.hot_reload
 			});
+			self.wanted_defines = None;
 		}
 
 		// Debugged worlds wait for breakpoints. Hot reload also requires a wait
@@ -1163,6 +1190,28 @@ impl Adapter {
 		self.reload_state("reading", None);
 		self.code_worker += 1;
 		self.code = Some(code::start(options, self.out.clone(), self.inputs.clone(), self.code_worker));
+		if let Some(defines) = self.wanted_defines.clone() {
+			self.give_defines(defines);
+		}
+	}
+
+	/// Update selected flags and hold reloads until the world is rebuilt.
+	fn build_flags_changed(&mut self, args: BuildFlagsArguments) -> Handled {
+		// Attach sessions do not control the build.
+		let Some(launched) = self.launched.as_mut() else {
+			return Ok(Value::Null);
+		};
+		launched.build_flags = args.flags;
+		let defines = all_defines(launched);
+		self.wanted_defines = Some(defines.clone());
+		self.give_defines(defines);
+		Ok(Value::Null)
+	}
+
+	fn give_defines(&self, defines: Vec<String>) {
+		if let Some(code) = &self.code {
+			let _ = code.send(code::Command::Defines(defines.iter().map(|define| code::parse_define(define)).collect()));
+		}
 	}
 
 	fn code_event(&mut self, event: code::Event) {
