@@ -59,7 +59,7 @@ const ICON_W_BUILD: u32 = 1648;
 /// Newest validated build. Unlink and rebalance are identified by call
 /// position in erase, so matching patterns alone is insufficient for
 /// newer builds. Reject them until checked.
-const NEWEST_CHECKED_BUILD: u32 = 1688;
+const NEWEST_CHECKED_BUILD: u32 = 1689;
 const RESOURCE_TAG: u8 = 0x0C;
 
 #[cfg(windows)]

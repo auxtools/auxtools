@@ -317,7 +317,7 @@ example, `"[icon]"` and `browse_rsc()` use `icons/lamp.dmi` where a rebuild uses
 the source spelling `lamp.dmi`.
 
 Resource reloads modify BYOND's appearance tree and require a validated build.
-Builds newer than 516.1688 are refused for this operation, even though the rest
+Builds newer than 516.1689 are refused for this operation, even though the rest
 of the debugger is attempted.
 
 Generated assets and caches need the codebase to regenerate them or a rebuild:
