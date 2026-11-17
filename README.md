@@ -47,7 +47,7 @@ The launcher watches source files and reloads changes when they are saved. Hot r
 
 Hot reload supports proc bodies, proc and verb additions, proc removals, new types and variables, variable types and defaults, `static`, `const` and `tmp` declarations, parameters, `set` statements and parent types. Changes to proc declarations, such as converting a proc to a verb, require a rebuild.
 
-Existing calls finish on their original bytecode. Existing instances retain their verbs and built-in values; computed defaults apply to new instances. Changed world settings and client settings stored in the world record, such as `client.control_freak`, take effect after restart.
+Existing calls finish on their original bytecode. Existing instances retain their verbs and built-in values; computed defaults apply to new instances. `text2path()` resolves previously missing paths after reload on verified builds: 515.1641–516.1689 on Windows and 515.1644–516.1689 on Linux. Other builds retain cached misses until reboot. Changed world settings and client settings stored in the world record, such as `client.control_freak`, take effect after restart.
 
 After reboot, the launcher restores reloads before the world runs its code. Reloads introducing resource files absent from the build wait until `world/New`, so map atoms run the built code.
 
