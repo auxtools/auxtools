@@ -37,7 +37,7 @@ auxtools reboot
 auxtools stop
 ```
 
-Exit codes are 0 for success, 1 for failure, 2 for timeout, 3 if the world exits or reboots before completion, and 4 if a world launched in the foreground exits unsuccessfully.
+Exit codes are 0 for success, 1 for failure, 2 for timeout, 3 if the world exits or reboots before completion, 4 if a world launched in the foreground exits unsuccessfully, and 5 if `check` finds known BYOND bugs.
 
 Editors use `auxtools dap` as the debug adapter.
 
@@ -47,11 +47,11 @@ The launcher watches source files and reloads changes when they are saved. Hot r
 
 Hot reload supports proc bodies, proc and verb additions, proc removals, new types and variables, variable types and defaults, `static`, `const` and `tmp` declarations, parameters, `set` statements and parent types. Changes to proc declarations, such as converting a proc to a verb, require a rebuild.
 
-Existing calls finish on their original bytecode. Existing instances retain their verbs and built-in values; computed defaults apply to new instances. Changed world settings and client settings stored in the world record, such as `client.control_freak`, take effect after restart.
+Existing calls finish on their original bytecode. Existing instances retain their verbs and built-in values; computed defaults apply to new instances. `text2path()` resolves previously missing paths after reload on verified builds: 515.1641–516.1689 on Windows and 515.1644–516.1689 on Linux. Other builds retain cached misses until reboot. Changed world settings and client settings stored in the world record, such as `client.control_freak`, take effect after restart.
 
 After reboot, the launcher restores reloads before the world runs its code. Reloads introducing resource files absent from the build wait until `world/New`, so map atoms run the built code.
 
-Running globals and statics keep their values when their initializers change. After reboot, updated initializers run once before map creation. Existing initializers keep the build's order; additions follow their preceding var in dmasm's order, which does not yet match DreamMaker exactly. New statics in deferred reloads initialize at `world/New`.
+Running globals and statics keep their values when their initializers change. After reboot, updated initializers run once before map creation. dmasm orders all initializers by their dependencies. This matches the tested codebases, but some source arrangements still differ from DreamMaker. New statics in deferred reloads initialize at `world/New`.
 
 Saving an icon, sound or other referenced resource reloads it, including files found through `FILE_DIR`. Existing appearances redraw with the new file; recompiled code and defaults use it too. Stored values and generated assets keep their old resources. Shared resources need a rebuild to separate them. After reboot, resource edits are restored at `world/New`. Reloaded `FILE_DIR` resources use paths relative to the world directory rather than their source spelling. See the [extension documentation](editors/vscode/README.md#icons-sounds-and-other-files) for details and limits.
 
@@ -60,6 +60,16 @@ Saving the `.dmf` skin updates the interface sent at login. Connected clients ne
 Changes to `client/script` text also apply at login. Resource-file scripts and included `.dms` files require a rebuild.
 
 Proc-body edits can use a single-file parse. Other edits trigger a full project parse. See the [extension documentation](editors/vscode/README.md#hot-reload-experimental) for reload limits and the [hot reload tests](tests/hot_reload_test) for supported cases.
+
+## Checking for known BYOND bugs
+
+`auxtools check` scans project source for known BYOND bugs, including ignored return values, incorrect operator dispatch and loops that can crash the server. It compiles procs without writing a `.dmb` and runs without BYOND, including in CI.
+
+```sh
+auxtools check tgstation.dme -DCIBUILDING --byond-version 516.1689
+```
+
+Findings use `FILE:LINE: PROC: diagnostic`. Pass the build's defines with `-D` and select its version with `--byond-version`. Exit code 5 means bugs were found; 0 means none were found. Unsupported procs and parse errors are reported as unchecked and do not affect the exit code. Runtime-only bugs, such as errors swallowed inside operator overloads, are not detected.
 
 ## Supported BYOND versions
 
