@@ -398,7 +398,7 @@ pub(crate) fn is_breakpoint(ctx: *mut raw_types::procs::ExecutionContext) -> boo
 /// Whether this is a debugger helper proc, such as the keepalive loop.
 unsafe fn in_helper(ctx: *mut raw_types::procs::ExecutionContext) -> bool {
 	let id = unsafe { (**(*ctx).proc_instance()).proc };
-	Proc::from_id(id).is_some_and(|proc| proc.path.trim_start_matches("/proc").starts_with("/auxtools_"))
+	Proc::from_id(id).is_some_and(|proc| crate::launched::is_helper(&proc))
 }
 
 impl InstructionHook for Server {

@@ -81,6 +81,10 @@ type Handler = fn(*mut raw_types::procs::ExecutionContext);
 
 // Read on every instruction
 static mut HANDLER: Option<Handler> = None;
+// Timestamps around the handler, taken while `TIMED`
+static mut TIMED: bool = false;
+static mut ENTERED: u64 = 0;
+static mut LEFT: u64 = 0;
 static mut CALLS_BYPASS_DETOUR: bool = false;
 // The detour stays for the life of the process, through reboots
 static mut DETOURED: bool = false;
@@ -93,6 +97,25 @@ pub fn set_handler(handler: Handler) -> Result<(), String> {
 		HANDLER = Some(handler);
 	}
 	Ok(())
+}
+
+/// Enable timestamps at hook entry and exit for `ticks_since_last`.
+pub fn time_instructions(timed: bool) {
+	unsafe {
+		TIMED = timed;
+	}
+}
+
+/// The processor's timestamp counter
+pub fn timestamp() -> u64 {
+	unsafe { core::arch::x86::_rdtsc() }
+}
+
+/// Elapsed ticks between the previous hook exit and this entry, excluding
+/// the handler. Call from the handler while timing is enabled. Returns `None`
+/// if nested execution inside the hook invalidated the interval.
+pub fn ticks_since_last() -> Option<u64> {
+	unsafe { ENTERED.checked_sub(LEFT) }
 }
 
 /// Called when auxtools starts
@@ -147,6 +170,9 @@ fn detour() -> Result<(), String> {
 #[no_mangle]
 extern "C" fn handle_instruction(ctx: *mut raw_types::procs::ExecutionContext) -> *const raw_types::procs::ExecutionContext {
 	unsafe {
+		if TIMED {
+			ENTERED = timestamp();
+		}
 		// Dispatch proc hooks and load initialization for builds that bypass
 		// the call_proc_by_id detour.
 		if CALLS_BYPASS_DETOUR && *(*ctx).bytecode_offset() == 0 {
@@ -154,6 +180,9 @@ extern "C" fn handle_instruction(ctx: *mut raw_types::procs::ExecutionContext) -
 		}
 		if let Some(handler) = HANDLER {
 			handler(ctx);
+		}
+		if TIMED {
+			LEFT = timestamp();
 		}
 	}
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Wire protocol version. Increment for changes incompatible with older
 /// clients or servers. Including the version in endpoint names prevents
 /// connections using incompatible message layouts.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Shutdown notification sent before disconnecting clients; not used for
 /// reboot.
@@ -247,7 +247,10 @@ pub enum Request {
 	Reconnect,
 	/// Set `client/script` text for future logins. Defer until `world/New`
 	/// if the world is still loading. Respond with `Response::Script`.
-	Script(ScriptRequest)
+	Script(ScriptRequest),
+	/// Count and time the instructions the world runs. Respond with
+	/// `Response::Profile`.
+	Profile(ProfileRequest)
 }
 
 /// A `#define` of the world's code, as its preprocessor has it
@@ -401,6 +404,7 @@ pub enum Response {
 	Skin(Result<SkinReloaded, String>),
 	Reconnect(Result<Reconnected, String>),
 	Script(Result<ScriptReloaded, String>),
+	Profile(Result<ProfileReply, String>),
 	/// Permanent initialization failure, sent on connection instead of a
 	/// response, followed by `Disconnect`. The world continues without
 	/// the debugger for the lifetime of the process.
@@ -441,6 +445,80 @@ pub struct ScriptReloaded {
 	pub clients: u32,
 	/// Whether DreamSeeker hosts the world
 	pub hosted: bool
+}
+
+/// One profile per world, discarded when its client disconnects or the world
+/// ends.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ProfileRequest {
+	/// Start measuring, discarding the last profile. Measure every proc, or
+	/// only `procs` if there are any. Refused while a profile is running.
+	Start { procs: Vec<ProcRef> },
+	/// Stop measuring and respond with the totals. The measurements stay.
+	Stop,
+	/// The totals so far.
+	Totals,
+	/// Executed instructions for a code reference from the totals.
+	Code { code: CodeRef }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum ProfileReply {
+	Started,
+	Totals(ProfileTotals),
+	Code(Vec<ProfiledInstruction>)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProfileTotals {
+	/// How long the profile has run, or ran
+	pub seconds: f64,
+	pub running: bool,
+	/// Estimated overhead per instruction in nanoseconds, based on the
+	/// cheapest instruction's average time.
+	pub overhead_ns: f64,
+	/// Each code that ran
+	pub codes: Vec<ProfiledCode>
+}
+
+/// Aggregate measurements for a proc's bytecode buffer.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ProfiledCode {
+	pub proc: ProcRef,
+	/// For `ProfileRequest::Code` and `Request::Disassemble`. Code a hot
+	/// reload replaced is measured apart from the proc's new code.
+	pub code: CodeRef,
+	/// The file its DbgFile names
+	pub file: Option<String>,
+	/// The first line it has code on
+	pub line: Option<u32>,
+	pub total: ProfiledTotal
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfiledTotal {
+	/// Times its first instruction ran
+	pub calls: u64,
+	/// Instructions run
+	pub hits: u64,
+	/// Nanoseconds in its own instructions
+	pub own_ns: u64,
+	/// Nanoseconds in the procs it called
+	pub callee_ns: u64
+}
+
+/// Per-instruction measurements. Self time ends at the next instruction,
+/// including entry into a callee. Excludes sleep and engine work between runs.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfiledInstruction {
+	/// In words, as `BytecodeInstruction::offset`
+	pub offset: u16,
+	/// Times it started
+	pub hits: u64,
+	pub own_ns: u64,
+	/// Nanoseconds in the procs it called, until they returned. Calls that
+	/// slept aren't included.
+	pub callee_ns: u64
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

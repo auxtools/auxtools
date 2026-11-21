@@ -8,6 +8,7 @@ mod instruction_hooking;
 mod journal;
 mod launched;
 mod macros;
+mod profiler;
 mod resource_reload;
 mod server;
 mod server_types;
@@ -86,7 +87,11 @@ impl InstructionHook for DebugServerInstructionHook<'static> {
 		// BYOND calls this through extern "C" code, and a panic that gets back
 		// out there aborts the whole game. Losing the debugger is the better
 		// deal.
-		if let Err(payload) = catch_unwind(AssertUnwindSafe(|| debug_server.handle_instruction(ctx))) {
+		let handled = catch_unwind(AssertUnwindSafe(|| {
+			profiler::enter(ctx, debug_server.is_in_eval());
+			debug_server.handle_instruction(ctx);
+		}));
+		if let Err(payload) = handled {
 			recover(&*payload, debug_server);
 		}
 	}

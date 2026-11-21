@@ -140,6 +140,12 @@ pub fn runs_spawns(proc: &Proc) -> bool {
 	KEEPALIVE_OURS.load(Ordering::Relaxed) && matches!(proc.path.as_str(), "/auxtools_keepalive" | "/auxtools_spawned")
 }
 
+/// Whether this is one of the debugger's helper procs, such as the keepalive
+/// loop.
+pub fn is_helper(proc: &Proc) -> bool {
+	proc.path.trim_start_matches("/proc").starts_with("/auxtools_")
+}
+
 static WORLD_LOAD: WorldLoad = WorldLoad { prepare, ready, failed };
 
 /// Whether a launcher started this world

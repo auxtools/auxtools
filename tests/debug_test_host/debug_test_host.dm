@@ -27,6 +27,17 @@ var/reboot_requested = FALSE
 	return pixloc(1, 1, 1)
 #endif
 
+// What the profiler is checked on: a loop, whose instructions run a known
+// number of times, and a call to it
+/proc/profiled_loop(n)
+	var/s = 0
+	for (var/i in 1 to n)
+		s += i
+	return s
+
+/proc/profiled_call()
+	return profiled_loop(1000)
+
 // Two seconds of runtime errors, then quiet again. The debugger is told not
 // to pause on them.
 /proc/start_runtimes()
