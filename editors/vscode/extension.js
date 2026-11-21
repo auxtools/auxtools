@@ -362,6 +362,91 @@ async function reboot(given) {
 	}
 }
 
+// Track profiles by session and show a stop action for the active session.
+class Profiles {
+	constructor(context) {
+		this.running = new Set();
+		this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
+		this.item.text = "$(pulse) Profiling";
+		this.item.tooltip = "Stop profiling and open report";
+		this.item.command = "auxtools.profile";
+		context.subscriptions.push(
+			this.item,
+			vscode.debug.onDidTerminateDebugSession((session) => {
+				this.running.delete(session.id);
+				this.show();
+			}),
+			vscode.debug.onDidChangeActiveDebugSession(() => this.show())
+		);
+	}
+
+	show() {
+		const session = vscode.debug.activeDebugSession;
+		if (session && this.running.has(session.id)) {
+			this.item.show();
+		} else {
+			this.item.hide();
+		}
+	}
+
+	// Toggle profiling for the given or active session.
+	async toggle(given) {
+		const session = given && given.customRequest ? given : vscode.debug.activeDebugSession;
+		if (!session || session.type !== DEBUG_TYPE) {
+			vscode.window.showErrorMessage("No active auxtools debug session.");
+			return;
+		}
+		if (!this.running.has(session.id)) {
+			try {
+				await session.customRequest("auxtoolsProfile", { action: "start" });
+			} catch (e) {
+				vscode.window.showErrorMessage(`Could not start profiling: ${e.message}`);
+				return;
+			}
+			this.running.add(session.id);
+			this.show();
+			return;
+		}
+		this.running.delete(session.id);
+		this.show();
+		try {
+			const report = await session.customRequest("auxtoolsProfile", { action: "stop" });
+			showProfile(session, report);
+		} catch (e) {
+			vscode.window.showErrorMessage(`Could not load profile: ${e.message}`);
+		}
+	}
+}
+
+// Show the report beside the code, with links to source lines.
+function showProfile(session, report) {
+	const panel = vscode.window.createWebviewPanel("auxtoolsProfile", "Instruction timing", vscode.ViewColumn.Beside, {
+		enableScripts: true,
+		enableFindWidget: true,
+		retainContextWhenHidden: true,
+	});
+	panel.webview.onDidReceiveMessage(async (message) => {
+		if (message.command !== "open" || typeof message.file !== "string") {
+			return;
+		}
+		// Resolve source paths relative to the workspace.
+		const folders = [session.workspaceFolder, ...(vscode.workspace.workspaceFolders || [])].filter(Boolean);
+		for (const folder of folders) {
+			const file = vscode.Uri.joinPath(folder.uri, message.file);
+			try {
+				await vscode.workspace.fs.stat(file);
+			} catch (e) {
+				continue;
+			}
+			const line = Math.max(0, (message.line || 1) - 1);
+			await vscode.window.showTextDocument(file, { viewColumn: vscode.ViewColumn.One, selection: new vscode.Range(line, 0, line, 0) });
+			return;
+		}
+		vscode.window.showWarningMessage(`Source file not found: ${message.file}`);
+	});
+	panel.webview.html = report.html;
+}
+
 // Offer the address when DreamSeeker is unavailable.
 async function offerAddress(address, started) {
 	const message = started ? `The world started at ${address}.` : `The world is at ${address}.`;
@@ -566,7 +651,7 @@ async function outdated(event) {
 }
 
 // World actions for the active session.
-async function worldMenu(status) {
+async function worldMenu(status, profiles) {
 	const session = vscode.debug.activeDebugSession;
 	if (!session || session.type !== DEBUG_TYPE) {
 		return;
@@ -576,6 +661,9 @@ async function worldMenu(status) {
 		{ label: "$(plug) Reconnect players", run: () => reconnectClients(session) },
 		{ label: "$(debug-restart) Restart", detail: "Run preLaunchTask, then restart the world", run: () => vscode.commands.executeCommand("workbench.action.debug.restart") },
 		{ label: "$(refresh) Reboot world", run: () => reboot() },
+		profiles.running.has(session.id)
+			? { label: "$(pulse) Stop profiling", detail: "Open report", run: () => profiles.toggle(session) }
+			: { label: "$(pulse) Profile instructions", run: () => profiles.toggle(session) },
 		{ label: "$(debug-stop) Stop", run: () => vscode.commands.executeCommand("workbench.action.debug.stop") },
 	];
 	if (["refused", "held"].includes(status.state(session).state)) {
@@ -620,6 +708,7 @@ async function scriptReloaded(event) {
 function activate(context) {
 	const provider = new ConfigurationProvider(context);
 	const status = new ReloadStatus(context);
+	const profiles = new Profiles(context);
 	trackUnsavedFiles(context);
 	followBuildFlags(context);
 	exposeLauncher(context);
@@ -632,7 +721,8 @@ function activate(context) {
 		vscode.commands.registerCommand("auxtools.reconnectClients", () => reconnectClients()),
 		vscode.commands.registerCommand("auxtools.join", () => join()),
 		vscode.commands.registerCommand("auxtools.reboot", reboot),
-		vscode.commands.registerCommand("auxtools.menu", () => worldMenu(status)),
+		vscode.commands.registerCommand("auxtools.menu", () => worldMenu(status, profiles)),
+		vscode.commands.registerCommand("auxtools.profile", (session) => profiles.toggle(session)),
 		vscode.workspace.onDidChangeConfiguration((event) => {
 			if (event.affectsConfiguration("auxtools.launcherPath") || event.affectsConfiguration("auxtools.addToTerminalPath")) {
 				exposeLauncher(context);

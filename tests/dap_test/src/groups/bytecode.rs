@@ -88,6 +88,35 @@ pub fn run() {
 	assert_eq!(one[0]["symbol"], "/leaf");
 	ok("frame instruction disassembly and source location");
 
+	// Start and stop profiling through the adapter.
+	world.request("auxtoolsProfile", json!({ "action": "start" }));
+	assert_eq!(
+		world.refused("auxtoolsProfile", json!({ "action": "start" })),
+		"another profile is running"
+	);
+	let evaluated = world.request("evaluate", json!({ "expression": "middle(1)", "context": "repl" }));
+	assert_eq!(evaluated["result"], "14");
+	let report = world.request("auxtoolsProfile", json!({ "action": "stop" }));
+	let page = report["html"].as_str().unwrap();
+	assert!(
+		report["procs"] == 2
+			&& report["instructions"].as_u64().unwrap() > 20
+			&& page.contains("<title>Instruction timing</title>")
+			&& page.contains(r#""proc":"/middle""#)
+			&& page.contains(r#""source":"var/y = x + 1 // @leaf_1""#),
+		"unexpected profile report: {}",
+		report
+	);
+	assert_eq!(
+		world.refused("auxtoolsProfile", json!({ "action": "start", "procs": ["/nothing_called_this"] })),
+		"the world has no proc /nothing_called_this"
+	);
+	assert_eq!(
+		world.refused("auxtoolsProfile", json!({ "action": "pause" })),
+		"unknown profile action 'pause': expected start or stop"
+	);
+	ok("profile report");
+
 	// Far more than leaf() has, on both sides
 	let window = disassemble(&mut world, here, -100, 300);
 	assert_eq!(window.len(), 300);

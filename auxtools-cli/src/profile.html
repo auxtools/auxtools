@@ -119,6 +119,7 @@ tr.line td {
 }
 tr.line .number { color: var(--muted); }
 tr.code td { padding: 0 8px 4px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+tr.line a.number { text-decoration: underline; cursor: pointer; }
 tr.ins:hover, tr.ins:focus { background: var(--wash); outline: none; }
 tr.ins.cold { color: var(--muted); }
 td.offset { color: var(--muted); width: 1%; }
@@ -206,6 +207,16 @@ td.time { width: 30%; min-width: 96px; }
 <script type="application/json" id="data">/*DATA*/</script>
 <script>
 "use strict";
+// Match the editor theme.
+if (document.body.classList.contains("vscode-dark") || document.body.classList.contains("vscode-high-contrast")) {
+	document.documentElement.dataset.theme = "dark";
+} else if (document.body.classList.contains("vscode-light")) {
+	document.documentElement.dataset.theme = "light";
+}
+
+// Enable source links in editor panels.
+const editor = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null;
+
 const data = JSON.parse(document.getElementById("data").textContent);
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -348,7 +359,16 @@ function listing() {
 			const header = el("tr", "line");
 			const cell = el("td", "mono");
 			cell.colSpan = columns.length;
-			cell.append(el("span", "number", (proc.file || "line") + ":" + line));
+			const place = el(editor && proc.file ? "a" : "span", "number", (proc.file || "line") + ":" + line);
+			if (editor && proc.file) {
+				const at = line;
+				place.href = "#";
+				place.addEventListener("click", (event) => {
+					event.preventDefault();
+					editor.postMessage({ command: "open", file: proc.file, line: at });
+				});
+			}
+			cell.append(place);
 			header.append(cell);
 			body.append(header);
 			if (row.source) {

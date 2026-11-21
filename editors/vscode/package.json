@@ -84,6 +84,11 @@
 				"command": "auxtools.menu",
 				"title": "Show world actions",
 				"category": "auxtools"
+			},
+			{
+				"command": "auxtools.profile",
+				"title": "Profile instructions",
+				"category": "auxtools"
 			}
 		],
 		"menus": {
@@ -106,6 +111,10 @@
 				},
 				{
 					"command": "auxtools.menu",
+					"when": "debugType == auxtools"
+				},
+				{
+					"command": "auxtools.profile",
 					"when": "debugType == auxtools"
 				}
 			]

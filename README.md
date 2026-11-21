@@ -53,7 +53,9 @@ auxtools profile --for 10 --html profile.html   # interactive report
 ```
 
 Without `--for`, profiling continues until Ctrl-C. Name procs to measure only those.
-Use `--json` for structured output. Calls from `auxtools eval` are included.
+Use `--json` for structured output. In VS Code, run **auxtools: Profile instructions** to
+start, then again to stop and open the report. Calls from `auxtools eval` and the
+Debug Console are included.
 
 Self time includes an instruction's work until the next instruction starts, including
 BYOND operations such as copying lists or freeing locals. For calls, self time covers
