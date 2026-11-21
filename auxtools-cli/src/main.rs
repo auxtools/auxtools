@@ -7,6 +7,7 @@ mod code;
 mod dap;
 mod debuggee;
 mod lines;
+mod profile;
 mod resources;
 mod script;
 mod skin;

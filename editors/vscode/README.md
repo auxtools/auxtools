@@ -2,7 +2,8 @@
 
 Debug BYOND worlds in VS Code with [auxtools](https://github.com/auxtools/auxtools).
 Supports breakpoints, stepping, runtime errors, sleeping proc stacks, variable
-inspection, expression evaluation, disassembly and experimental hot reload.
+inspection, expression evaluation, disassembly, instruction profiling and
+experimental hot reload.
 
 The launcher loads the debugger without changes to your world's source. Worlds
 run in DreamDaemon (`dd.exe` on Windows). Install a DM language extension
@@ -238,6 +239,20 @@ and hit counts and survive world reboots.
 With this view focused, **Step Over** advances one instruction in the frame,
 running calls to completion. **Step Into** advances to the next executed
 instruction, entering a callee if needed. **Step Out** returns to the caller.
+
+## Instruction profiling
+
+Run **auxtools: Profile instructions**, or choose **Profile instructions**
+from the world actions, to start. Click **Profiling** in the status bar to stop and
+open the report. The world keeps running, with profiling overhead.
+
+Select a proc to see its instructions grouped by source line. The report includes
+listings for the 40 procs with the most self time. Self time excludes called procs;
+**Include calls** adds their time to the bars and shows it in a separate column.
+Click a source line to open it.
+
+Sleep and engine work between runs of code are excluded. Calls from the Debug Console
+are included. See [timing limits](https://github.com/auxtools/auxtools#instruction-profiling).
 
 ## Hot reload (experimental)
 

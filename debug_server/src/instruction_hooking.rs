@@ -109,6 +109,12 @@ enum DebuggerAction {
 
 static mut CURRENT_ACTION: DebuggerAction = DebuggerAction::None;
 
+/// Previous instruction's frame and opcode. At offset zero, only a jump in
+/// the same frame continues the call; anything else starts a new one, which
+/// can get the frame the last call had.
+static mut LAST_FRAME: *mut raw_types::procs::ExecutionContext = std::ptr::null_mut();
+static mut LAST_OPCODE: u32 = 0;
+
 /// When the pause being waited for was asked for
 static mut PAUSE_ASKED: Option<std::time::Instant> = None;
 /// Skip debugger helpers for this long before pausing in one
@@ -398,7 +404,7 @@ pub(crate) fn is_breakpoint(ctx: *mut raw_types::procs::ExecutionContext) -> boo
 /// Whether this is a debugger helper proc, such as the keepalive loop.
 unsafe fn in_helper(ctx: *mut raw_types::procs::ExecutionContext) -> bool {
 	let id = unsafe { (**(*ctx).proc_instance()).proc };
-	Proc::from_id(id).is_some_and(|proc| proc.path.trim_start_matches("/proc").starts_with("/auxtools_"))
+	Proc::from_id(id).is_some_and(|proc| crate::launched::is_helper(&proc))
 }
 
 impl InstructionHook for Server {
@@ -462,9 +468,18 @@ impl InstructionHook for Server {
 				| DebuggerAction::StepInto { parent: frame, .. }
 				| DebuggerAction::StepOut { target: frame }
 				| DebuggerAction::StepOverInstruction { target: frame, .. }
-				| DebuggerAction::StepIntoInstruction { parent: frame, .. } => frame.forget_copy(ctx),
+				| DebuggerAction::StepIntoInstruction { parent: frame, .. } => {
+					// Clear stale step IDs in reused proc-instance memory;
+					// BYOND leaves this field uninitialized.
+					if *(*ctx).bytecode_offset() == 0 && !(ctx == LAST_FRAME && crate::profiler::can_jump(LAST_OPCODE)) {
+						(**(*ctx).proc_instance()).mega_hack = 0;
+					}
+					frame.forget_copy(ctx);
+				}
 				_ => {}
 			}
+			LAST_FRAME = ctx;
+			LAST_OPCODE = opcode;
 
 			match action {
 				DebuggerAction::None => {}

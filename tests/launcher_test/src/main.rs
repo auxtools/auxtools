@@ -21,6 +21,7 @@ mod journal;
 #[allow(dead_code)]
 #[path = "../../test_runner/src/paths.rs"]
 mod paths;
+mod profile;
 
 use std::{
 	io::{BufRead, BufReader, Read},
@@ -152,6 +153,7 @@ fn main() {
 			("inspect_spawned", Some(world)) => inspect::spawned_and_steps(world.pid, &world.dir, &world.code),
 			("trace", Some(world)) => {
 				command_line_trace(world.pid, &world.code);
+				profile::profile(world.pid, &world.dir, &world.code);
 				journal::runtimes(world.pid, &world.dir);
 			}
 			("journal", Some(world)) => {
@@ -380,6 +382,7 @@ fn command_line_shape() {
 		"step-out",
 		"wait",
 		"trace",
+		"profile",
 		"check",
 		"dap",
 		"help",

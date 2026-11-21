@@ -26,7 +26,16 @@ pub struct Page {
 const GROUPS: &[(&str, &[&str])] = &[
 	("World management", &["launch", "list", "status", "stop", "reboot", "reconnect", "log"]),
 	("Inspection", &["stack", "vars", "eval", "proc", "disassemble"]),
-	("Execution", &["pause", "continue", "step-over", "step-in", "step-out", "wait", "trace"]),
+	("Execution", &[
+		"pause",
+		"continue",
+		"step-over",
+		"step-in",
+		"step-out",
+		"wait",
+		"trace",
+		"profile"
+	]),
 	("Source code", &["check"]),
 	("Integration", &["dap", "help", "version"])
 ];
@@ -493,6 +502,39 @@ Input:
 
 Exit codes:
   0  Duration or hit limit reached, or interrupted with Ctrl-C.
+  1  Setup or command failed.
+  2  The world did not respond in time.
+  3  World exited or rebooted."
+	},
+	Page {
+		path: &["profile"],
+		brief: "Profile instruction execution",
+		summary: "Measure execution time by proc, source line and instruction.",
+		usage: "auxtools [--pid PID] profile [/PATH[#N]...] [OPTIONS]",
+		arguments: "/PATH  Proc to measure, with or without /proc/. Specify any number.
+       [default: every proc]
+#N     Zero-based definition index. [default: 0]",
+		sections: "Behavior:
+  Profile until --for expires or Ctrl-C, then show the report.
+  Profiling slows execution. Only one profile can run per world.
+  Calls from eval are included; sleep and engine work between runs are excluded.
+  Self time covers an instruction's work until the next instruction starts.
+  Time inside called procs is separate; calls that sleep are excluded from it.
+  The cheapest instruction's average time is subtracted as estimated overhead.
+
+Output:
+  Without proc paths, list the slowest procs and source lines.
+  With proc paths, show their instructions by source line: hits, share of the
+  proc's self time, nanoseconds per hit, and time in calls per hit.
+  --html adds an interactive report; --json prints structured data.
+  JSON contains seconds, ended (\"time\" or \"interrupted\"), overhead_ns,
+  instructions, ns, and procs. Each proc contains proc, override, old_code,
+  file, line, calls, instructions, ns, callee_ns, and listing: null outside
+  --top, else entries with offset, text, line, source, hits, ns, and callee_ns.
+  Instruction listings are limited by --top unless proc paths are given.
+
+Exit codes:
+  0  Duration reached, or interrupted with Ctrl-C.
   1  Setup or command failed.
   2  The world did not respond in time.
   3  World exited or rebooted."

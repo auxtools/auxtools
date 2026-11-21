@@ -20,7 +20,10 @@ use std::{path::PathBuf, process::Command, time::Duration};
 
 use client::{Client, World};
 use paths::ByondCommand;
-use server_types::{BreakpointReason, BreakpointSetResult, InstructionRef, ProcRef, Request, Response, VariablesRef};
+use server_types::{
+	BreakpointReason, BreakpointSetResult, InstructionRef, ProcRef, ProfileReply, ProfileRequest, ProfileTotals, ProfiledCode, Request, Response,
+	VariablesRef
+};
 
 // The debug server names global procs without the /proc part
 const BREAKPOINT_TARGET: &str = "/breakpoint_target";
@@ -491,6 +494,152 @@ fn protocol(world: &World, mut client: Client) -> Client {
 	client
 }
 
+fn profile_request(client: &mut Client, request: ProfileRequest) -> Result<ProfileReply, String> {
+	match client.request(Request::Profile(request)) {
+		Response::Profile(reply) => reply,
+		other => panic!("expected Profile, got {:?}", other)
+	}
+}
+
+fn profile_totals(client: &mut Client, request: ProfileRequest) -> ProfileTotals {
+	match profile_request(client, request) {
+		Ok(ProfileReply::Totals(totals)) => totals,
+		other => panic!("expected the totals of a profile, got {:?}", other)
+	}
+}
+
+/// Find profile measurements by proc path.
+fn profiled<'a>(totals: &'a ProfileTotals, path: &str) -> &'a ProfiledCode {
+	(totals.codes.iter().find(|code| code.proc.path == path)).unwrap_or_else(|| panic!("{} isn't in {:?}", path, totals))
+}
+
+/// Check profiling counts, timing and exclusions. Leave the world paused.
+fn profile(world: &World, mut client: Client) -> Client {
+	let proc = |path: &str| ProcRef {
+		path: path.to_owned(),
+		override_id: 0
+	};
+	assert_eq!(
+		profile_request(&mut client, ProfileRequest::Totals),
+		Err("no profile has been started".to_owned())
+	);
+	let missing = profile_request(&mut client, ProfileRequest::Start {
+		procs: vec![proc("/profiled_missing")]
+	});
+	assert_eq!(missing, Err("the world has no proc /profiled_missing".to_owned()));
+	assert_eq!(
+		profile_request(&mut client, ProfileRequest::Start { procs: vec![] }),
+		Ok(ProfileReply::Started)
+	);
+	assert_eq!(
+		profile_request(&mut client, ProfileRequest::Start { procs: vec![] }),
+		Err("another profile is running".to_owned())
+	);
+	println!("ok: profile validation");
+
+	// The world's loop sleeps a tick after each turn. Were sleeps timed,
+	// the profile's time would be about the time it ran.
+	assert_eq!(eval(&mut client, None, "profiled_call()"), "500500");
+	client.resume();
+	std::thread::sleep(Duration::from_secs(1));
+	let running = profile_totals(&mut client, ProfileRequest::Totals);
+	assert!(running.running && running.seconds >= 1.0, "{:?}", running);
+	let totals = profile_totals(&mut client, ProfileRequest::Stop);
+	assert!(!totals.running && totals.seconds >= running.seconds, "{:?}", totals);
+	let own: u64 = totals.codes.iter().map(|code| code.total.own_ns).sum();
+	assert!((own as f64) < totals.seconds * 1e9 / 10.0, "the world slept most of {:?}", totals);
+	let main_loop = profiled(&totals, "/main_loop");
+	assert!(main_loop.total.hits > 0 && main_loop.total.calls == 0, "{:?}", main_loop);
+	assert!(totals.codes.iter().all(|code| !code.proc.path.contains("auxtools_")), "{:?}", totals);
+	println!("ok: sleep and debugger helper exclusions");
+
+	// The loop's instructions ran once a turn, the rest once a call
+	let looped = profiled(&totals, "/profiled_loop");
+	assert_eq!(looped.total.calls, 1);
+	assert_eq!(looped.file.as_deref(), Some("debug_test_host.dm"));
+	let Ok(ProfileReply::Code(instructions)) = profile_request(&mut client, ProfileRequest::Code { code: looped.code }) else {
+		panic!("expected the instructions of {:?}", looped);
+	};
+	let Response::Disassemble(Ok(disassembly)) = client.request(Request::Disassemble { code: looped.code }) else {
+		panic!("expected the disassembly of {:?}", looped);
+	};
+	for instruction in &instructions {
+		let text = (disassembly.instructions.iter().find(|at| at.offset == instruction.offset))
+			.unwrap_or_else(|| panic!("no instruction starts at {:?}", instruction));
+		let turns = if text.text.starts_with("AugAdd") { 1000 } else { instruction.hits };
+		assert_eq!(instruction.hits, turns, "{}", text.text);
+		assert!(
+			matches!(instruction.hits, 1 | 1000 | 1001),
+			"{} ran {} times",
+			text.text,
+			instruction.hits
+		);
+		assert_eq!(instruction.callee_ns, 0, "{} calls nothing", text.text);
+	}
+	assert_eq!(instructions.iter().map(|instruction| instruction.hits).sum::<u64>(), looped.total.hits);
+	assert_eq!(
+		instructions.iter().map(|instruction| instruction.own_ns).sum::<u64>(),
+		looped.total.own_ns
+	);
+	assert!(instructions.iter().any(|instruction| instruction.hits == 1000), "{:?}", instructions);
+	assert!(looped.total.own_ns > 0, "{:?}", looped);
+	println!("ok: instruction hit counts");
+
+	// Allow for differences in overhead correction between caller and callee.
+	let calling = profiled(&totals, "/profiled_call");
+	assert_eq!(calling.total.calls, 1);
+	let near = |a: u64, b: u64| a.abs_diff(b) <= b / 4 + 2_000;
+	assert!(near(calling.total.callee_ns, looped.total.own_ns), "{:?} called {:?}", calling, looped);
+	println!("ok: callee timing");
+
+	// Kept after it stops, until the next
+	assert_eq!(profile_totals(&mut client, ProfileRequest::Totals), totals);
+	let code = match client.request(Request::ProcInfo { proc: proc("/overrun") }) {
+		Response::ProcInfo(Ok(info)) => info.code,
+		other => panic!("expected ProcInfo, got {:?}", other)
+	};
+	let unprofiled = profile_request(&mut client, ProfileRequest::Code { code });
+	assert_eq!(unprofiled, Err("/overrun wasn't profiled".to_owned()));
+
+	// Of the procs asked for alone
+	pause(&mut client);
+	let only = ProfileRequest::Start {
+		procs: vec![proc("/profiled_loop")]
+	};
+	assert_eq!(profile_request(&mut client, only), Ok(ProfileReply::Started));
+	assert_eq!(eval(&mut client, None, "profiled_call()"), "500500");
+	let totals = profile_totals(&mut client, ProfileRequest::Stop);
+	assert_eq!(totals.codes.len(), 1, "{:?}", totals);
+	assert_eq!(profiled(&totals, "/profiled_loop").total.calls, 1);
+	println!("ok: proc filters");
+
+	// It goes with the client that started it
+	let mut second = world.connect();
+	assert_eq!(
+		profile_request(&mut second, ProfileRequest::Start { procs: vec![] }),
+		Ok(ProfileReply::Started)
+	);
+	let theirs = Err("the profile belongs to another client".to_owned());
+	assert_eq!(profile_request(&mut client, ProfileRequest::Totals), theirs);
+	assert_eq!(profile_request(&mut client, ProfileRequest::Stop), theirs);
+	assert_eq!(profile_request(&mut client, ProfileRequest::Code { code: looped.code }), theirs);
+	assert!(profile_totals(&mut second, ProfileRequest::Totals).running);
+	second.leave();
+	// (the world sees it gone when it next looks)
+	let none = Err("no profile has been started".to_owned());
+	let mut gone = profile_request(&mut client, ProfileRequest::Totals);
+	for _ in 0..50 {
+		if gone == none {
+			break;
+		}
+		std::thread::sleep(Duration::from_millis(100));
+		gone = profile_request(&mut client, ProfileRequest::Totals);
+	}
+	assert_eq!(gone, none);
+	println!("ok: profile client cleanup");
+	client
+}
+
 fn main() {
 	let res = Command::new(paths::find_dm())
 		.with_byond_paths()
@@ -570,7 +719,8 @@ fn main() {
 		);
 	}
 
-	let mut client = protocol(&world, client);
+	let client = protocol(&world, client);
+	let mut client = profile(&world, client);
 
 	// Runtime errors don't pause it when the launcher says not to
 	client.send(Request::CatchRuntimes {

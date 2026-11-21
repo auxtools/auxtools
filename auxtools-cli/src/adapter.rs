@@ -37,6 +37,7 @@ mod data;
 mod files;
 mod join;
 mod journal;
+mod profile;
 mod restart;
 mod script;
 mod skin;
@@ -745,6 +746,7 @@ impl Adapter {
 			"auxtoolsReconnect" => self.reconnect_clients(),
 			"auxtoolsJoin" => arguments(args).and_then(|args| self.join(args)),
 			"auxtoolsReboot" => self.reboot(),
+			"auxtoolsProfile" => arguments(args).and_then(|args| self.profile(args)),
 			"auxtoolsBuildFlags" => arguments(args).and_then(|args| self.build_flags_changed(args)),
 			"restart" => arguments(args).and_then(|args| self.restart(args)),
 			"setFunctionBreakpoints" => arguments(args).and_then(|args| self.set_function_breakpoints(args)),

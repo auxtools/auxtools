@@ -27,6 +27,7 @@ use crate::{
 	hot_reload, journal, mem_profiler, resource_reload, unnamed, waker
 };
 
+mod profile;
 mod render;
 mod watches;
 
@@ -327,6 +328,8 @@ pub struct Server {
 	eval_callee_more: usize,
 	/// Hot reload owner and its client description (see `Request::Reloader`).
 	reloader: Option<(ClientId, String)>,
+	/// Profile owner (see `Request::Profile`).
+	profiling: Option<ClientId>,
 	/// Last executing evaluation frame; identifies the frame if it sleeps.
 	eval_ran: *mut raw_types::procs::ExecutionContext,
 	breakpoints: Breakpoints,
@@ -449,6 +452,7 @@ impl Server {
 			eval_callee_errors: vec![],
 			eval_callee_more: 0,
 			reloader: None,
+			profiling: None,
 			eval_ran: std::ptr::null_mut(),
 			breakpoints: HashMap::new(),
 			moved_breakpoints: HashMap::new(),
@@ -761,18 +765,22 @@ impl Server {
 			old: 0
 		};
 		if old {
-			let running = unsafe { *(*frame.context).bytecode() } as usize;
-			let mut old_codes = self.old_codes.borrow_mut();
-			let number = match old_codes.iter().position(|&old| old == running) {
-				Some(at) => at + 1,
-				None => {
-					old_codes.push(running);
-					old_codes.len()
-				}
-			};
-			code.old = u16::try_from(number).unwrap_or(u16::MAX);
+			code.old = self.old_code_number(unsafe { *(*frame.context).bytecode() } as usize);
 		}
 		code
+	}
+
+	/// Assign a stable reference to old bytecode on first use.
+	fn old_code_number(&self, running: usize) -> u16 {
+		let mut old_codes = self.old_codes.borrow_mut();
+		let number = match old_codes.iter().position(|&old| old == running) {
+			Some(at) => at + 1,
+			None => {
+				old_codes.push(running);
+				old_codes.len()
+			}
+		};
+		u16::try_from(number).unwrap_or(u16::MAX)
 	}
 
 	/// The instructions of some code, as `Request::Disassemble` gives them
@@ -3327,6 +3335,10 @@ impl Server {
 				let reconnected = self.evaluating(crate::skin::reconnect);
 				self.send_or_disconnect(Response::Reconnect(reconnected));
 			}
+			Request::Profile(request) => {
+				let reply = self.profile(request);
+				self.send_or_disconnect(Response::Profile(reply));
+			}
 
 			Request::Status => {
 				let paused = self.paused.clone();
@@ -3519,6 +3531,8 @@ impl Server {
 		// The frames in here point at procs that are about to carry on running.
 		self.state = None;
 		self.disconnect_all();
+		self.profiling = None;
+		crate::profiler::discard();
 	}
 
 	/// Evaluate every client's claim at this breakpoint. Count hits only
@@ -3911,6 +3925,10 @@ impl Server {
 		}
 
 		self.forget_watches_of(id);
+		if self.profiling == Some(id) {
+			self.profiling = None;
+			crate::profiler::discard();
+		}
 
 		let mut unclaimed = vec![];
 		for (key, claims) in &mut self.breakpoints {
