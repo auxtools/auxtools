@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use super::*;
 
 /// How often it looks to see whether it's been interrupted
-const TICK: Duration = Duration::from_millis(100);
+pub(super) const TICK: Duration = Duration::from_millis(100);
 
 /// What hits are counted by
 enum By {
@@ -256,10 +256,10 @@ impl Out {
 }
 
 /// Record interruption so tracing can print its summary before exiting.
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+pub(super) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
-fn interruptible() {
+pub(super) fn interruptible() {
 	extern "C" fn interrupted(_: libc::c_int) {
 		INTERRUPTED.store(true, Ordering::SeqCst);
 	}
@@ -271,7 +271,7 @@ fn interruptible() {
 }
 
 #[cfg(windows)]
-fn interruptible() {
+pub(super) fn interruptible() {
 	// Not in the parts of winapi the launcher has
 	#[link(name = "kernel32")]
 	extern "system" {
@@ -288,4 +288,4 @@ fn interruptible() {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn interruptible() {}
+pub(super) fn interruptible() {}

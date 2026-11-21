@@ -31,6 +31,7 @@ auxtools eval 'src.health'
 auxtools step-over
 auxtools continue
 auxtools trace /mob/proc/Life --by caller --for 5
+auxtools profile --for 10
 auxtools log --runtimes --follow
 auxtools wait reload
 auxtools reboot
@@ -40,6 +41,35 @@ auxtools stop
 Exit codes are 0 for success, 1 for failure, 2 for timeout, 3 if the world exits or reboots before completion, 4 if a world launched in the foreground exits unsuccessfully, and 5 if `check` finds known BYOND bugs.
 
 Editors use `auxtools dap` as the debug adapter.
+
+## Instruction profiling
+
+`auxtools profile` reports execution time by proc, source line and instruction.
+
+```sh
+auxtools profile --for 10                       # slowest procs and lines
+auxtools profile /mob/living/proc/Life --for 10  # instructions in one proc
+auxtools profile --for 10 --html profile.html   # interactive report
+```
+
+Without `--for`, profiling continues until Ctrl-C. Name procs to measure only those.
+Use `--json` for structured output. Calls from `auxtools eval` are included.
+
+Self time includes an instruction's work until the next instruction starts, including
+BYOND operations such as copying lists or freeing locals. For calls, self time covers
+entering the proc; execution inside it is reported separately. Sleep and engine work
+between runs of code are excluded. A call that sleeps is left out of its caller's
+time in calls.
+
+The profiler subtracts the cheapest instruction's average time from each instruction
+as an estimate of its own overhead. Times are relative to that baseline. With few
+hits, an instruction's time may be dominated by one slow execution, such as the first
+after a sleep.
+
+Profiling slows execution. Tested tight loops took 1.3–1.6 times as long as with the
+debug library alone; their reported totals were within 10% of execution without the
+library. Only one profile can run per world. It ends when its client disconnects or
+the world reboots. Hot reload keeps measurements of old and new code separate.
 
 ## Hot reload (experimental)
 

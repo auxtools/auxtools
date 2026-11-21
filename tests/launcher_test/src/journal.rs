@@ -97,6 +97,12 @@ impl Background {
 		(code, self.printed)
 	}
 
+	/// Its process id
+	#[cfg(unix)]
+	pub fn id(&self) -> u32 {
+		self.child.id()
+	}
+
 	pub fn stop(mut self) {
 		let _ = self.child.kill();
 		let _ = self.child.wait();

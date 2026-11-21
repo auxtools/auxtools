@@ -27,6 +27,7 @@ mod hold;
 mod json;
 mod launch;
 mod log;
+mod profile;
 mod stop;
 mod trace;
 
@@ -487,6 +488,7 @@ impl World {
 				event: Some(WaitFor::Reboot(args))
 			}) => log::wait_reboot(self, args.since, args.timeout, args.json),
 			Command::Trace(args) => trace::trace(self, &args),
+			Command::Profile(args) => profile::profile(self, &args),
 			// (these aren't a world's, and were done without one)
 			Command::Wait(args::Wait { event: None })
 			| Command::Launch(_)

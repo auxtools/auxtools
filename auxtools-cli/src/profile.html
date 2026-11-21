@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Instruction timing</title>
+<style>
+:root {
+	color-scheme: light;
+	--page: #f9f9f7;
+	--surface: #fcfcfb;
+	--text: #0b0b0b;
+	--text-2: #52514e;
+	--muted: #898781;
+	--hairline: #e1e0d9;
+	--wash: rgba(11, 11, 11, 0.05);
+	--selected: rgba(42, 120, 214, 0.12);
+	--own: #2a78d6;
+	--calls: #eb6834;
+}
+@media (prefers-color-scheme: dark) {
+	:root:where(:not([data-theme="light"])) {
+		color-scheme: dark;
+		--page: #0d0d0d;
+		--surface: #1a1a19;
+		--text: #f0efec;
+		--text-2: #c3c2b7;
+		--muted: #898781;
+		--hairline: #2c2c2a;
+		--wash: rgba(255, 255, 255, 0.06);
+		--selected: rgba(57, 135, 229, 0.2);
+		--own: #3987e5;
+		--calls: #d95926;
+	}
+}
+:root[data-theme="dark"] {
+	color-scheme: dark;
+	--page: #0d0d0d;
+	--surface: #1a1a19;
+	--text: #f0efec;
+	--text-2: #c3c2b7;
+	--muted: #898781;
+	--hairline: #2c2c2a;
+	--wash: rgba(255, 255, 255, 0.06);
+	--selected: rgba(57, 135, 229, 0.2);
+	--own: #3987e5;
+	--calls: #d95926;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+	margin: 0;
+	background: var(--page);
+	color: var(--text);
+	font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+	display: flex;
+	flex-direction: column;
+}
+.controls {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 16px;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--hairline);
+}
+.controls label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+.controls select, .controls input[type="search"] {
+	font: inherit;
+	color: var(--text);
+	background: var(--surface);
+	border: 1px solid var(--hairline);
+	border-radius: 4px;
+	padding: 3px 6px;
+}
+.legend { display: inline-flex; gap: 14px; margin-left: auto; color: var(--text-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { width: 12px; height: 8px; border-radius: 2px; display: inline-block; }
+.key.own { background: var(--own); }
+.key.calls { background: var(--calls); }
+main { flex: 1; display: flex; min-height: 0; }
+.procs {
+	width: 340px;
+	flex: none;
+	overflow: auto;
+	border-right: 1px solid var(--hairline);
+	background: var(--surface);
+}
+.listing { flex: 1; overflow: auto; background: var(--surface); min-width: 0; container-type: inline-size; }
+table { border-collapse: collapse; width: 100%; }
+th {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	background: var(--surface);
+	color: var(--text-2);
+	font-weight: 600;
+	text-align: left;
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--hairline);
+	white-space: nowrap;
+}
+td { padding: 2px 8px; white-space: nowrap; vertical-align: middle; }
+th.n, td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.procs tr.proc { cursor: pointer; }
+.procs tr.proc:hover, .procs tr.proc:focus { background: var(--wash); outline: none; }
+.procs tr.proc.selected { background: var(--selected); }
+.procs tr.unlisted { color: var(--muted); }
+.procs td.name { white-space: normal; overflow-wrap: anywhere; padding-top: 4px; padding-bottom: 4px; }
+.procs .place { color: var(--muted); font-size: 12px; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+.listing h2 { font-size: 14px; font-weight: 600; margin: 0; padding: 10px 8px 2px; overflow-wrap: anywhere; }
+.listing .about { color: var(--text-2); padding: 0 8px 8px; }
+tr.line td {
+	padding-top: 8px;
+	color: var(--text-2);
+	border-top: 1px solid var(--hairline);
+	white-space: pre;
+}
+tr.line .number { color: var(--muted); }
+tr.code td { padding: 0 8px 4px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+tr.ins:hover, tr.ins:focus { background: var(--wash); outline: none; }
+tr.ins.cold { color: var(--muted); }
+td.offset { color: var(--muted); width: 1%; }
+td.op { width: 1%; }
+td.operands { color: var(--text-2); max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+tr.cold td.operands { color: var(--muted); }
+td.time { width: 30%; min-width: 96px; }
+.bar { display: flex; align-items: center; gap: 2px; height: 16px; }
+.bar i { display: block; height: 10px; min-width: 1px; flex: none; }
+.bar i.own { background: var(--own); }
+.bar i.calls { background: var(--calls); }
+.bar i.end { border-radius: 0 4px 4px 0; }
+.procs .bar i { height: 6px; }
+.empty { padding: 24px 16px; color: var(--text-2); }
+#tip {
+	position: fixed;
+	z-index: 5;
+	pointer-events: none;
+	background: var(--surface);
+	color: var(--text);
+	border: 1px solid var(--hairline);
+	border-radius: 6px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+	padding: 8px 10px;
+	max-width: 420px;
+	display: none;
+}
+#tip .head { color: var(--text-2); margin-bottom: 4px; overflow-wrap: anywhere; }
+#tip .row { display: flex; align-items: center; gap: 8px; }
+#tip .row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+#tip .row span { color: var(--text-2); }
+#tip .stroke { width: 12px; height: 2px; flex: none; }
+#tip .stroke.own { background: var(--own); }
+#tip .stroke.calls { background: var(--calls); }
+#tip .stroke.none { background: transparent; }
+/* Keep hit counts and timing visible in narrow panes. */
+@container (max-width: 1000px) {
+	td.operands { max-width: 180px; }
+	td.time { min-width: 64px; }
+}
+@container (max-width: 700px) {
+	th, td { padding-left: 4px; padding-right: 4px; }
+	.callee { display: none; }
+	td.operands { max-width: 100px; }
+	td.time { width: 64px; min-width: 64px; }
+}
+@container (max-width: 460px) {
+	.offset { display: none; }
+	td.operands { max-width: 60px; }
+	td.time { width: 40px; min-width: 40px; }
+}
+@media (max-width: 1000px) {
+	.procs { width: 250px; }
+}
+@media (max-width: 760px) {
+	main { flex-direction: column; overflow: auto; }
+	.procs { width: auto; max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--hairline); }
+	.listing { flex: none; overflow-x: auto; overflow-y: visible; }
+	.legend { margin-left: 0; }
+}
+</style>
+</head>
+<body>
+<div class="controls">
+	<label>Time <select id="mode">
+		<option value="total">total</option>
+		<option value="hit">per hit</option>
+	</select></label>
+	<label><input type="checkbox" id="calls" checked> Include calls</label>
+	<label><input type="checkbox" id="cold" checked> Show unexecuted instructions</label>
+	<label>Filter procs <input type="search" id="find" size="18"></label>
+	<div class="legend">
+		<span><i class="key own"></i>Self time</span>
+		<span><i class="key calls"></i>Call time</span>
+	</div>
+</div>
+<main>
+	<div class="procs"><table>
+		<thead><tr><th>Proc</th><th class="n">Self time</th><th class="n">%</th></tr></thead>
+		<tbody id="procs"></tbody>
+	</table></div>
+	<div class="listing" id="listing"></div>
+</main>
+<div id="tip"></div>
+<script type="application/json" id="data">/*DATA*/</script>
+<script>
+"use strict";
+const data = JSON.parse(document.getElementById("data").textContent);
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+	const node = document.createElement(tag);
+	if (cls) node.className = cls;
+	if (text !== undefined) node.textContent = text;
+	return node;
+};
+const time = (ns) => {
+	if (ns < 1e3) return (ns < 10 ? ns.toFixed(1) : Math.round(ns)) + "ns";
+	if (ns < 1e6) return (ns / 1e3).toFixed(1) + "µs";
+	if (ns < 1e9) return (ns / 1e6).toFixed(1) + "ms";
+	return (ns / 1e9).toFixed(2) + "s";
+};
+const count = (n) => n.toLocaleString("en-US");
+// Offsets in hex, as jump labels such as LAB_0012 name them
+const hex = (offset) => offset.toString(16).toUpperCase().padStart(4, "0");
+const percent = (part, whole) => (whole ? (part * 100 / whole).toFixed(1) : "0.0");
+const procName = (proc) => proc.proc + (proc.override ? "#" + proc.override : "") + (proc.old_code ? " (old code)" : "");
+
+let selected = data.procs.findIndex((proc) => proc.listing);
+const MOST_PROCS = 300;
+
+// A bar of one or two segments, each `[class, width in percent]`
+const bar = (segments) => {
+	const node = el("div", "bar");
+	const shown = segments.filter(([, width]) => width > 0);
+	shown.forEach(([cls, width], at) => {
+		const segment = el("i", cls + (at === shown.length - 1 ? " end" : ""));
+		// Subtract the gap from the second segment.
+		segment.style.width = "calc(" + width.toFixed(3) + "% - " + (at ? 2 : 0) + "px)";
+		node.append(segment);
+	});
+	return node;
+};
+
+const tip = $("tip");
+const showTip = (event, head, rows) => {
+	tip.replaceChildren(el("div", "head", head));
+	for (const [key, value, label] of rows) {
+		const row = el("div", "row");
+		row.append(el("i", "stroke " + key), el("b", "", value), el("span", "", label));
+		tip.append(row);
+	}
+	tip.style.display = "block";
+	const box = tip.getBoundingClientRect();
+	const at = event.clientX === undefined ? event.target.getBoundingClientRect() : { left: event.clientX, bottom: event.clientY };
+	tip.style.left = Math.max(4, Math.min(at.left + 14, innerWidth - box.width - 4)) + "px";
+	tip.style.top = Math.max(4, Math.min(at.bottom + 14, innerHeight - box.height - 4)) + "px";
+};
+const hideTip = () => { tip.style.display = "none"; };
+const tipped = (node, head, rows) => {
+	node.tabIndex = 0;
+	node.addEventListener("pointermove", (event) => showTip(event, head, rows));
+	node.addEventListener("focus", (event) => showTip(event, head, rows));
+	node.addEventListener("pointerleave", hideTip);
+	node.addEventListener("blur", hideTip);
+};
+
+function procs() {
+	const body = $("procs");
+	const find = $("find").value.trim().toLowerCase();
+	const most = Math.max(1, ...data.procs.map((proc) => proc.ns));
+	body.replaceChildren();
+	// Limit visible rows; filtering searches all procs.
+	let shown = 0;
+	let more = 0;
+	data.procs.forEach((proc, at) => {
+		if (find && !procName(proc).toLowerCase().includes(find)) return;
+		if (shown === MOST_PROCS) {
+			more++;
+			return;
+		}
+		shown++;
+		const row = el("tr", "proc" + (at === selected ? " selected" : "") + (proc.listing ? "" : " unlisted"));
+		const name = el("td", "name");
+		name.append(el("div", "mono", procName(proc)));
+		if (proc.file) name.append(el("div", "place", proc.file + (proc.line ? ":" + proc.line : "")));
+		name.append(bar([["own", proc.ns * 100 / most]]));
+		row.append(name, el("td", "n", time(proc.ns)), el("td", "n", percent(proc.ns, data.ns)));
+		tipped(row, procName(proc), [
+			["own", time(proc.ns), "self time (" + percent(proc.ns, data.ns) + "% of the profile)"],
+			["calls", time(proc.callee_ns), "in called procs"],
+			["none", count(proc.calls), "calls"],
+			["none", count(proc.instructions), "instructions"]
+		].concat(proc.listing ? [] : [["none", "", "Instruction listing not included"]]));
+		const choose = () => { if (proc.listing) { selected = at; procs(); listing(); } };
+		row.addEventListener("click", choose);
+		row.addEventListener("keydown", (event) => { if (event.key === "Enter") choose(); });
+		body.append(row);
+	});
+	if (more) {
+		const row = el("tr", "unlisted");
+		const cell = el("td", "name", count(more) + " more procs. Filter by name.");
+		cell.colSpan = 3;
+		row.append(cell);
+		body.append(row);
+	}
+}
+
+function listing() {
+	const pane = $("listing");
+	const proc = data.procs[selected];
+	pane.replaceChildren();
+	if (!proc) {
+		pane.append(el("div", "empty", data.procs.length ? "No instruction listings in this report." : "No instructions recorded."));
+		return;
+	}
+	const perHit = $("mode").value === "hit";
+	const withCalls = $("calls").checked;
+	const cold = $("cold").checked;
+	const own = (row) => (perHit ? row.ns / row.hits : row.ns);
+	const calls = (row) => (!withCalls ? 0 : perHit ? row.callee_ns / row.hits : row.callee_ns);
+	const ran = proc.listing.filter((row) => row.hits);
+	const most = Math.max(1e-9, ...ran.map((row) => own(row) + calls(row)));
+
+	pane.append(el("h2", "mono", procName(proc)));
+	pane.append(el("div", "about",
+		(proc.file ? proc.file + ": " : "") + count(proc.calls) + " calls, " + count(proc.instructions) + " instructions, " +
+		time(proc.ns) + " self time, " + time(proc.callee_ns) + " in calls"));
+
+	const table = el("table");
+	const head = el("tr");
+	const columns = [["Offset", "n offset"], ["Opcode", ""], ["Operands", ""], ["Hits", "n"], ["Self %", "n"], [perHit ? "Self / hit" : "Self time", "n"]];
+	if (withCalls) columns.push([perHit ? "Call time / hit" : "Call time", "n callee"]);
+	columns.push(["", ""]);
+	for (const [text, cls] of columns) {
+		head.append(el("th", cls, text));
+	}
+	const thead = el("thead");
+	thead.append(head);
+	const body = el("tbody");
+	table.append(thead, body);
+
+	let line = null;
+	for (const row of proc.listing) {
+		if (!row.hits && !cold) continue;
+		if (row.line !== null && row.line !== line) {
+			line = row.line;
+			const header = el("tr", "line");
+			const cell = el("td", "mono");
+			cell.colSpan = columns.length;
+			cell.append(el("span", "number", (proc.file || "line") + ":" + line));
+			header.append(cell);
+			body.append(header);
+			if (row.source) {
+				const code = el("tr", "code");
+				const text = el("td", "mono", row.source);
+				text.colSpan = columns.length;
+				code.append(text);
+				body.append(code);
+			}
+		}
+		const space = row.text.indexOf(" ");
+		const [op, operands] = space < 0 ? [row.text, ""] : [row.text.slice(0, space), row.text.slice(space + 1)];
+		const tr = el("tr", "ins" + (row.hits ? "" : " cold"));
+		const operandCell = el("td", "operands mono", operands);
+		operandCell.title = operands;
+		tr.append(el("td", "n offset mono", hex(row.offset)), el("td", "op mono", op), operandCell);
+		if (row.hits) {
+			const cell = el("td", "time");
+			cell.append(bar([["own", own(row) * 100 / most], ["calls", calls(row) * 100 / most]]));
+			tr.append(el("td", "n", count(row.hits)), el("td", "n", percent(row.ns, proc.ns)), el("td", "n", time(own(row))));
+			if (withCalls) tr.append(el("td", "n callee", calls(row) ? time(calls(row)) : ""));
+			tr.append(cell);
+			tipped(tr, hex(row.offset) + "  " + row.text, [
+				["own", time(row.ns / row.hits), "self / hit · " + time(row.ns) + " total (" + percent(row.ns, proc.ns) + "% of the proc)"],
+				["calls", time(row.callee_ns / row.hits), "call time / hit · " + time(row.callee_ns) + " total"],
+				["none", count(row.hits), "hits"]
+			]);
+		} else {
+			for (const [, cls] of columns.slice(3)) tr.append(el("td", cls));
+		}
+		body.append(tr);
+	}
+	pane.append(table);
+	pane.scrollTop = 0;
+}
+
+for (const id of ["mode", "calls", "cold"]) $(id).addEventListener("change", listing);
+$("find").addEventListener("input", procs);
+procs();
+listing();
+</script>
+</body>
+</html>

@@ -54,6 +54,7 @@ pub enum Command {
 	StepOut(StepOut),
 	Wait(Wait),
 	Trace(Trace),
+	Profile(Profile),
 	Check(Check),
 	Dap,
 	Help(Help),
@@ -83,6 +84,7 @@ impl Command {
 			Self::StepOut(_) => "step-out",
 			Self::Wait(_) => "wait",
 			Self::Trace(_) => "trace",
+			Self::Profile(_) => "profile",
 			Self::Check(_) => "check",
 			Self::Dap => "dap",
 			Self::Help(_) => "help",
@@ -476,6 +478,27 @@ pub struct Trace {
 }
 
 #[derive(Args)]
+pub struct Profile {
+	#[arg(value_name = "/PATH[#N]")]
+	pub procs: Vec<String>,
+	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after the specified duration. [default: unlimited]")]
+	pub duration: Option<Duration>,
+	#[arg(
+		long,
+		value_name = "N",
+		value_parser = positive,
+		default_value = "40",
+		hide_default_value = true,
+		help = "List the N slowest procs and lines. [default: 40]"
+	)]
+	pub top: u64,
+	#[arg(long, value_name = "FILE", help = "Write an HTML report to FILE.")]
+	pub html: Option<PathBuf>,
+	#[arg(long, help = JSON)]
+	pub json: bool
+}
+
+#[derive(Args)]
 pub struct Check {
 	#[arg(value_name = "DME")]
 	pub dme: Option<PathBuf>,
@@ -746,6 +769,35 @@ mod tests {
 		assert_eq!(
 			refused(&["trace"]),
 			"missing required argument: LOCATION. Run 'auxtools trace --help' for usage."
+		);
+	}
+
+	#[test]
+	fn a_profile_is_of_every_proc_or_of_those_named() {
+		let profile = |given: &[&str]| match parsed(given).command {
+			Some(Command::Profile(profile)) => profile,
+			_ => panic!("not profile")
+		};
+		let all = profile(&["profile"]);
+		assert!(all.procs.is_empty() && all.duration.is_none() && all.top == 40 && all.html.is_none() && !all.json);
+		let some = profile(&[
+			"profile",
+			"/mob/proc/life",
+			"/proc/tick#1",
+			"--for",
+			"2.5",
+			"--top",
+			"3",
+			"--html",
+			"out.html",
+			"--json"
+		]);
+		assert_eq!(some.procs, args(&["/mob/proc/life", "/proc/tick#1"]));
+		assert_eq!(some.duration, Some(Duration::from_millis(2500)));
+		assert!(some.top == 3 && some.html.as_deref() == Some(std::path::Path::new("out.html")) && some.json);
+		assert_eq!(
+			refused(&["profile", "--top", "0"]),
+			"invalid value '0' for --top: expected a positive integer. Run 'auxtools profile --help' for usage."
 		);
 	}
 
