@@ -34,7 +34,7 @@ use std::sync::{
 pub use auxtools_impl::{full_shutdown, hook, init, pin_dll, runtime_handler, shutdown};
 /// For crates that need to find something else in BYOND's binary.
 pub use byond_scan;
-pub use bytecode_manager::{bytecode_at, remember_bytecode};
+pub use bytecode_manager::{bytecode_at, bytecode_changes, remember_bytecode};
 /// Used by the [pin_dll] macro to set dll pinning
 pub use ctor;
 pub use hooks::{CompileTimeHook, HookFailure, ProcHook, RuntimeErrorHook};
@@ -184,7 +184,7 @@ pub struct WorldLoad {
 
 static WORLD_LOAD: OnceLock<&'static WorldLoad> = OnceLock::new();
 // Set while a world is yet to load. Read on every DM proc call.
-static WORLD_LOAD_PENDING: AtomicBool = AtomicBool::new(false);
+pub(crate) static WORLD_LOAD_PENDING: AtomicBool = AtomicBool::new(false);
 // The init funcs run after the partial init, as they would with auxtools_init
 static FULL_INIT_FUNCS_PENDING: AtomicBool = AtomicBool::new(false);
 // Marker proc and table entry identifying the exiting world.
@@ -235,10 +235,18 @@ pub fn shut_down_with_world() {
 	shutdown_partial();
 }
 
+// Calls counted by `on_proc_call` and the detour's direct path.
+pub(crate) static PROC_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Wrapping proc-call count for activity detection. Readable from any thread.
+pub fn proc_calls() -> u32 {
+	PROC_CALLS.load(Ordering::Relaxed)
+}
+
 // Work waiting for a later proc call (see `at_proc_calls`), and whether there
 // is any. Read on every DM proc call.
 static PROC_CALL_WORK: Mutex<Vec<fn() -> bool>> = Mutex::new(Vec::new());
-static PROC_CALL_WORK_PENDING: AtomicBool = AtomicBool::new(false);
+pub(crate) static PROC_CALL_WORK_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Run `work` at proc entry on BYOND's thread until it returns true.
 /// Use for initialization that must wait for later load stages.
@@ -274,6 +282,8 @@ pub fn start_runs_new_code(proc: raw_types::procs::ProcId) {
 /// when the call should run its proc's replacement code
 /// (see [`start_runs_new_code`]).
 pub(crate) fn on_proc_call(proc: raw_types::procs::ProcId, src: raw_types::values::ValueTag) -> bool {
+	// Only BYOND's thread writes it
+	PROC_CALLS.store(PROC_CALLS.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
 	if PROC_CALL_WORK_PENDING.load(Ordering::Relaxed) {
 		// Taken out first: the work can make proc calls of its own
 		let work = std::mem::take(&mut *PROC_CALL_WORK.lock().unwrap());

@@ -15,6 +15,21 @@ use crate::{debug, raw_types, *};
 
 static mut BYTECODE_ALLOCATIONS: UnsafeCell<Option<State>> = UnsafeCell::new(None);
 
+/// Generation counter for bytecode-derived caches.
+static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Cache generation, incremented when hot reload repoints a proc and on
+/// world startup or shutdown. Invalidate bytecode-derived data when it
+/// changes. `set_bytecode` leaves it: its buffers are kept by content until
+/// shutdown, so a buffer's address always names the same code.
+pub fn bytecode_changes() -> u64 {
+	CHANGES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn changed() {
+	CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 struct State {
 	allocations: HashSet<Vec<u32>>,
 	original: HashMap<raw_types::procs::ProcId, (*mut u32, u16)>,
@@ -24,6 +39,7 @@ struct State {
 }
 
 pub fn init() {
+	changed();
 	unsafe {
 		let ptr = BYTECODE_ALLOCATIONS.get();
 		*ptr = Some(State {
@@ -55,6 +71,7 @@ fn get_active_bytecode_ptrs() -> HashSet<*mut u32> {
 }
 
 pub fn shutdown() {
+	changed();
 	let active_ptrs = get_active_bytecode_ptrs();
 
 	let state = unsafe { (*BYTECODE_ALLOCATIONS.get()).take().unwrap() };
@@ -84,8 +101,10 @@ fn remember_original(state: &mut State, proc: &Proc) {
 }
 
 /// Keeps a copy of bytecode that a proc is about to stop using, for
-/// [`bytecode_at`].
+/// [`bytecode_at`]. Hot reload calls this before repointing a proc, so it
+/// counts as a bytecode change.
 pub fn remember_bytecode(ptr: *const u32, bytecode: &[u32]) {
+	changed();
 	state().remembered.entry(ptr as usize).or_insert_with(|| bytecode.to_vec());
 }
 
