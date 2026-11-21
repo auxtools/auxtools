@@ -184,11 +184,11 @@ BYOND test archives come from the [BYOND build mirror](https://byond-builds.dm-l
 
 Run **Actions > Release > Run workflow** on `master` and enter a version such
 as `3.0.0`. The workflow builds and tests that version before publishing the
-GitHub release and `sohpea.auxtools` extension.
+GitHub release and `sohpea.auxtools` extension to the Marketplace and Open VSX.
 
 It creates a `vVERSION` tag and advances `master` to the next patch's `-dev`
-version. Publishing uses the `release` environment and Marketplace Trusted
-Publishing. See [release.yml](.github/workflows/release.yml) for setup.
+version. Publishing uses the `release` environment and trusted publishing on
+both registries. See [release.yml](.github/workflows/release.yml) for setup.
 
 [Rust]: https://rust-lang.org
 [Cargo]: https://doc.rust-lang.org/cargo
