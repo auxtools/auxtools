@@ -14,7 +14,10 @@
 	--muted: #898781;
 	--hairline: #e1e0d9;
 	--wash: rgba(11, 11, 11, 0.05);
+	--stripe: rgba(11, 11, 11, 0.025);
 	--selected: rgba(42, 120, 214, 0.12);
+	--target: rgba(235, 104, 52, 0.18);
+	--link: #1f62b3;
 	--own: #2a78d6;
 	--calls: #eb6834;
 }
@@ -28,7 +31,10 @@
 		--muted: #898781;
 		--hairline: #2c2c2a;
 		--wash: rgba(255, 255, 255, 0.06);
+		--stripe: rgba(255, 255, 255, 0.03);
 		--selected: rgba(57, 135, 229, 0.2);
+		--target: rgba(217, 89, 38, 0.28);
+		--link: #6aa6ee;
 		--own: #3987e5;
 		--calls: #d95926;
 	}
@@ -42,7 +48,10 @@
 	--muted: #898781;
 	--hairline: #2c2c2a;
 	--wash: rgba(255, 255, 255, 0.06);
+	--stripe: rgba(255, 255, 255, 0.03);
 	--selected: rgba(57, 135, 229, 0.2);
+	--target: rgba(217, 89, 38, 0.28);
+	--link: #6aa6ee;
 	--own: #3987e5;
 	--calls: #d95926;
 }
@@ -103,6 +112,7 @@ th {
 td { padding: 2px 8px; white-space: nowrap; vertical-align: middle; }
 th.n, td.n { text-align: right; font-variant-numeric: tabular-nums; }
 .procs tr.proc { cursor: pointer; }
+.procs tr.alt { background: var(--stripe); }
 .procs tr.proc:hover, .procs tr.proc:focus { background: var(--wash); outline: none; }
 .procs tr.proc.selected { background: var(--selected); }
 .procs tr.unlisted { color: var(--muted); }
@@ -120,8 +130,12 @@ tr.line td {
 tr.line .number { color: var(--muted); }
 tr.code td { padding: 0 8px 4px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 tr.line a.number { text-decoration: underline; cursor: pointer; }
+tr.ins.alt { background: var(--stripe); }
 tr.ins:hover, tr.ins:focus { background: var(--wash); outline: none; }
+tr.ins.target { background: var(--target); }
 tr.ins.cold { color: var(--muted); }
+a.label { color: var(--link); text-decoration: underline; cursor: pointer; }
+tr.cold a.label { color: inherit; }
 td.offset { color: var(--muted); width: 1%; }
 td.op { width: 1%; }
 td.operands { color: var(--text-2); max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
@@ -291,7 +305,7 @@ function procs() {
 			return;
 		}
 		shown++;
-		const row = el("tr", "proc" + (at === selected ? " selected" : "") + (proc.listing ? "" : " unlisted"));
+		const row = el("tr", "proc" + (shown % 2 ? "" : " alt") + (at === selected ? " selected" : "") + (proc.listing ? "" : " unlisted"));
 		const name = el("td", "name");
 		name.append(el("div", "mono", procName(proc)));
 		if (proc.file) name.append(el("div", "place", proc.file + (proc.line ? ":" + proc.line : "")));
@@ -303,7 +317,7 @@ function procs() {
 			["none", count(proc.calls), "calls"],
 			["none", count(proc.instructions), "instructions"]
 		].concat(proc.listing ? [] : [["none", "", "Instruction listing not included"]]));
-		const choose = () => { if (proc.listing) { selected = at; procs(); listing(); } };
+		const choose = () => { if (proc.listing) { selected = at; returns.length = 0; procs(); listing(); } };
 		row.addEventListener("click", choose);
 		row.addEventListener("keydown", (event) => { if (event.key === "Enter") choose(); });
 		body.append(row);
@@ -317,8 +331,61 @@ function procs() {
 	}
 }
 
+// Instruction rows of the shown listing by offset, and the offsets of the
+// jumps followed to reach the current target
+let rows = new Map();
+const returns = [];
+let target = null;
+
+// Scroll to the instruction at `offset` and mark it, showing unexecuted
+// instructions if it is one.
+function jumpTo(offset) {
+	if (!rows.has(offset) && !$("cold").checked) {
+		$("cold").checked = true;
+		listing();
+	}
+	const row = rows.get(offset);
+	if (!row) return false;
+	if (target) target.classList.remove("target");
+	target = row;
+	row.classList.add("target");
+	row.scrollIntoView({ block: "center" });
+	return true;
+}
+
+// Operand text with each jump label (LAB_0012, a hex offset) as a link to
+// its instruction
+function operandNodes(operands, from) {
+	const nodes = [];
+	let last = 0;
+	for (const match of operands.matchAll(/\bLAB_([0-9A-Fa-f]+)\b/g)) {
+		nodes.push(operands.slice(last, match.index));
+		const offset = parseInt(match[1], 16);
+		const link = el("a", "label", match[0]);
+		link.href = "#";
+		link.title = "Go to offset " + hex(offset) + " (Alt+Left to return)";
+		link.addEventListener("click", (event) => {
+			event.preventDefault();
+			if (jumpTo(offset)) returns.push(from);
+		});
+		nodes.push(link);
+		last = match.index + match[0].length;
+	}
+	nodes.push(operands.slice(last));
+	return nodes;
+}
+
+document.addEventListener("keydown", (event) => {
+	if (event.altKey && event.key === "ArrowLeft" && returns.length) {
+		event.preventDefault();
+		jumpTo(returns.pop());
+	}
+});
+
 function listing() {
 	const pane = $("listing");
+	rows = new Map();
+	target = null;
 	const proc = data.procs[selected];
 	pane.replaceChildren();
 	if (!proc) {
@@ -352,6 +419,7 @@ function listing() {
 	table.append(thead, body);
 
 	let line = null;
+	let shown = 0;
 	for (const row of proc.listing) {
 		if (!row.hits && !cold) continue;
 		if (row.line !== null && row.line !== line) {
@@ -381,8 +449,11 @@ function listing() {
 		}
 		const space = row.text.indexOf(" ");
 		const [op, operands] = space < 0 ? [row.text, ""] : [row.text.slice(0, space), row.text.slice(space + 1)];
-		const tr = el("tr", "ins" + (row.hits ? "" : " cold"));
-		const operandCell = el("td", "operands mono", operands);
+		shown++;
+		const tr = el("tr", "ins" + (shown % 2 ? "" : " alt") + (row.hits ? "" : " cold"));
+		rows.set(row.offset, tr);
+		const operandCell = el("td", "operands mono");
+		operandCell.append(...operandNodes(operands, row.offset));
 		operandCell.title = operands;
 		tr.append(el("td", "n offset mono", hex(row.offset)), el("td", "op mono", op), operandCell);
 		if (row.hits) {
