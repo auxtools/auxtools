@@ -21,8 +21,8 @@ use std::{path::PathBuf, process::Command, time::Duration};
 use client::{Client, World};
 use paths::ByondCommand;
 use server_types::{
-	BreakpointReason, BreakpointSetResult, InstructionRef, ProcRef, ProfileReply, ProfileRequest, ProfileTotals, ProfiledCode, Request, Response,
-	VariablesRef
+	BreakpointReason, BreakpointSetResult, ContinueKind, InstructionRef, ProcRef, ProfileReply, ProfileRequest, ProfileTotals, ProfiledCode, Request,
+	Response, VariablesRef
 };
 
 // The debug server names global procs without the /proc part
@@ -388,6 +388,59 @@ fn protocol(world: &World, mut client: Client) -> Client {
 	);
 	client.resume();
 	println!("ok: a breakpoint in the middle of an instruction isn't set, with a breakpoint at its start or not");
+
+	// A breakpoint set on the instruction the world is paused at: the
+	// instruction still runs, and the breakpoint stops the next pass. Step
+	// out to main_loop first, so the pause is in a proc that only a bad
+	// instruction would end.
+	set_breakpoint(&mut client, BREAKPOINT_TARGET, None);
+	expect_breakpoint_in(&mut client, BREAKPOINT_TARGET);
+	let response = client.request(Request::BreakpointUnset {
+		instruction: start_of(BREAKPOINT_TARGET)
+	});
+	assert!(matches!(response, Response::BreakpointUnset { success: true, .. }), "{:?}", response);
+	let response = client.request(Request::Continue {
+		kind: ContinueKind::StepOut { stack_id: 0 }
+	});
+	assert!(matches!(response, Response::Ack), "expected Ack for StepOut, got {:?}", response);
+	assert_eq!(client.expect_pause(), BreakpointReason::Step);
+	assert_eq!(paused_in(&mut client), "/main_loop");
+	let response = client.request(Request::StackFrames {
+		stack_id: 0,
+		start_frame: Some(0),
+		count: Some(1)
+	});
+	let Response::StackFrames { frames, .. } = response else {
+		panic!("expected StackFrames, got {:?}", response);
+	};
+	let here = || InstructionRef {
+		proc: ProcRef {
+			path: frames[0].instruction.proc.path.clone(),
+			override_id: frames[0].instruction.proc.override_id
+		},
+		offset: frames[0].instruction.offset
+	};
+	let response = client.request(Request::InstructionBreakpointSet {
+		instruction: here(),
+		condition: None,
+		hit: None,
+		log: None
+	});
+	assert!(
+		matches!(response, Response::BreakpointSet {
+			result: BreakpointSetResult::Success { .. }
+		}),
+		"a breakpoint on the paused instruction got {:?}",
+		response
+	);
+	client.resume();
+	assert_eq!(client.expect_pause(), BreakpointReason::Breakpoint);
+	assert_eq!(paused_in(&mut client), "/main_loop");
+	let response = client.request(Request::InstructionBreakpointUnset { instruction: here() });
+	assert!(matches!(response, Response::BreakpointUnset { success: true, .. }), "{:?}", response);
+	client.resume();
+	assert_eq!(eval(&mut client, None, "1 + 1"), "2");
+	println!("ok: a breakpoint set on the paused instruction");
 
 	// Two clients want one breakpoint: it's there until both have let go
 	let mut second = world.connect();
