@@ -6,6 +6,8 @@ name: Release
 # - A release environment restricted to master.
 # - A Marketplace Trusted Publishing policy for publisher sohpea:
 #   repository auxtools/auxtools, workflow release.yml, environment release.
+# - An Open VSX trusted publisher for extension sohpea.auxtools with the same
+#   repository, workflow and environment.
 # - A deploy key with write access and permission to bypass the rulesets
 #   protecting master and v* tags. Store its private key in the release
 #   environment's RELEASE_DEPLOY_KEY secret.
@@ -15,7 +17,7 @@ name: Release
 #
 # Retry a failed Publish job to resume publishing. It skips this run's
 # already-pushed tag, preserves an existing GitHub release and skips an
-# extension version already in the Marketplace.
+# extension version already in the Marketplace or Open VSX.
 
 on:
   workflow_dispatch:
@@ -114,7 +116,7 @@ jobs:
     environment: release
     permissions:
       contents: write # Push commits and create releases.
-      id-token: write # Marketplace Trusted Publishing.
+      id-token: write # Marketplace and Open VSX trusted publishing.
     env:
       VERSION: ${{ inputs.version }}
     steps:
@@ -127,7 +129,7 @@ jobs:
           node-version: 24
 
       # Fail on tool installation before pushing release refs.
-      - name: Install vsce
+      - name: Install vsce and ovsx
         run: npm ci --prefix ci/vsce --ignore-scripts --no-audit --no-fund
 
       - name: Download the release commits
@@ -190,3 +192,6 @@ jobs:
 
       - name: Publish the extension to the Marketplace
         run: ci/vsce/node_modules/.bin/vsce publish --oidc --skip-duplicate --packagePath "dist/auxtools-$VERSION.vsix"
+
+      - name: Publish the extension to Open VSX
+        run: ci/vsce/node_modules/.bin/ovsx publish --trusted-publishing --skip-duplicate --packagePath "dist/auxtools-$VERSION.vsix"

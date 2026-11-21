@@ -1,7 +1,8 @@
 {
 	"private": true,
-	"description": "Pinned vsce for Marketplace publishing",
+	"description": "Pinned vsce and ovsx for Marketplace and Open VSX publishing",
 	"dependencies": {
-		"@vscode/vsce": "4.1.0"
+		"@vscode/vsce": "4.1.0",
+		"ovsx": "1.4.0"
 	}
 }
