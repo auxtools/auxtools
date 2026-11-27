@@ -1440,32 +1440,6 @@ impl Snapshot {
         lines
     }
 
-    fn source_has(
-        &self,
-        value: &ProcValue,
-        text: &str,
-        files: &mut HashMap<FileId, Option<Vec<String>>>,
-    ) -> bool {
-        let file = value.location.file;
-        let lines = files.entry(file).or_insert_with(|| {
-            let root = self.root.as_ref()?;
-            let source = std::fs::read(root.join(&*self.ctx.file_path(file))).ok()?;
-            Some(
-                String::from_utf8_lossy(&source)
-                    .lines()
-                    .map(str::to_owned)
-                    .collect(),
-            )
-        });
-        let Some(lines) = lines else { return true };
-        let own = proc_lines(value);
-        let start = own.start().saturating_sub(1) as usize;
-        let end = (*own.end() as usize).min(lines.len());
-        lines
-            .get(start..end)
-            .is_none_or(|l| l.iter().any(|l| l.contains(text)))
-    }
-
     fn place(&self, location: dreammaker::Location) -> (String, u32, u16) {
         (
             self.file_name(location.file),
@@ -1681,7 +1655,6 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         .map(|c| format!("StaticField({c:?})"))
         .collect();
     let reloaded: HashSet<ProcKey> = changes.reloads.iter().map(|r| r.proc.clone()).collect();
-    let mut files = HashMap::new();
     for key in new.procs.keys() {
         let Some(old_key) = old_key(realigned, key) else {
             continue;
@@ -1692,9 +1665,6 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         let (Some(_), Some((_, new_value))) = (old.find(&old_key), new.find(key)) else {
             continue;
         };
-        if names.is_empty() && !new.source_has(new_value, "::", &mut files) {
-            continue;
-        }
         let text = format!("{:?}{:?}", new_value.code, new_value.parameters);
         if !names.iter().any(|name| text.contains(name.as_str()))
             && !moved.iter().any(|name| text.contains(name.as_str()))

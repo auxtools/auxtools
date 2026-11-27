@@ -282,7 +282,6 @@ pub(super) fn reparented_users(
         .iter()
         .map(|name| format!("StaticField({name:?})"))
         .collect();
-    let mut files = HashMap::new();
     let reloaded: HashSet<ProcKey> = changes.reloads.iter().map(|r| r.proc.clone()).collect();
     let mut reloads = vec![];
     for key in new.procs.keys() {
@@ -297,9 +296,6 @@ pub(super) fn reparented_users(
             let Some((_, value)) = new.find(key) else {
                 continue;
             };
-            if named.is_empty() && !new.source_has(value, "::", &mut files) {
-                continue;
-            }
             let text = format!("{:?}{:?}", value.code, value.parameters);
             if !named
                 .iter()
