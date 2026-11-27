@@ -389,7 +389,14 @@ pub(crate) fn passes(server: &Server, ctx: *mut raw_types::procs::ExecutionConte
 }
 
 pub(crate) fn rest() {
-	if !auxtools::instruction_hook::hear_only(&[OPCODE_THROW]) {
+	if !auxtools::instruction_hook::hears_all() {
+		return;
+	}
+	let heard: &[u32] = match crate::coverage::running() {
+		true => &[OPCODE_THROW, crate::coverage::DBG_LINE],
+		false => &[OPCODE_THROW]
+	};
+	if !auxtools::instruction_hook::hear_only(heard) {
 		return;
 	}
 	unsafe {

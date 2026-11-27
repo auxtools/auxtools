@@ -3,6 +3,7 @@ mod client_script;
 mod code_index;
 mod connection;
 mod console;
+mod coverage;
 mod hot_reload;
 mod instruction_hooking;
 mod journal;
@@ -129,6 +130,7 @@ impl InstructionHook for DebugServerInstructionHook<'static> {
 		let Some(debug_server) = self.debug_server.get_mut() else {
 			return;
 		};
+		coverage::enter(ctx);
 		if instruction_hooking::passes(debug_server, ctx) {
 			if unsafe { (*INSTRUCTION_HOOKS.get()).len() } == 1 {
 				instruction_hooking::rest();

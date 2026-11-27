@@ -580,6 +580,49 @@ fn most_hits(client: &mut Client, code: &ProfiledCode) -> u64 {
 	}
 }
 
+fn record_coverage(client: &mut Client) -> Result<(), String> {
+	match client.request(Request::Coverage) {
+		Response::Coverage(reply) => reply,
+		other => panic!("expected Coverage, got {:?}", other)
+	}
+}
+
+fn coverage(world: &World, mut client: Client) -> Client {
+	let busy = Err("another coverage recording is already running".to_owned());
+	let mut first = world.connect();
+	assert_eq!(record_coverage(&mut first), Ok(()));
+	assert_eq!(record_coverage(&mut first), busy);
+	assert_eq!(record_coverage(&mut client), busy);
+	assert_eq!(eval(&mut client, None, "profiled_call()"), "500500");
+	println!("ok: one coverage recording at a time");
+
+	first.leave();
+	let mut second = world.connect();
+	let mut started = record_coverage(&mut second);
+	for _ in 0..50 {
+		if started.is_ok() {
+			break;
+		}
+		std::thread::sleep(Duration::from_millis(100));
+		started = record_coverage(&mut second);
+	}
+	assert_eq!(started, Ok(()), "a recording ends when its client leaves");
+	second.leave();
+	let mut third = world.connect();
+	let mut free = record_coverage(&mut third);
+	for _ in 0..50 {
+		if free.is_ok() {
+			break;
+		}
+		std::thread::sleep(Duration::from_millis(100));
+		free = record_coverage(&mut third);
+	}
+	assert_eq!(free, Ok(()));
+	third.leave();
+	println!("ok: coverage client cleanup");
+	client
+}
+
 fn profile(world: &World, mut client: Client) -> Client {
 	let proc = |path: &str| ProcRef {
 		path: path.to_owned(),
@@ -1355,7 +1398,8 @@ fn main() {
 	}
 
 	let client = protocol(&world, client);
-	let mut client = profile(&world, client);
+	let client = profile(&world, client);
+	let mut client = coverage(&world, client);
 
 	client.send(Request::CatchRuntimes {
 		uncaught: None,

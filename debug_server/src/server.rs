@@ -27,6 +27,7 @@ use crate::{
 
 mod breakpoints;
 mod code;
+mod coverage;
 mod eval;
 mod journaling;
 mod pause;
@@ -179,6 +180,10 @@ impl Server {
 				let reply = self.profile(request);
 				self.answer(Response::Profile(reply));
 			}
+			Request::Coverage => {
+				let reply = self.coverage();
+				self.answer(Response::Coverage(reply));
+			}
 
 			Request::Status => {
 				let paused = self.stop_for(self.sessions.requester());
@@ -307,6 +312,8 @@ impl Server {
 		self.disconnect_all();
 		self.sessions.profiling = None;
 		crate::profiler::discard();
+		self.sessions.covering = None;
+		crate::coverage::discard();
 	}
 
 	pub fn process(&mut self) -> bool {

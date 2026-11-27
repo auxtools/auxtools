@@ -151,7 +151,8 @@ pub enum Request {
 		hit: Option<HitCondition>,
 		log: Option<Vec<LogPart>>
 	},
-	Breakpoints
+	Breakpoints,
+	Coverage
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -270,7 +271,9 @@ pub enum Response {
 	Unavailable {
 		reason: String
 	},
-	Breakpoints(Vec<PlacedBreakpoint>)
+	Breakpoints(Vec<PlacedBreakpoint>),
+	Coverage(Result<(), String>),
+	CoverageEnded(Coverage)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -352,6 +355,23 @@ pub struct ProfiledInstruction {
 	pub hits: u64,
 	pub own_ns: u64,
 	pub callee_ns: u64
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Coverage {
+	pub files: Vec<CoveredFile>
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CoveredFile {
+	pub file: String,
+	pub lines: Vec<CoveredLine>
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoveredLine {
+	pub line: u32,
+	pub hits: u64
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

@@ -14,6 +14,8 @@ pub(super) struct Client {
 	pub(super) debugs: bool,
 	pub(super) follow: Option<Vec<JournalKind>>,
 	pub(super) outbox: mpsc::SyncSender<Vec<u8>>,
+	pub(super) queued: u64,
+	pub(super) written: Arc<AtomicU64>,
 	pub(super) writer: Option<thread::JoinHandle<()>>,
 	pub(super) hold_max: Option<Duration>
 }
@@ -25,6 +27,8 @@ pub(super) struct Asking {
 }
 
 const OUTBOX: usize = 1024;
+
+pub(super) const COVERAGE_PATIENCE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Wait {
@@ -47,6 +51,7 @@ pub(super) struct Sessions {
 	pub(super) asking: Option<Asking>,
 	pub(super) reloader: Option<(ClientId, String)>,
 	pub(super) profiling: Option<ClientId>,
+	pub(super) covering: Option<ClientId>,
 	pub(super) hold: Option<ClientId>,
 	pub(super) hold_max: Option<Duration>
 }
@@ -60,6 +65,7 @@ impl Sessions {
 			asking: None,
 			reloader: None,
 			profiling: None,
+			covering: None,
 			hold: None,
 			hold_max: None
 		})
@@ -179,24 +185,29 @@ impl Sessions {
 	}
 
 	pub(super) fn post(client: &mut Client, reply_to: Option<RequestId>, response: &Response) -> bool {
-		auxtools_protocol::frame(&ServerMessage { reply_to, response }).is_ok_and(|bytes| client.outbox.try_send(bytes).is_ok())
+		let posted = auxtools_protocol::frame(&ServerMessage { reply_to, response }).is_ok_and(|bytes| client.outbox.try_send(bytes).is_ok());
+		client.queued += u64::from(posted);
+		posted
 	}
 
 	pub(super) fn say(connection: &mut Connection, response: &Response) -> std::io::Result<()> {
 		auxtools_protocol::write(connection, &ServerMessage::event(response))
 	}
 
-	pub(super) fn writer(mut connection: Connection) -> (mpsc::SyncSender<Vec<u8>>, thread::JoinHandle<()>) {
+	pub(super) fn writer(mut connection: Connection) -> (mpsc::SyncSender<Vec<u8>>, Arc<AtomicU64>, thread::JoinHandle<()>) {
 		let (outbox, sent) = mpsc::sync_channel::<Vec<u8>>(OUTBOX);
+		let written = Arc::new(AtomicU64::new(0));
+		let wrote = written.clone();
 		let writer = thread::spawn(move || {
 			while let Ok(bytes) = sent.recv() {
 				if connection.write_all(&bytes).and_then(|()| connection.flush()).is_err() {
 					return;
 				}
+				wrote.fetch_add(1, Ordering::Release);
 			}
 			let _ = Self::say(&mut connection, &Response::Disconnect);
 		});
-		(outbox, writer)
+		(outbox, written, writer)
 	}
 }
 
@@ -211,13 +222,15 @@ impl Server {
 
 			match event {
 				Event::Connected(id, connection) => {
-					let (outbox, writer) = Sessions::writer(connection.clone());
+					let (outbox, written, writer) = Sessions::writer(connection.clone());
 					self.sessions.clients.insert(id, Client {
 						uncaught: None,
 						caught: None,
 						debugs: true,
 						follow: None,
 						outbox,
+						queued: 0,
+						written,
 						writer: Some(writer),
 						hold_max: None
 					});
@@ -313,6 +326,10 @@ impl Server {
 			self.sessions.profiling = None;
 			crate::profiler::discard();
 		}
+		if self.sessions.covering == Some(id) {
+			self.sessions.covering = None;
+			crate::coverage::discard();
+		}
 
 		self.breakpoints.forget_client(id);
 
@@ -329,10 +346,34 @@ impl Server {
 	}
 
 	pub fn world_shutting_down(&mut self) {
+		let patience = match self.coverage_ended() {
+			Some(_) => COVERAGE_PATIENCE,
+			None => Duration::from_secs(1)
+		};
 		self.broadcast(Response::ShuttingDown, None);
-		let writers: Vec<_> = self.sessions.clients.values_mut().filter_map(|client| client.writer.take()).collect();
-		self.disconnect_all();
-		let deadline = Instant::now() + Duration::from_secs(1);
+		let everyone = self.sessions.clients.keys().copied().collect();
+		self.hang_up(everyone, patience);
+	}
+
+	pub(super) fn wait_until_sent(&self, client: ClientId, patience: Duration) {
+		let Some(client) = self.sessions.clients.get(&client) else {
+			return;
+		};
+		let deadline = Instant::now() + patience;
+		while client.written.load(Ordering::Acquire) < client.queued
+			&& client.writer.as_ref().is_some_and(|writer| !writer.is_finished())
+			&& Instant::now() < deadline
+		{
+			thread::sleep(Duration::from_millis(5));
+		}
+	}
+
+	pub(super) fn hang_up(&mut self, clients: Vec<ClientId>, patience: Duration) {
+		let writers: Vec<_> = clients.iter().filter_map(|id| self.sessions.clients.get_mut(id)?.writer.take()).collect();
+		for id in clients {
+			self.remove_client(id);
+		}
+		let deadline = Instant::now() + patience;
 		while writers.iter().any(|writer| !writer.is_finished()) && Instant::now() < deadline {
 			thread::sleep(Duration::from_millis(5));
 		}

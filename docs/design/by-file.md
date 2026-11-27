@@ -228,6 +228,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Profiler instruction timing and HTML report escaping](cli/0017-profiler-timing-and-report.md): `ProfiledInstruction`, `ProfiledTotal`
 - [Connecting to worlds over local sockets](cli/0018-connecting-to-worlds.md): `Response::Unavailable`
 - [Ordering stop events after resume responses](cli/0022-report-stops-after-the-response-that-resumed.md): `Response::StepEnded`
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Request::Coverage`, `Response::Coverage`, `Coverage`, `CoveredFile`, `CoveredLine`
 
 ### `auxtools-protocol/src/plan_format.rs`
 
@@ -302,6 +303,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Entering the instruction hook from BYOND's dispatcher](auxtools/0008-how-the-instruction-hook-enters-from-byonds-dispatcher.md): `take_table`, `detour`, `handle_instruction`, `instruction_dispatched`, `about_to_run`, `FrameStart`, `MOST_OPCODES`, `table_stub!`, `unknown_stub!`, `execute_instruction_hook`
 - [Synchronizing rewrites to the opcode jump table](auxtools/0009-the-opcode-jump-table-is-rewritten-only-under-one-lock.md): `Table`, `LISTENING`, `ALL`, `hear_all`, `hear_only`, `ORIGINAL_TABLE`, `DISPATCH_START`, `UNKNOWN_ORIGINAL`, `UNKNOWN_NEXT`, `PASS`, `PASS_UNKNOWN`
 - [Preserving execute access when making the jump table writable](auxtools/0010-making-the-jump-table-writable-keeps-execute-access.md): `writable`, `take_table`
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `hears_all`, `hear_only`, `hear_all`
 
 ### `auxtools/src/lib.rs`
 
@@ -460,10 +462,15 @@ file after adding a note or changing an `## Applies to` list.
 - [Reading and preserving `DbgFile` and `DbgLine` instructions](debug-server/0006-how-dbgfile-and-dbgline-are-read-and-kept.md): `Code::place`
 - [Keying and invalidating the code index](debug-server/0007-the-code-index-is-keyed-by-code-address.md): `of`, `running`, `proc_changed`, `world_ended`, `world_loaded`, `Code::read`
 - [The Windows crash handler must not wait or panic](debug-server/0019-the-windows-crash-handler-must-not-wait.md): `index`
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Code::lines_with_code`
 
 ### `debug_server/src/connection.rs`
 
 - [Debug server client connections and writer threads](debug-server/0017-client-connections.md): `Listener`, `listen`
+
+### `debug_server/src/coverage.rs`
+
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Recording`, `enter`, `start`, `stop`, `discard`, `lines_with_code`, `MOST_LINES`
 
 ### `debug_server/src/crash_handler_windows.rs`
 
@@ -507,6 +514,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Reading and preserving `DbgFile` and `DbgLine` instructions](debug-server/0006-how-dbgfile-and-dbgline-are-read-and-kept.md): `BreakOnNext` arm of `Server::handle_instruction`
 - [Data breakpoint lifetimes and detecting DM throws](debug-server/0008-when-data-breakpoints-end.md): `OPCODE_THROW` branch of `Server::handle_instruction`, `rest`
 - [Blocking client requests while the debugger runs DM](debug-server/0010-no-requests-are-handled-while-the-debugger-runs-dm.md): `Server::handle_instruction`
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `rest`
 - [Hidden `(init)` procs for non-constant variable initializers](tests/0037-byond-fact-var-initializers-run-in-an-init-proc.md): `is_generated_proc`
 
 ### `debug_server/src/journal.rs`
@@ -530,6 +538,7 @@ file after adding a note or changing an `## Applies to` list.
 
 - [A breakpoint opcode never reaches BYOND](debug-server/0003-a-breakpoint-opcode-never-reaches-byond.md): panic limit in `settle`
 - [Stopping panics and world shutdowns at `guard`](debug-server/0016-panics-and-world-ends-stop-at-guard.md): `WorldEnded`, `WORLD_ENDS`, `LOST`, `guard`, `guard_server`, `settle`
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `DebugServerInstructionHook::handle_instruction`
 
 ### `debug_server/src/profiler.rs`
 
@@ -578,6 +587,10 @@ file after adding a note or changing an `## Applies to` list.
 - [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `procs_in`
 - [Reading and preserving `DbgFile` and `DbgLine` instructions](debug-server/0006-how-dbgfile-and-dbgline-are-read-and-kept.md): `Codes::place_running`, `place_of`, `frame_place`
 
+### `debug_server/src/server/coverage.rs`
+
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Server::coverage`
+
 ### `debug_server/src/server/eval.rs`
 
 - [Read-only hovers, render depth, and frame parameter order](cli/0013-evaluation-reads-renders-and-names.md): evaluation path
@@ -624,6 +637,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Stopping and rebooting a world through DM evaluation](cli/0010-ending-and-rebooting-a-world.md): `world_shutting_down`
 - [Connecting to worlds over local sockets](cli/0018-connecting-to-worlds.md): `Acceptor`, `refuse_on`
 - [Debug server client connections and writer threads](debug-server/0017-client-connections.md): `Acceptor`, `ACCEPTOR`, `OUTBOX`, `serve`, `post`, `writer`
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Sessions::covering`, `remove_client`
 - [Reboots during execution and the shutdown notification](tests/0044-reboots-during-execution-and-the-shutdown-notification.md): `world_shutting_down`
 
 ### `debug_server/src/server/spawn.rs`

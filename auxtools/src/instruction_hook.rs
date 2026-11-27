@@ -112,6 +112,17 @@ pub fn hear_all() {
 	ALL.store(true, Ordering::SeqCst);
 }
 
+/// Returns whether every opcode is routed to the instruction handler.
+///
+/// Returns `true` initially, after [`hear_all`], and whenever the opcode jump
+/// table was not patched (where [`hear_only`] has no effect). Returns `false`
+/// while [`hear_only`] restricts the handler.
+///
+/// Safe to call from any thread.
+pub fn hears_all() -> bool {
+	ALL.load(Ordering::SeqCst)
+}
+
 /// Restricts the instruction handler to instructions whose opcode is in
 /// `opcodes`, letting all other opcodes run at native BYOND speed.
 ///

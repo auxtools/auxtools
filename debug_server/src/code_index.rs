@@ -137,6 +137,27 @@ impl Code {
 		lines
 	}
 
+	pub fn lines_with_code(&self) -> Vec<(&str, u32)> {
+		let mut file = None;
+		let mut line = None;
+		let mut found = vec![];
+		for (_, step) in self.steps() {
+			match step {
+				Step::File(name) => {
+					file = Some(name);
+					line = None;
+				}
+				Step::Line(here) => line = Some(here),
+				Step::Other => {
+					if let (Some(file), Some(line)) = (file, line.take()) {
+						found.push((file, line));
+					}
+				}
+			}
+		}
+		found
+	}
+
 	pub fn place(&self, offset: u32, before: bool) -> Option<(Option<&str>, u32)> {
 		let mut line = None;
 		let mut file = None;
@@ -694,6 +715,14 @@ mod tests {
 				_ => None
 			})
 		}
+	}
+
+	#[test]
+	fn a_line_has_code_when_an_instruction_follows_it() {
+		assert_eq!(two_lines().lines_with_code(), [("file1.dm", 10), ("file1.dm", 11)]);
+		assert_eq!(two_files().lines_with_code(), [("file1.dm", 5), ("file2.dm", 30), ("file1.dm", 6)]);
+		let (_, unplaced) = read(&[&push(1), &line(3), &line(4), &ret()]);
+		assert_eq!(unplaced.lines_with_code(), []);
 	}
 
 	#[test]

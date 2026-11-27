@@ -314,13 +314,17 @@ fn world_new(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
 fn world_del(_: &Value, _: &Value, args: Vec<Value>) -> auxtools::DMResult {
 	let failed = args.first().is_some_and(|failed| failed.as_number().is_ok_and(|failed| failed != 0.0));
 	if REBOOTING.swap(false, Ordering::Relaxed) {
+		crate::on_server(Server::world_may_end);
 		let ours = Proc::find_override("/world/Del", Proc::APART);
 		auxtools::init_on_next_world_load(ours.as_ref());
 	} else if !failed {
 		crate::on_server(Server::world_shutting_down);
 		auxtools::shut_down_with_world();
 	} else {
-		crate::on_server(Server::world_carries_on);
+		crate::on_server(|server| {
+			server.world_carries_on();
+			server.world_may_end();
+		});
 	}
 	Ok(Value::NULL)
 }

@@ -85,6 +85,7 @@ the notes that apply to each source file.
 - [Resources before the world has loaded them](debug-server/0046-resources-before-the-world-has-loaded-them.md)
 - [Reloading a resource file](debug-server/0047-reloading-a-resource-file.md)
 - [Finding resource files as DreamMaker does on Linux](debug-server/0048-find-resource-files-as-dreammaker-does-on-linux.md)
+- [Recording line coverage](debug-server/0049-recording-line-coverage.md)
 
 ## Launcher, CLI, debug adapter, and protocol
 

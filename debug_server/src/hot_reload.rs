@@ -3569,7 +3569,7 @@ fn proc_template() -> Result<ProcEntryWords, String> {
 
 static WORLD_HAS_DEBUG_INFO: Mutex<Option<bool>> = Mutex::new(None);
 
-fn world_has_debug_info() -> bool {
+pub(crate) fn world_has_debug_info() -> bool {
 	let mut known = WORLD_HAS_DEBUG_INFO.lock().unwrap();
 	*known.get_or_insert_with(|| {
 		(0..)
