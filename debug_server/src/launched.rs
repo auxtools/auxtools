@@ -167,13 +167,20 @@ fn read_command_line() -> (Vec<String>, String) {
 }
 
 fn attach() {
-	let _ = COMMAND_LINE.set(read_command_line());
-	if let Err(e) = auxtools::init_on_world_load(&WORLD_LOAD) {
-		failed(&e);
+	let attached = crate::guard(|| {
+		let _ = COMMAND_LINE.set(read_command_line());
+		auxtools::init_on_world_load(&WORLD_LOAD)
+	});
+	if let Err(e) = attached.and_then(|initialised| initialised) {
+		let _ = crate::guard(|| failed(&e));
 	}
 }
 
 fn prepare() -> Result<(), String> {
+	crate::guard(add_helper_procs)?
+}
+
+fn add_helper_procs() -> Result<(), String> {
 	crate::world_resources::loading();
 	let request = helper_procs()?;
 	KEEPALIVE_OURS.store(
@@ -244,6 +251,12 @@ fn overrides(path: &str) -> u32 {
 }
 
 fn ready() {
+	if let Err(e) = crate::guard(start) {
+		failed(&e);
+	}
+}
+
+fn start() {
 	if let Some(proc) = Proc::find("/proc/auxtools_launched_world_del") {
 		let _ = proc.hook(world_del);
 	}
@@ -286,7 +299,7 @@ fn ready() {
 		}
 	};
 	if std::env::var(DEBUG_VAR).is_ok_and(|value| value == "wait") {
-		server.process_until_configured();
+		let _ = crate::guard_server(&mut server, Server::process_until_configured);
 	}
 	crate::install_server(server);
 
@@ -297,9 +310,7 @@ fn ready() {
 
 fn world_new(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
 	crate::world_resources::loaded();
-	if let Some(server) = unsafe { &mut *crate::DEBUG_SERVER.get() } {
-		server.world_data_loaded();
-	}
+	crate::on_server(Server::world_data_loaded);
 	Ok(Value::NULL)
 }
 
@@ -309,12 +320,10 @@ fn world_del(_: &Value, _: &Value, args: Vec<Value>) -> auxtools::DMResult {
 		let ours = Proc::find_override("/world/Del", Proc::APART);
 		auxtools::init_on_next_world_load(ours.as_ref());
 	} else if !failed {
-		if let Some(server) = unsafe { &mut *crate::DEBUG_SERVER.get() } {
-			server.world_shutting_down();
-		}
+		crate::on_server(Server::world_shutting_down);
 		auxtools::shut_down_with_world();
-	} else if let Some(server) = unsafe { &mut *crate::DEBUG_SERVER.get() } {
-		server.world_carries_on();
+	} else {
+		crate::on_server(Server::world_carries_on);
 	}
 	Ok(Value::NULL)
 }
@@ -326,30 +335,22 @@ fn world_reboot(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
 
 fn world_reboot_declined(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
 	REBOOTING.store(false, Ordering::Relaxed);
-	if let Some(server) = unsafe { &mut *crate::DEBUG_SERVER.get() } {
-		server.world_carries_on();
-	}
+	crate::on_server(Server::world_carries_on);
 	Ok(Value::NULL)
 }
 
 fn spawn_inbox(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
-	match unsafe { &mut *crate::DEBUG_SERVER.get() } {
-		Some(server) => Ok(server.spawn_inbox()),
-		None => Ok(Value::NULL)
-	}
+	Ok(crate::on_server(Server::spawn_inbox).unwrap_or(Value::NULL))
 }
 
 fn spawn_next(_: &Value, _: &Value, _: Vec<Value>) -> auxtools::DMResult {
-	match unsafe { &mut *crate::DEBUG_SERVER.get() } {
-		Some(server) => server.next_spawn(),
-		None => Ok(Value::NULL)
-	}
+	crate::on_server(Server::next_spawn).unwrap_or(Ok(Value::NULL))
 }
 
 fn spawn_done(_: &Value, _: &Value, args: Vec<Value>) -> auxtools::DMResult {
 	let number = args.first().and_then(|number| number.as_number().ok());
-	if let (Some(server), Some(number)) = (unsafe { &mut *crate::DEBUG_SERVER.get() }, number) {
-		server.spawn_done(number as u64, args.get(1).unwrap_or(&Value::NULL));
+	if let Some(number) = number {
+		crate::on_server(|server| server.spawn_done(number as u64, args.get(1).unwrap_or(&Value::NULL)));
 	}
 	Ok(Value::NULL)
 }
