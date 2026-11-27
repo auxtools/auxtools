@@ -242,11 +242,11 @@ impl Evaluation {
 		let none = match locals.is_empty() {
 			true => None,
 			false => {
-				let none = unsafe { runtime_tables::proc_entry(proc.id) }
-					.ok_or("couldn't read the stub's proc entry")?
+				let none = runtime_tables::proc_entry(proc.id)
+					.ok_or("could not read proc entry for /proc/auxtools_expr_stub")?
 					.0[ProcEntryWords::LOCALS];
 				let table = hot_reload::locals_table(locals, none)?;
-				unsafe { runtime_tables::set_proc_entry_word(proc.id, ProcEntryWords::LOCALS, table) };
+				runtime_tables::set_proc_entry_word(proc.id, ProcEntryWords::LOCALS, table);
 				Some(none)
 			}
 		};
@@ -255,7 +255,7 @@ impl Evaluation {
 		if crate::WORLD_ENDS.load(std::sync::atomic::Ordering::Relaxed) == ends {
 			Self::show_tries(tries);
 			if let Some(none) = none {
-				unsafe { runtime_tables::set_proc_entry_word(proc.id, ProcEntryWords::LOCALS, none) };
+				runtime_tables::set_proc_entry_word(proc.id, ProcEntryWords::LOCALS, none);
 			}
 		}
 		Ok(result)
@@ -533,7 +533,7 @@ impl Server {
 		}
 		let proc = Proc::find("/proc/auxtools_expr_stub").ok_or("this world has no /proc/auxtools_expr_stub for evaluating expressions")?;
 
-		unsafe { proc.set_bytecode(assembly) }?;
+		proc.set_bytecode(assembly)?;
 
 		let ends = crate::WORLD_ENDS.load(std::sync::atomic::Ordering::Relaxed);
 		let result = Evaluation::call_with_locals(&proc, &locals, &arg_values)?;
@@ -560,27 +560,27 @@ impl Server {
 								ArgType::Dot => {
 									let dot = (*ctx).dot_mut();
 									let _ = Value::from_raw_owned(*dot);
-									*dot = value.raw();
+									*dot = value.raw;
 								}
 								ArgType::Usr => {
 									let _ = Value::from_raw_owned((*instance).usr);
-									(*instance).usr = value.raw();
+									(*instance).usr = value.raw;
 								}
 								ArgType::Src => {
 									let _ = Value::from_raw_owned((*instance).src);
-									(*instance).src = value.raw();
+									(*instance).src = value.raw;
 								}
 								ArgType::Arg(idx) => {
 									let args = (*instance).args();
 									let arg = args.add(*idx as usize);
 									let _ = Value::from_raw_owned(*arg);
-									(*arg) = value.raw();
+									(*arg) = value.raw;
 								}
 								ArgType::Local(idx) => {
 									let locals = *(*ctx).locals();
 									let local = locals.add(*idx as usize);
 									let _ = Value::from_raw_owned(*local);
-									(*local) = value.raw();
+									(*local) = value.raw;
 								}
 								ArgType::Given => continue
 							}

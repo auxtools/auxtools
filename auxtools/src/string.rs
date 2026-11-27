@@ -34,7 +34,7 @@ pub fn text_of(bytes: &[u8]) -> String {
 /// no `From<&str>` implementation, so APIs accepting `Into<StringRef>` require
 /// a `StringRef`, `&StringRef`, or `byond_string!`.
 pub struct StringRef {
-	value: Value
+	pub value: Value
 }
 
 impl StringRef {

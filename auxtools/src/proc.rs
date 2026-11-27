@@ -162,11 +162,7 @@ impl Proc {
 	/// # Panics
 	///
 	/// Panics if called before the library is initialized or after shutdown.
-	///
-	/// # Safety
-	/// Call on BYOND's thread while a world is live. `bytecode` must be code
-	/// that BYOND can run for this proc.
-	pub unsafe fn set_bytecode(&self, bytecode: Vec<u32>) -> Result<(), String> {
+	pub fn set_bytecode(&self, bytecode: Vec<u32>) -> Result<(), String> {
 		crate::bytecode_manager::set_bytecode(self, bytecode)
 	}
 

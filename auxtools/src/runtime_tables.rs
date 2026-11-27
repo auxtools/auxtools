@@ -1,6 +1,14 @@
-//! Extends BYOND's tables with BYOND's own allocators, so BYOND can free the
-//! memory. Every function here reads or writes BYOND's memory, so each is
-//! `unsafe`.
+//! Direct access to read and extend BYOND's live internal tables (procs, misc
+//! entries, types, proc name maps, variables, globals, and map instances).
+//!
+//! Allocations use BYOND's own allocators (`realloc` and `AllocShared`) so
+//! BYOND can free the memory safely. Call functions in this module only on
+//! BYOND's thread while a world is live. Most IDs and offsets are not bounds
+//! checked, and entries added to tables are never removed.
+//!
+//! Growing a table may reallocate it in memory and invalidate existing
+//! pointers. Most functions return `Err(String)` when required BYOND symbols
+//! are unavailable (see [`available`]).
 
 use std::ffi::c_void;
 
@@ -151,11 +159,7 @@ unsafe fn path_cache(build: u32, register: Option<usize>) -> Option<*const *mut 
 /// [`add_proc`] and [`add_type`] call this automatically. Does nothing if no
 /// miss is cached for `path`, if the cache cannot be located, or on builds
 /// outside `1641`–`1689`.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. `value` must be the path's tag
-/// and data.
-pub unsafe fn recache_path(path: u32, value: [u32; 2]) {
+pub fn recache_path(path: u32, value: [u32; 2]) {
 	const TEXT: u8 = 0x06;
 	const VALUE: usize = 0x08;
 	const BEFORE: usize = 0x10;
@@ -339,11 +343,13 @@ fn resolve() -> Result<Functions, String> {
 	}
 }
 
-unsafe fn functions() -> Result<&'static Functions, String> {
-	if (*std::ptr::addr_of!(FUNCTIONS)).is_none() {
-		*std::ptr::addr_of_mut!(FUNCTIONS) = Some(resolve());
+fn functions() -> Result<&'static Functions, String> {
+	unsafe {
+		if (*std::ptr::addr_of!(FUNCTIONS)).is_none() {
+			*std::ptr::addr_of_mut!(FUNCTIONS) = Some(resolve());
+		}
+		(*std::ptr::addr_of!(FUNCTIONS)).as_ref().unwrap().as_ref().map_err(Clone::clone)
 	}
-	(*std::ptr::addr_of!(FUNCTIONS)).as_ref().unwrap().as_ref().map_err(Clone::clone)
 }
 
 /// Checks whether the BYOND symbols required to extend runtime tables are
@@ -357,22 +363,19 @@ unsafe fn functions() -> Result<&'static Functions, String> {
 ///
 /// Returns the symbol lookup error message if any required BYOND function
 /// cannot be resolved.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn available() -> Result<(), String> {
+pub fn available() -> Result<(), String> {
 	functions().map(|_| ())
 }
 
-pub unsafe fn types_available() -> Result<(), String> {
+pub fn types_available() -> Result<(), String> {
 	functions()?.register_typepath.as_ref().map(|_| ()).map_err(Clone::clone)
 }
 
-pub unsafe fn global_vars_available() -> Result<(), String> {
+pub fn global_vars_available() -> Result<(), String> {
 	functions()?.global_vars.as_ref().map(|_| ()).map_err(Clone::clone)
 }
 
-pub unsafe fn proc_entry(id: ProcId) -> Option<ProcEntryWords> {
+pub fn proc_entry(id: ProcId) -> Option<ProcEntryWords> {
 	let mut entry: *mut crate::raw_types::procs::ProcEntry = std::ptr::null_mut();
 	unsafe {
 		if crate::raw_types::funcs::get_proc_array_entry(&mut entry, id) != 1 || entry.is_null() {
@@ -392,7 +395,7 @@ pub unsafe fn proc_entry(id: ProcId) -> Option<ProcEntryWords> {
 /// # Panics
 ///
 /// Panics if `word` is greater than `10`.
-pub unsafe fn set_proc_entry_word(id: ProcId, word: usize, value: u32) {
+pub fn set_proc_entry_word(id: ProcId, word: usize, value: u32) {
 	let mut entry: *mut crate::raw_types::procs::ProcEntry = std::ptr::null_mut();
 	unsafe {
 		if crate::raw_types::funcs::get_proc_array_entry(&mut entry, id) == 1 && !entry.is_null() {
@@ -401,7 +404,7 @@ pub unsafe fn set_proc_entry_word(id: ProcId, word: usize, value: u32) {
 	}
 }
 
-pub unsafe fn set_proc_entry(id: ProcId, words: &ProcEntryWords) {
+pub fn set_proc_entry(id: ProcId, words: &ProcEntryWords) {
 	for (word, &value) in words.0.iter().enumerate() {
 		set_proc_entry_word(id, word, value);
 	}
@@ -423,11 +426,7 @@ pub unsafe fn set_proc_entry(id: ProcId, words: &ProcEntryWords) {
 ///
 /// Returns an error if BYOND cannot add the proc or if required runtime table
 /// symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. The entry's IDs must be valid,
-/// as for [`set_proc_entry_word`].
-pub unsafe fn add_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
+pub fn add_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 	let id = (functions()?.procdef_add)(entry);
 	if id == NONE {
 		return Err("BYOND could not add the proc".to_owned());
@@ -447,11 +446,7 @@ pub unsafe fn add_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 ///
 /// Returns an error if BYOND cannot add the proc or if required runtime table
 /// symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. The entry's IDs must be valid,
-/// as for [`set_proc_entry_word`].
-pub unsafe fn append_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
+pub fn append_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 	let path = entry.0[ProcEntryWords::PATH];
 	let hidden: Vec<ProcId> = (0..proc_count())
 		.map(ProcId)
@@ -467,7 +462,7 @@ pub unsafe fn append_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 	added
 }
 
-pub unsafe fn proc_count() -> u32 {
+pub fn proc_count() -> u32 {
 	let mut id = 0;
 	while proc_entry(ProcId(id)).is_some() {
 		id += 1;
@@ -475,7 +470,7 @@ pub unsafe fn proc_count() -> u32 {
 	id
 }
 
-pub unsafe fn misc_words(id: u32) -> Option<Vec<u32>> {
+pub fn misc_words(id: u32) -> Option<Vec<u32>> {
 	if id == NONE {
 		return Some(vec![]);
 	}
@@ -504,10 +499,7 @@ pub unsafe fn misc_words(id: u32) -> Option<Vec<u32>> {
 ///
 /// Returns an error if `words` exceeds 65,535 elements, if BYOND fails to
 /// create the entry, or if required runtime table symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn intern_misc(words: &[u32]) -> Result<u32, String> {
+pub fn intern_misc(words: &[u32]) -> Result<u32, String> {
 	if words.len() > u16::MAX as usize {
 		return Err(format!("misc entry length of {} words exceeds the 65535-word limit", words.len()));
 	}
@@ -541,11 +533,11 @@ pub unsafe fn intern_misc(words: &[u32]) -> Result<u32, String> {
 	Ok(id)
 }
 
-pub unsafe fn type_count() -> Result<u32, String> {
+pub fn type_count() -> Result<u32, String> {
 	Ok(unsafe { *functions()?.type_count })
 }
 
-unsafe fn type_entry(type_id: u32) -> Result<*mut u8, String> {
+fn type_entry(type_id: u32) -> Result<*mut u8, String> {
 	let functions = functions()?;
 	unsafe {
 		if type_id >= *functions.type_count {
@@ -555,20 +547,26 @@ unsafe fn type_entry(type_id: u32) -> Result<*mut u8, String> {
 	}
 }
 
-unsafe fn type_slot<T>(type_id: u32, offset: usize) -> Result<*mut T, String> {
-	let size = std::mem::size_of::<T>();
-	if !offset.is_multiple_of(std::mem::align_of::<T>()) || offset > functions()?.type_stride - size {
-		return Err(format!("+{:#x} isn't a {}-byte field of a type", offset, size));
+pub fn type_field(type_id: u32, offset: usize) -> Result<u32, String> {
+	Ok(unsafe { *(type_entry(type_id)?.add(offset) as *const u32) })
+}
+
+/// Writes a 32-bit `value` at byte `offset` in the type table entry for
+/// `type_id`.
+///
+/// Use the constants in [`type_fields`] for `offset`. Validates `type_id` but
+/// does not bounds-check `offset`, so an out-of-range offset overwrites
+/// adjacent entries. `set_type_half` and `set_type_byte` write 16-bit and 8-bit
+/// fields in the same way.
+///
+/// # Errors
+///
+/// Returns an error if `type_id` does not exist or if required runtime table
+/// symbols are unavailable.
+pub fn set_type_field(type_id: u32, offset: usize, value: u32) -> Result<(), String> {
+	unsafe {
+		*(type_entry(type_id)?.add(offset) as *mut u32) = value;
 	}
-	Ok(unsafe { type_entry(type_id)?.add(offset) as *mut T })
-}
-
-pub unsafe fn type_field(type_id: u32, offset: usize) -> Result<u32, String> {
-	Ok(unsafe { *type_slot::<u32>(type_id, offset)? })
-}
-
-pub unsafe fn set_type_field(type_id: u32, offset: usize, value: u32) -> Result<(), String> {
-	*type_slot(type_id, offset)? = value;
 	Ok(())
 }
 
@@ -602,7 +600,7 @@ pub struct Instance {
 
 const MOB_TYPEPATH: u8 = 0x08;
 
-unsafe fn add_mob_type(mob: MobType) -> Result<u32, String> {
+fn add_mob_type(mob: MobType) -> Result<u32, String> {
 	let functions = functions()?;
 	unsafe {
 		let count = *functions.mob_count;
@@ -618,7 +616,7 @@ unsafe fn add_mob_type(mob: MobType) -> Result<u32, String> {
 	}
 }
 
-pub unsafe fn set_mob_type(type_id: u32, set: impl FnOnce(&mut MobType)) -> Result<(), String> {
+pub fn set_mob_type(type_id: u32, set: impl FnOnce(&mut MobType)) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
 		let mobs = std::slice::from_raw_parts_mut(*functions.mobs, *functions.mob_count as usize);
@@ -628,7 +626,7 @@ pub unsafe fn set_mob_type(type_id: u32, set: impl FnOnce(&mut MobType)) -> Resu
 	Ok(())
 }
 
-pub unsafe fn instances() -> Result<Vec<Instance>, String> {
+pub fn instances() -> Result<Vec<Instance>, String> {
 	let functions = functions()?;
 	unsafe {
 		let count = *functions.instance_count as usize;
@@ -640,7 +638,7 @@ pub unsafe fn instances() -> Result<Vec<Instance>, String> {
 	}
 }
 
-pub unsafe fn add_instance(instance: Instance) -> Result<u32, String> {
+pub fn add_instance(instance: Instance) -> Result<u32, String> {
 	let functions = functions()?;
 	unsafe {
 		let count = *functions.instance_count;
@@ -656,11 +654,11 @@ pub unsafe fn add_instance(instance: Instance) -> Result<u32, String> {
 	}
 }
 
-pub unsafe fn in_list_count() -> Result<u32, String> {
+pub fn in_list_count() -> Result<u32, String> {
 	Ok(unsafe { *functions()?.in_list_count })
 }
 
-pub unsafe fn in_list_procs() -> Result<Vec<u32>, String> {
+pub fn in_list_procs() -> Result<Vec<u32>, String> {
 	let functions = functions()?;
 	unsafe {
 		let count = *functions.in_list_count as usize;
@@ -682,10 +680,7 @@ pub unsafe fn in_list_procs() -> Result<Vec<u32>, String> {
 ///
 /// Returns an error if the table cannot be extended or if required runtime
 /// table symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. `proc` must be a proc ID.
-pub unsafe fn add_in_list(proc: ProcId) -> Result<u32, String> {
+pub fn add_in_list(proc: ProcId) -> Result<u32, String> {
 	let functions = functions()?;
 	unsafe {
 		let count = *functions.in_list_count;
@@ -710,10 +705,7 @@ pub unsafe fn add_in_list(proc: ProcId) -> Result<u32, String> {
 ///
 /// Returns an error if `type_id` does not exist or if required runtime table
 /// symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn forget_type_appearance(type_id: u32) -> Result<(), String> {
+pub fn forget_type_appearance(type_id: u32) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
 		if type_id >= *functions.type_count {
@@ -724,7 +716,7 @@ pub unsafe fn forget_type_appearance(type_id: u32) -> Result<(), String> {
 	Ok(())
 }
 
-unsafe fn name_map(type_id: u32) -> Result<*mut ProcNameMap, String> {
+fn name_map(type_id: u32) -> Result<*mut ProcNameMap, String> {
 	let functions = functions()?;
 	unsafe {
 		if type_id >= *functions.type_count {
@@ -751,18 +743,15 @@ unsafe fn buckets<'a>(map: *mut ProcNameMap) -> &'a [ProcNameBucket] {
 ///
 /// Returns an error if `type_id` does not exist or if required runtime table
 /// symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn named_procs(type_id: u32, key: u32) -> Result<Vec<u32>, String> {
+pub fn named_procs(type_id: u32, key: u32) -> Result<Vec<u32>, String> {
 	named_procs_in(name_map(type_id)?, key)
 }
 
-pub unsafe fn world_named_procs(key: u32) -> Result<Vec<u32>, String> {
+pub fn world_named_procs(key: u32) -> Result<Vec<u32>, String> {
 	named_procs_in(functions()?.world_name_map, key)
 }
 
-unsafe fn named_procs_in(map: *mut ProcNameMap, key: u32) -> Result<Vec<u32>, String> {
+fn named_procs_in(map: *mut ProcNameMap, key: u32) -> Result<Vec<u32>, String> {
 	unsafe {
 		let buckets = buckets(map);
 		Ok(match buckets.binary_search_by_key(&key, |bucket| bucket.key) {
@@ -783,10 +772,7 @@ unsafe fn named_procs_in(map: *mut ProcNameMap, key: u32) -> Result<Vec<u32>, St
 ///
 /// Returns an error if `type_id` does not exist, if allocation fails, or if
 /// required runtime table symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. `procs` must be proc IDs.
-pub unsafe fn set_named_procs(type_id: u32, key: u32, procs: &[u32]) -> Result<(), String> {
+pub fn set_named_procs(type_id: u32, key: u32, procs: &[u32]) -> Result<(), String> {
 	let map = name_map(type_id)?;
 	if unsafe { (*map).built } == 0 {
 		return Ok(());
@@ -802,18 +788,15 @@ pub unsafe fn set_named_procs(type_id: u32, key: u32, procs: &[u32]) -> Result<(
 /// # Errors
 ///
 /// Returns an error if required runtime table symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn world_names_built() -> Result<bool, String> {
+pub fn world_names_built() -> Result<bool, String> {
 	unsafe { Ok((*functions()?.world_name_map).built != 0) }
 }
 
-pub unsafe fn set_world_named_procs(key: u32, procs: &[u32]) -> Result<(), String> {
+pub fn set_world_named_procs(key: u32, procs: &[u32]) -> Result<(), String> {
 	set_named_procs_in(functions()?.world_name_map, key, procs)
 }
 
-unsafe fn set_named_procs_in(map: *mut ProcNameMap, key: u32, procs: &[u32]) -> Result<(), String> {
+fn set_named_procs_in(map: *mut ProcNameMap, key: u32, procs: &[u32]) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
 		let count = buckets(map).len();
@@ -863,10 +846,7 @@ unsafe fn set_named_procs_in(map: *mut ProcNameMap, key: u32, procs: &[u32]) -> 
 ///
 /// Returns an error if `var_id` does not exist or if required runtime table
 /// symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn set_global_value(var_id: u32, value: crate::Value) -> Result<(), String> {
+pub fn set_global_value(var_id: u32, value: crate::Value) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
 		if var_id >= variable_count() {
@@ -890,11 +870,7 @@ pub unsafe fn set_global_value(var_id: u32, value: crate::Value) -> Result<(), S
 ///
 /// Returns an error if `var_id` does not exist or if required runtime table
 /// symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. The caller must own a
-/// reference to the value, and this takes it over.
-pub unsafe fn set_global_words(var_id: u32, tag: u8, data: u32) -> Result<(), String> {
+pub fn set_global_words(var_id: u32, tag: u8, data: u32) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
 		if var_id >= variable_count() {
@@ -916,7 +892,7 @@ pub unsafe fn set_global_words(var_id: u32, tag: u8, data: u32) -> Result<(), St
 ///
 /// Returns an error if `var_id` does not exist or if required runtime table
 /// symbols are unavailable.
-pub unsafe fn global_value(var_id: u32) -> Result<crate::raw_types::values::Value, String> {
+pub fn global_value(var_id: u32) -> Result<crate::raw_types::values::Value, String> {
 	let functions = functions()?;
 	unsafe {
 		if var_id >= variable_count() {
@@ -926,7 +902,7 @@ pub unsafe fn global_value(var_id: u32) -> Result<crate::raw_types::values::Valu
 	}
 }
 
-pub unsafe fn add_global_vars(vars: &[(u32, u32)]) -> Result<(), String> {
+pub fn add_global_vars(vars: &[(u32, u32)]) -> Result<(), String> {
 	let global_vars = functions()?.global_vars.clone()?;
 	let current = unsafe { *global_vars };
 	let mut words = misc_words(current).ok_or_else(|| format!("global-variable misc entry {} is missing", current))?;
@@ -952,17 +928,17 @@ pub unsafe fn add_global_vars(vars: &[(u32, u32)]) -> Result<(), String> {
 	Ok(())
 }
 
-pub unsafe fn global_var_ids() -> Result<Vec<u32>, String> {
+pub fn global_var_ids() -> Result<Vec<u32>, String> {
 	let current = unsafe { *functions()?.global_vars.clone()? };
 	let words = misc_words(current).ok_or_else(|| format!("global-variable misc entry {} is missing", current))?;
 	Ok(words.chunks(2).map(|pair| pair[0]).collect())
 }
 
-pub unsafe fn variable_count() -> u32 {
+pub fn variable_count() -> u32 {
 	unsafe { *crate::raw_types::funcs::VARIABLE_NAME_COUNT }
 }
 
-pub unsafe fn variable_name(var_id: u32) -> Option<u32> {
+pub fn variable_name(var_id: u32) -> Option<u32> {
 	unsafe { (var_id < variable_count()).then(|| (*(*crate::raw_types::funcs::VARIABLE_NAME_ENTRIES).add(var_id as usize)).0) }
 }
 
@@ -977,11 +953,7 @@ pub unsafe fn variable_name(var_id: u32) -> Option<u32> {
 ///
 /// Returns an error if the 65,535-variable limit is reached, if allocation
 /// fails, or if required runtime table symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. The caller must own a
-/// reference to the value, and the slot takes it over.
-pub unsafe fn add_variable(name: u32, tag: u8, data: u32) -> Result<u32, String> {
+pub fn add_variable(name: u32, tag: u8, data: u32) -> Result<u32, String> {
 	let functions = functions()?;
 	unsafe {
 		let entries = crate::raw_types::funcs::VARIABLE_NAME_ENTRIES as *mut *const crate::raw_types::strings::StringId;
@@ -1027,11 +999,7 @@ pub unsafe fn add_variable(name: u32, tag: u8, data: u32) -> Result<u32, String>
 /// Returns an error if `parent` does not exist, if the 65,535-type limit is
 /// reached, if allocation fails, or if typepath registration is unavailable on
 /// build 1641 and later (see [`types_available`]).
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live. `path` must be a string ID
-/// that holds a reference.
-pub unsafe fn add_type(parent: u32, path: u32) -> Result<u32, String> {
+pub fn add_type(parent: u32, path: u32) -> Result<u32, String> {
 	use type_fields::*;
 	let functions = functions()?;
 	let register_typepath = functions.register_typepath.clone()?;
@@ -1162,17 +1130,21 @@ pub unsafe fn add_type(parent: u32, path: u32) -> Result<u32, String> {
 	}
 }
 
-pub unsafe fn set_type_half(type_id: u32, offset: usize, value: u16) -> Result<(), String> {
-	*type_slot(type_id, offset)? = value;
+pub fn set_type_half(type_id: u32, offset: usize, value: u16) -> Result<(), String> {
+	unsafe {
+		*(type_entry(type_id)?.add(offset) as *mut u16) = value;
+	}
 	Ok(())
 }
 
-pub unsafe fn set_type_byte(type_id: u32, offset: usize, value: u8) -> Result<(), String> {
-	*type_slot(type_id, offset)? = value;
+pub fn set_type_byte(type_id: u32, offset: usize, value: u8) -> Result<(), String> {
+	unsafe {
+		*type_entry(type_id)?.add(offset) = value;
+	}
 	Ok(())
 }
 
-pub unsafe fn name_map_entries(type_id: u32) -> Result<Vec<(u32, Vec<u32>, u8)>, String> {
+pub fn name_map_entries(type_id: u32) -> Result<Vec<(u32, Vec<u32>, u8)>, String> {
 	unsafe {
 		Ok(buckets(name_map(type_id)?)
 			.iter()
@@ -1201,7 +1173,7 @@ pub struct NameMapPlan {
 	written: bool
 }
 
-pub unsafe fn plan_name_map(type_id: u32, entries: &[(u32, Vec<u32>, u8)]) -> Result<NameMapPlan, String> {
+pub fn plan_name_map(type_id: u32, entries: &[(u32, Vec<u32>, u8)]) -> Result<NameMapPlan, String> {
 	let functions = functions()?;
 	let map = name_map(type_id)?;
 	let mut entries: Vec<&(u32, Vec<u32>, u8)> = entries.iter().filter(|(_, ids, _)| !ids.is_empty()).collect();
@@ -1242,10 +1214,7 @@ impl NameMapPlan {
 	///
 	/// Releases the old buckets' proc ID buffers while intentionally keeping
 	/// the old bucket array allocated, as with [`copy_type_matrix`].
-	///
-	/// # Safety
-	/// Call on BYOND's thread while a world is live.
-	pub unsafe fn write(mut self) {
+	pub fn write(mut self) {
 		let Ok(functions) = functions() else {
 			return;
 		};
@@ -1268,8 +1237,8 @@ impl Drop for NameMapPlan {
 		if self.written {
 			return;
 		}
-		unsafe {
-			if let Ok(functions) = functions() {
+		if let Ok(functions) = functions() {
+			unsafe {
 				for at in 0..self.count as usize {
 					(functions.free_shared)((*self.buckets.add(at)).ids as *mut c_void);
 				}
@@ -1295,10 +1264,7 @@ pub struct ParentPlan {
 ///
 /// Returns an error if any type ID does not exist, if the updated parent links
 /// form a cycle, or if required runtime table symbols are unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn plan_parents(changes: &[(u32, u32)]) -> Result<ParentPlan, String> {
+pub fn plan_parents(changes: &[(u32, u32)]) -> Result<ParentPlan, String> {
 	use type_fields::*;
 	let functions = functions()?;
 	let count = type_count()? as usize;
@@ -1361,9 +1327,7 @@ pub unsafe fn plan_parents(changes: &[(u32, u32)]) -> Result<ParentPlan, String>
 }
 
 impl ParentPlan {
-	/// # Safety
-	/// Call on BYOND's thread while a world is live.
-	pub unsafe fn write(&self) {
+	pub fn write(&self) {
 		use type_fields::*;
 		let Ok(functions) = functions() else {
 			return;
@@ -1395,10 +1359,7 @@ impl ParentPlan {
 /// Returns an error if `offset` is not a matrix field, if either type ID does
 /// not exist, if allocation fails, or if required runtime table symbols are
 /// unavailable.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn copy_type_matrix(type_id: u32, from: u32, offset: usize) -> Result<(), String> {
+pub fn copy_type_matrix(type_id: u32, from: u32, offset: usize) -> Result<(), String> {
 	use type_fields::*;
 	let size = match offset {
 		TRANSFORM => 6 * 4,
