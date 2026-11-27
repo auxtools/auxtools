@@ -91,6 +91,10 @@ file after adding a note or changing an `## Applies to` list.
 - [Exiting quietly when an output pipe closes](cli/0027-closed-output-pipes-end-the-cli-quietly.md): `say!`, `say_part!`, `say`, `run`
 - [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `Place`, `World::name_in_world`
 
+### `auxtools-cli/src/cli/check.rs`
+
+- [Catching and reporting panics in `auxtools check`](cli/0034-catching-panics-in-auxtools-check.md): `catching_panics`, `Panicked`, `check`
+
 ### `auxtools-cli/src/cli/hold.rs`
 
 - [Pause lifetime with multiple clients, watchers, and holds](cli/0007-pauses-with-several-clients.md): `hold_max`
@@ -900,6 +904,7 @@ file after adding a note or changing an `## Applies to` list.
 
 ### `dmasm/reload/src/reload.rs`
 
+- [Catching and reporting panics in `auxtools check`](cli/0034-catching-panics-in-auxtools-check.md): `Snapshot::compile`, `Snapshot::known_bugs`
 - [Reading static and const variables from global slots](compiler/0004-statics-and-consts-are-read-from-global-slots.md): caller of `chain_targets_in_proc`
 - [Built-in variable defaults from the running world and variable tables](debug-server/0036-built-in-var-defaults-come-from-the-running-world.md): `VAR_TABLE_BUILTINS`
 - [All-or-nothing hot reloads and deferred changes](reload/0001-a-reload-is-applied-whole-or-not-at-all.md): `Plan`, `Changes`, `Changes::deferred`, `Changes::settings_as_built`, `diff`, setting check (`in_world_record`) in `var_default`

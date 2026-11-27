@@ -125,6 +125,7 @@ note conventions, when to add a note, and how to update the indexes.
 - [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md)
 - [Process and pipe behavior of world test stand-ins](cli/0032-the-test-stand-in-behaves-like-a-world.md)
 - [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md)
+- [Catching and reporting panics in `auxtools check`](cli/0034-catching-panics-in-auxtools-check.md)
 
 ## dmasm compiler and bytecode
 

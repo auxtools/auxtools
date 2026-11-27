@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+	path::{Path, PathBuf},
+	sync::{Arc, Mutex}
+};
 
 use dmasm::{
 	reload::{ParseOptions, ProcKey, Snapshot},
@@ -38,6 +41,36 @@ fn counted(count: usize, one: &str, many: &str) -> String {
 	}
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Panicked {
+	place: String,
+	message: String
+}
+
+fn catching_panics<T>(run: impl FnOnce() -> T) -> std::result::Result<T, Panicked> {
+	let here = std::thread::current().id();
+	let last = Arc::new(Mutex::new(None));
+	let elsewhere = Arc::new(std::panic::take_hook());
+	let (seen, restored) = (last.clone(), elsewhere.clone());
+	std::panic::set_hook(Box::new(move |panic| {
+		if std::thread::current().id() != here {
+			return elsewhere(panic);
+		}
+		*seen.lock().unwrap() = Some(Panicked {
+			place: panic.location().map(ToString::to_string).unwrap_or_default(),
+			message: panic.payload_as_str().unwrap_or_default().to_owned()
+		});
+	}));
+	let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+	std::panic::set_hook(Box::new(move |panic| restored(panic)));
+	result.map_err(|_| {
+		last.lock().unwrap().take().unwrap_or(Panicked {
+			place: String::new(),
+			message: String::new()
+		})
+	})
+}
+
 pub fn check(args: &args::Check) -> Result<()> {
 	let dme = match &args.dme {
 		Some(dme) => dme.clone(),
@@ -57,13 +90,21 @@ pub fn check(args: &args::Check) -> Result<()> {
 		defines: args.defines.iter().map(|define| parse_define(define)).collect(),
 		byond: Some((major, build))
 	};
-	std::panic::set_hook(Box::new(|_| {}));
-	let mut snapshot = Snapshot::parse(&name, &options).map_err(|e| format!("{}", e))?;
-	snapshot.set_byond(ByondVersion::new(major, build));
+	let read = catching_panics(|| -> Result<_> {
+		let mut snapshot = Snapshot::parse(&name, &options).map_err(|e| format!("{}", e))?;
+		snapshot.set_byond(ByondVersion::new(major, build));
 
-	let unread: Vec<String> = snapshot.parse_errors().iter().map(ToString::to_string).collect();
-	let found = snapshot.known_bugs();
-	let procs = snapshot.procs().count() - found.not_checked.len();
+		let unread: Vec<String> = snapshot.parse_errors().iter().map(ToString::to_string).collect();
+		let found = snapshot.known_bugs();
+		let procs = snapshot.procs().count() - found.not_checked.len();
+		Ok((unread, found, procs))
+	});
+	let (unread, found, procs) = read.map_err(|panic| {
+		format!(
+			"internal error in auxtools. Include this in a bug report: {}: {}",
+			panic.place, panic.message
+		)
+	})??;
 
 	if args.json {
 		say!(
@@ -126,4 +167,25 @@ pub fn check(args: &args::Check) -> Result<()> {
 		say!("{}", summary);
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::catching_panics;
+
+	#[test]
+	fn only_a_panic_nothing_caught_is_reported() {
+		let caught = catching_panics(|| {
+			let inner = std::panic::catch_unwind(|| panic!("caught inside"));
+			inner.is_err()
+		});
+		assert_eq!(caught, Ok(true));
+
+		let reported = catching_panics(|| -> u32 { panic!("nothing caught {}", 7) }).unwrap_err();
+		assert_eq!(reported.message, "nothing caught 7");
+		assert!(reported.place.contains("check.rs:"), "{}", reported.place);
+
+		let after = catching_panics(|| 5);
+		assert_eq!(after, Ok(5));
+	}
 }
