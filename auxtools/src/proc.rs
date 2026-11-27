@@ -142,11 +142,29 @@ impl Proc {
 		}
 	}
 
+	/// Replaces this proc's bytecode for subsequent calls.
+	///
+	/// Allocates a new bytecode entry for the proc unless it already has an
+	/// unshared entry created by this library. Active frames continue running
+	/// the previous bytecode. The library keeps the replacement buffer alive
+	/// until shutdown, when unshared entries are restored to their original
+	/// bytecode. Call on BYOND's thread while the library is initialized.
+	///
+	/// # Errors
+	///
+	/// Returns an error without modifying the proc if `bytecode` exceeds 65,535
+	/// words or if BYOND cannot allocate a new bytecode entry (including on
+	/// builds where `runtime_tables::available` fails).
+	///
+	/// # Panics
+	///
+	/// Panics if called before the library is initialized or after shutdown.
+	///
 	/// # Safety
 	/// Call on BYOND's thread while a world is live. `bytecode` must be code
 	/// that BYOND can run for this proc.
-	pub unsafe fn set_bytecode(&self, bytecode: Vec<u32>) {
-		crate::bytecode_manager::set_bytecode(self, bytecode);
+	pub unsafe fn set_bytecode(&self, bytecode: Vec<u32>) -> Result<(), String> {
+		crate::bytecode_manager::set_bytecode(self, bytecode)
 	}
 
 	/// Registers all procs from ID `first` to the end of BYOND's proc table in
