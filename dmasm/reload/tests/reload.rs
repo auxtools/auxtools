@@ -2178,7 +2178,9 @@ fn a_declaration_that_colon_lookup_finds_instead_recompiles_its_users() {
          /proc/alone(x)\n\treturn x:LIMIT\n\n\
          /proc/uncompiled_alone(x)\n{uncompiled}\treturn x:LIMIT\n\n\
          /proc/uncompiled_typed(datum/a/x)\n{uncompiled}\treturn x:LIMIT\n\n\
-         /proc/local_const(x)\n\tvar/const/L = x:LIMIT + 1\n\treturn L\n\n"
+         /proc/local_const(x)\n\tvar/const/L = x:LIMIT + 1\n\treturn L\n\n\
+         /proc/indexed(x)\n\tvar/list/datum/a/items = list(x)\n\treturn items[1].LIMIT\n\n\
+         /proc/uncompiled_indexed(x)\n\tvar/list/items = list(x)\n{uncompiled}\treturn items[1]:LIMIT\n\n"
     );
     let (without, with) = ("/datum/b\n", "/datum/b\n\tvar/const/LIMIT = 9\n");
     for (name, before, after, folded) in [
@@ -2191,20 +2193,23 @@ fn a_declaration_that_colon_lookup_finds_instead_recompiles_its_users() {
         refused.sort();
         assert_eq!(
             refused,
-            ["/uncompiled_alone", "/uncompiled_colon"],
+            [
+                "/uncompiled_alone",
+                "/uncompiled_colon",
+                "/uncompiled_indexed"
+            ],
             "{name}: {:?}",
             changes.refused
         );
-        let alone = changes
-            .refused
-            .iter()
-            .find(|r| r.path == "/uncompiled_alone");
-        assert!(
-            alone.unwrap().why.starts_with(
-                "reads a var by `x:name` that another type declares now, so it must be compiled again"
-            ),
-            "{name}: {alone:?}"
-        );
+        for path in ["/uncompiled_alone", "/uncompiled_indexed"] {
+            let alone = changes.refused.iter().find(|r| r.path == path);
+            assert!(
+                alone.unwrap().why.starts_with(
+                    "reads a variable via `x:name` that another type now declares, so it must be recompiled"
+                ),
+                "{name}: {alone:?}"
+            );
+        }
         let mut reloads: Vec<&str> = changes
             .plan
             .reloads
@@ -2214,7 +2219,7 @@ fn a_declaration_that_colon_lookup_finds_instead_recompiles_its_users() {
         reloads.sort();
         assert_eq!(
             reloads,
-            ["/alone", "/colon", "/local_const"],
+            ["/alone", "/colon", "/indexed", "/local_const"],
             "{name}: {:?}",
             changes.plan
         );
@@ -4406,6 +4411,23 @@ fn a_static_reading_a_changed_default_is_given_to_a_reboot() {
     assert!(code.contains("PushInt 10"), "{}", code);
 }
 
+#[test]
+fn a_static_reading_a_changed_colon_name_is_given_to_a_reboot() {
+    let code = "/datum/a\n\tvar/const/LIMIT = 5\n\nvar/holder\n\n\
+                /proc/limits()\n\tvar/static/list/limits = list(holder:LIMIT + 1)\n\treturn limits\n\n";
+    let changes = types_changes(
+        "static-reading-colon",
+        code,
+        "/datum/b\n",
+        "/datum/b\n\tvar/const/LIMIT = 9\n",
+    );
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert_eq!(global_init_sets(&changes), ["/proc/limits#0:limits @7"]);
+    let code = dmasm_bytecode::format(&changes.global_init.as_ref().unwrap().code.nodes);
+    assert!(code.contains("PushInt 10"), "{}", code);
+}
+
 fn sent_statics(changes: &Changes, path: &str) -> Vec<String> {
     let reload = changes.plan.reloads.iter().find(|r| r.proc.path == path);
     let reload =
@@ -4494,6 +4516,28 @@ fn a_local_const_reads_the_names_in_scope_where_it_is_declared() {
     let mut typed = reloaded(&changes("local-const-typed", before, &after));
     typed.sort_by(|a, b| a.path.cmp(&b.path));
     assert_eq!(typed, [key("/local", 0), key("/parameter", 0)]);
+}
+
+#[test]
+fn a_local_const_follows_a_retyped_var_it_reads_through() {
+    let before = "/datum/a\n\tvar/const/LIMIT = 5\n\n/datum/b\n\tvar/const/LIMIT = 9\n\n\
+                  /datum/holder\n\tvar/datum/a/target\n\n\
+                  /datum/holder/proc/limit()\n\tvar/const/L = target.LIMIT + 1\n\treturn L\n\n\
+                  var/datum/a/global_target\n\n\
+                  /proc/global_limit()\n\tvar/const/L = global_target.LIMIT + 1\n\treturn L\n";
+    let after = before.replace("var/datum/a/", "var/datum/b/");
+    let changes = changes("local-const-retyped", before, &after);
+    assert_eq!(
+        sorted_reloads(&changes),
+        ["/datum/holder/limit", "/global_limit"]
+    );
+    for path in ["/datum/holder/limit", "/global_limit"] {
+        assert_eq!(
+            sent_statics(&changes, path),
+            ["L Some(Number(10.0)) true"],
+            "{path}"
+        );
+    }
 }
 
 #[test]
