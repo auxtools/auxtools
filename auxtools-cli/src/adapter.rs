@@ -972,7 +972,7 @@ impl Adapter {
 					return true;
 				}
 				let now = placed.iter().find(|placed| placed.id == breakpoint.claim);
-				if now.is_some_and(|now| breakpoint.at.as_ref() == Some(&now.at) && breakpoint.line == now.line) {
+				if now.is_some_and(|now| breakpoint.at.as_ref() == Some(&now.at) && breakpoint.file == now.file && breakpoint.line == now.line) {
 					return true;
 				}
 				changed.insert(key.clone());
@@ -983,6 +983,7 @@ impl Adapter {
 					return false;
 				};
 				breakpoint.at = Some(now.at.clone());
+				breakpoint.file = now.file.clone();
 				breakpoint.line = now.line;
 				true
 			});
@@ -1251,6 +1252,7 @@ impl Adapter {
 			.iter()
 			.map(|(number, b)| (*number, b.line, b.condition.clone(), b.hitCondition.clone(), b.logMessage.clone()))
 			.collect();
+		let world_name = self.world_file_name(path);
 
 		let mut breakpoints = vec![];
 		let mut set = vec![];
@@ -1279,35 +1281,20 @@ impl Adapter {
 					continue;
 				}
 			};
-
-			let instructions = match self.locate(&self.world_file_name(path), line as u32) {
-				Ok(instructions) if instructions.is_empty() => {
-					breakpoints.push(unverified(if self.has_lines() { NO_CODE } else { NO_LINES }));
-					continue;
-				}
-				Ok(instructions) => instructions,
-				Err(e) => {
-					breakpoints.push(unverified(&e));
-					continue;
-				}
-			};
-
 			let trigger = Trigger { condition, hit };
 			let mut result = None;
-			let mut at_start = false;
-			for instruction in instructions {
-				let kept = (live.iter())
-					.position(|b| b.id == number && b.at.as_ref() == Some(&instruction))
-					.map(|at| live.remove(at));
-				let claimed = match kept.map(|kept| self.keep(kept, &trigger, log.clone())) {
-					Some(Ok(None)) | None => self.claim(number, &instruction, &trigger, log.clone(), false),
-					Some(kept) => kept
-				};
-				match claimed {
+			let mut claims = vec![];
+
+			let moved: Vec<SetBreakpoint> = live
+				.extract_if(.., |b| {
+					b.id == number && b.file.as_ref().is_some_and(|file| !same_file(file, &world_name))
+				})
+				.collect();
+			for kept in moved {
+				match self.keep(kept, &trigger, log.clone()) {
 					Ok(Some(claimed)) => {
-						result.get_or_insert(Ok(claimed.line));
-						at_start |= claimed.at.as_ref().is_some_and(|at| at.proc.path == GLOBAL_INIT);
-						set.push(claimed);
+						result.get_or_insert(Ok((claimed.line, claimed.file.clone())));
+						claims.push(claimed);
 					}
 					Ok(None) => {}
 					Err(e) => {
@@ -1315,11 +1302,50 @@ impl Adapter {
 					}
 				}
 			}
+
+			if result.is_none() {
+				let instructions = match self.locate(&world_name, line as u32) {
+					Ok(instructions) if instructions.is_empty() => {
+						breakpoints.push(unverified(if self.has_lines() { NO_CODE } else { NO_LINES }));
+						continue;
+					}
+					Ok(instructions) => instructions,
+					Err(e) => {
+						breakpoints.push(unverified(&e));
+						continue;
+					}
+				};
+				for instruction in instructions {
+					let kept = (live.iter())
+						.position(|b| b.id == number && b.at.as_ref() == Some(&instruction))
+						.map(|at| live.remove(at));
+					let claimed = match kept.map(|kept| self.keep(kept, &trigger, log.clone())) {
+						Some(Ok(None)) | None => self.claim(number, &instruction, &trigger, log.clone(), false),
+						Some(kept) => kept
+					};
+					match claimed {
+						Ok(Some(claimed)) => {
+							result.get_or_insert(Ok((claimed.line, claimed.file.clone())));
+							claims.push(claimed);
+						}
+						Ok(None) => {}
+						Err(e) => {
+							result.get_or_insert(Err(e));
+						}
+					}
+				}
+			}
+
+			let at_start = claims
+				.iter()
+				.any(|claimed| claimed.at.as_ref().is_some_and(|at| at.proc.path == GLOBAL_INIT));
+			set.extend(claims);
 			breakpoints.push(match result {
-				Some(Ok(set_line)) => Breakpoint {
+				Some(Ok((set_line, file))) => Breakpoint {
 					id: Some(number),
 					verified: true,
 					line: Some(set_line.unwrap_or(line as u32).into()),
+					source: file.filter(|file| !same_file(file, &world_name)).map(|file| self.file_source(&file)),
 					message: at_start.then(|| "This line runs only at world startup to initialize global or static variables.".to_owned()),
 					..Default::default()
 				},
@@ -1342,8 +1368,8 @@ impl Adapter {
 	) -> Result<Option<SetBreakpoint>, String> {
 		self.claims += 1;
 		let claim = self.claims;
-		let (at, line) = match self.place_breakpoint(claim, instruction, trigger, log.as_deref().map(aux::LogPart::parse), exact)? {
-			Placed::Set { at, line, .. } => (at, line),
+		let (at, file, line) = match self.place_breakpoint(claim, instruction, trigger, log.as_deref().map(aux::LogPart::parse), exact)? {
+			Placed::Set { at, file, line } => (at, file, line),
 			Placed::Nowhere => return Ok(None),
 			Placed::Refused(reason) => return Err(reason)
 		};
@@ -1351,6 +1377,7 @@ impl Adapter {
 			id,
 			claim,
 			at: Some(at),
+			file,
 			line,
 			trigger: trigger.clone(),
 			log,
@@ -1363,8 +1390,9 @@ impl Adapter {
 			return Ok(Some(kept));
 		}
 		match self.edit_breakpoint(kept.claim, trigger, log.as_deref().map(aux::LogPart::parse))? {
-			Placed::Set { at, line, .. } => {
+			Placed::Set { at, file, line } => {
 				kept.at = Some(at);
+				kept.file = file;
 				kept.line = line;
 				kept.trigger = trigger.clone();
 				kept.log = log;
@@ -2320,6 +2348,10 @@ fn hit_condition(text: Option<&str>) -> Result<Option<aux::HitCondition>, String
 		Some(text) => aux::HitCondition::parse(text).map(Some),
 		None => Ok(None)
 	}
+}
+
+fn same_file(one: &str, other: &str) -> bool {
+	one.replace('\\', "/").eq_ignore_ascii_case(&other.replace('\\', "/"))
 }
 
 fn address_text(address: u64) -> String {
