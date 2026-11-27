@@ -47,8 +47,27 @@ pub struct ProcReload {
     pub params: Vec<Param>,
     pub settings: Option<ProcSettings>,
     pub statics: Vec<StaticVar>,
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub warnings: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default, with = "warning_texts"))]
+    pub warnings: Vec<Diagnostic>,
+}
+
+#[cfg(feature = "serde")]
+mod warning_texts {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::diagnostic::{Diagnostic, Id};
+
+    pub fn serialize<S: Serializer>(warnings: &[Diagnostic], to: S) -> Result<S::Ok, S::Error> {
+        to.collect_seq(warnings.iter().map(ToString::to_string))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<Vec<Diagnostic>, D::Error> {
+        let texts = Vec::<String>::deserialize(from)?;
+        Ok(texts
+            .into_iter()
+            .map(|text| Diagnostic::warning(Id::Text, text))
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,15 +260,19 @@ pub struct RemovedProc {
 }
 
 impl RemovedProc {
-    pub fn warning(&self) -> Option<String> {
+    pub fn warning(&self) -> Option<Diagnostic> {
         self.type_path
             .is_empty()
             .then(|| definition_retained(&self.proc.path))
     }
 }
 
-fn definition_retained(path: &str) -> String {
-    format!("{path}: a definition was removed from source but retained in the running world")
+fn definition_retained(path: &str) -> Diagnostic {
+    note(
+        Id::RemovedProcRetained,
+        path,
+        "a definition was removed from source but retained in the running world",
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,13 +283,21 @@ pub struct RemovedVar {
 }
 
 impl RemovedVar {
-    pub fn warning(&self) -> String {
-        var_retained(&self.type_path, &self.var)
+    pub fn warning(&self) -> Diagnostic {
+        var_retained(Id::RemovedVarRetained, &self.type_path, &self.var)
     }
 }
 
-fn var_retained(shown: &str, name: &str) -> String {
-    format!("{shown}: var {name} was removed from source but retained in the running world")
+fn var_retained(id: Id, shown: &str, name: &str) -> Diagnostic {
+    note(
+        id,
+        shown,
+        format!("variable `{name}` was removed from source but retained in the running world"),
+    )
+}
+
+fn note(id: Id, subject: impl Into<String>, message: impl Into<String>) -> Diagnostic {
+    Diagnostic::warning(id, message).about(subject)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -355,6 +386,7 @@ pub enum Until {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Refusal {
+    pub id: Id,
     pub path: String,
     pub name: Option<String>,
     pub why: String,
@@ -365,8 +397,9 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    pub fn new(path: impl Into<String>, why: impl Into<String>) -> Self {
+    pub fn new(id: Id, path: impl Into<String>, why: impl Into<String>) -> Self {
         Refusal {
+            id,
             path: path.into(),
             name: None,
             why: why.into(),
@@ -460,7 +493,7 @@ pub struct Changes {
     pub plan: Plan,
     pub consts: Vec<String>,
     pub retyped: Vec<String>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Diagnostic>,
     pub refused: Vec<Refusal>,
     pub deferred: Vec<Refusal>,
     pub global_init: Option<GlobalInit>,
@@ -481,7 +514,7 @@ impl Changes {
         for (path, name) in std::mem::take(&mut self.restart_settings) {
             if value(built, &path, &name) == value(new, &path, &name) {
                 self.deferred.retain(|d| {
-                    !(d.why == SETTING_CHANGED
+                    !(d.id == Id::SettingChanged
                         && d.path == path
                         && d.name.as_deref() == Some(&name))
                 });
@@ -495,7 +528,8 @@ impl Changes {
     fn collect_warnings(&mut self) {
         for reload in &self.plan.reloads {
             for warning in &reload.warnings {
-                self.warnings.push(format!("{}: {warning}", reload.proc));
+                self.warnings
+                    .push(warning.clone().about(reload.proc.to_string()));
             }
         }
     }
@@ -1140,7 +1174,7 @@ impl Snapshot {
             params: params(value),
             settings: None,
             statics,
-            warnings: compiled.warnings.iter().map(ToString::to_string).collect(),
+            warnings: compiled.warnings,
         })
     }
 
@@ -1322,7 +1356,7 @@ impl Snapshot {
             params: vec![],
             settings: Some(ProcSettings::default()),
             statics: vec![],
-            warnings: compiled.warnings.iter().map(ToString::to_string).collect(),
+            warnings: compiled.warnings,
         })
     }
 
@@ -1412,7 +1446,7 @@ impl Snapshot {
                 let why = format!("parse error: {description}");
                 (
                     format!("{file}: {description}"),
-                    Refusal::new("", why).at(self, location),
+                    Refusal::new(Id::ParseError, "", why).at(self, location),
                 )
             })
             .collect()
@@ -1469,8 +1503,8 @@ impl Snapshot {
         }
     }
 
-    fn proc_refusal(&self, key: &ProcKey, why: impl Into<String>) -> Refusal {
-        let refusal = Refusal::new(key.to_string(), why);
+    fn proc_refusal(&self, id: Id, key: &ProcKey, why: impl Into<String>) -> Refusal {
+        let refusal = Refusal::new(id, key.to_string(), why);
         match self.find(key) {
             Some((_, value)) => refusal.at(self, value.location),
             None => refusal,
@@ -1478,7 +1512,7 @@ impl Snapshot {
     }
 
     fn uncompiled(&self, key: &ProcKey, e: &Diagnostic) -> Refusal {
-        let refusal = self.proc_refusal(key, format!("doesn't compile: {e}"));
+        let refusal = self.proc_refusal(e.id, key, format!("failed to compile: {e}"));
         match (&e.span, &e.subject) {
             (Some(span), None) if span.file.is_none() && refusal.file.is_some() => Refusal {
                 why: format!("failed to compile: {}", e.message),
@@ -1708,7 +1742,9 @@ pub fn diff(old: &Snapshot, new: &Snapshot, changed_files: Option<&HashSet<PathB
             (true, _) => None,
             (false, Ok(settings)) => Some(settings),
             (false, Err(e)) => {
-                changes.refused.push(new.proc_refusal(key, e));
+                changes
+                    .refused
+                    .push(new.proc_refusal(Id::UnsupportedSetting, key, e));
                 continue;
             }
         };
@@ -2457,6 +2493,7 @@ fn compare_inits(old: &Snapshot, new: &Snapshot, changes: &mut Changes) {
                 Err(e) => {
                     changes.refused.push(
                         Refusal::new(
+                            Id::InitializerFailed,
                             n.get().path.clone(),
                             format!("failed to compile initializer: {e}"),
                         )
@@ -2640,9 +2677,10 @@ const BUILTIN_VARS: &[&str] = &[
 fn new_type(new: &Snapshot, n: TypeRef, changes: &mut Changes) {
     let path = n.get().path.clone();
     let Some(parent) = n.parent_type() else {
-        changes
-            .refused
-            .push(Refusal::new(path, "new type with no parent").at(new, new.type_location(n)));
+        changes.refused.push(
+            Refusal::new(Id::NewTypeWithoutParent, path, "new type has no parent")
+                .at(new, new.type_location(n)),
+        );
         return;
     };
     let mut fields = vec![];
@@ -2663,9 +2701,13 @@ fn new_type(new: &Snapshot, n: TypeRef, changes: &mut Changes) {
         };
         if !BUILTIN_VARS.contains(&name) {
             changes.refused.push(
-                Refusal::new(path.clone(), "unsupported built-in default on a new type")
-                    .named(name)
-                    .at(new, var.value.location),
+                Refusal::new(
+                    Id::UnsupportedBuiltinDefault,
+                    path.clone(),
+                    "unsupported built-in default on a new type",
+                )
+                .named(name)
+                .at(new, var.value.location),
             );
             refused = true;
             continue;
@@ -2724,8 +2766,10 @@ fn compare_types(
         }
     }
     for path in old_types.keys().filter(|p| !new_types.contains_key(*p)) {
-        changes.warnings.push(format!(
-            "{path}: type removed from source but retained in the running world"
+        changes.warnings.push(note(
+            Id::RemovedTypeRetained,
+            path,
+            "type removed from source but retained in the running world",
         ));
     }
 
@@ -2792,9 +2836,13 @@ fn compare_types(
                     let redeclared = kind(old_var) != kind(var) && !n.is_root();
                     if needs_constant(var) {
                         changes.refused.push(
-                            Refusal::new(shown, "constant initializer required for const var")
-                                .named(name.as_str())
-                                .at(new, var.value.location),
+                            Refusal::new(
+                                Id::ConstInitializerRequired,
+                                shown,
+                                "constant initializer required for `const` variable",
+                            )
+                            .named(name.as_str())
+                            .at(new, var.value.location),
                         );
                         continue;
                     }
@@ -2830,7 +2878,13 @@ fn compare_types(
             if moved::var_moved_up(n, name.as_str(), var, None) {
                 moved::var_moved(old, new, n, name.as_str(), var, None, changes);
             } else if var.declaration.is_some() {
-                changes.warnings.push(var_retained(shown, name.as_str()));
+                let id = match n.is_root() {
+                    true => Id::RemovedGlobalRetained,
+                    false => Id::RemovedVarRetained,
+                };
+                changes
+                    .warnings
+                    .push(var_retained(id, shown, name.as_str()));
                 if !n.is_root() {
                     changes.plan.removed_vars.push(RemovedVar {
                         type_path: path.to_owned(),
@@ -2871,8 +2925,10 @@ fn compare_types(
                 for (override_id, _) in map.iter().enumerate().filter(|(_, old)| old.is_none()) {
                     let declared = override_id == 0 && proc.declaration.is_some() && old_count == 0;
                     if n.is_root() && !declared {
-                        changes.warnings.push(format!(
-                            "{path}: additional global definition is unreachable; calls retain the original definition, matching DreamMaker"
+                        changes.warnings.push(note(
+                            Id::UnreachableGlobalDefinition,
+                            &path,
+                            "additional global definition is unreachable, so calls keep the original definition, matching DreamMaker",
                         ));
                     }
                     new_procs.push((
@@ -2907,8 +2963,12 @@ fn compare_types(
                         .filter(|l| new.source_line(*l).is_some())
                         .unwrap_or_else(|| new.type_location(n));
                     changes.refused.push(
-                        Refusal::new(path.clone(), "proc declaration kind or flags changed")
-                            .at(new, at),
+                        Refusal::new(
+                            Id::ProcDeclarationChanged,
+                            path.clone(),
+                            "proc declaration kind or flags changed",
+                        )
+                        .at(new, at),
                     );
                 }
             }
@@ -2950,6 +3010,7 @@ fn new_var(
     if let Some(other) = declared_elsewhere(n, name) {
         changes.refused.push(
             Refusal::new(
+                Id::DuplicateDefinition,
                 &shown,
                 format!("duplicate declaration (also declared on `{other}`)"),
             )
@@ -2960,9 +3021,13 @@ fn new_var(
     }
     if needs_constant(var) {
         changes.refused.push(
-            Refusal::new(&shown, "constant initializer required")
-                .named(name)
-                .at(snapshot, at),
+            Refusal::new(
+                Id::ConstInitializerRequired,
+                &shown,
+                "constant initializer required",
+            )
+            .named(name)
+            .at(snapshot, at),
         );
         return false;
     }
@@ -2977,9 +3042,13 @@ fn new_var(
             Ok(value) => value,
             Err(e) => {
                 changes.refused.push(
-                    Refusal::new(&shown, format!("initializer compilation failed: {e}"))
-                        .named(name)
-                        .at(snapshot, at),
+                    Refusal::new(
+                        Id::InitializerFailed,
+                        &shown,
+                        format!("failed to compile initializer: {e}"),
+                    )
+                    .named(name)
+                    .at(snapshot, at),
                 );
                 return false;
             }
@@ -2989,12 +3058,16 @@ fn new_var(
             Some(value) => (value, None),
             None => {
                 if new_type {
-                    changes.warnings.push(format!(
-                        "{shown}: new var {name} has a computed default; initial() remains null until restart"
+                    changes.warnings.push(note(
+                        Id::NewVarComputedDefault,
+                        &shown,
+                        format!("new variable `{name}` has a computed default, so `initial()` remains `null` until restart"),
                     ));
                 } else {
-                    changes.warnings.push(format!(
-                        "{shown}: new var {name} has a computed default; existing instances and initial() remain null until restart"
+                    changes.warnings.push(note(
+                        Id::NewVarComputedDefault,
+                        &shown,
+                        format!("new variable `{name}` has a computed default, so existing instances and `initial()` remain `null` until restart"),
                     ));
                 }
                 (ConstValue::Null, None)
@@ -3075,9 +3148,13 @@ fn refused_const_value(new: &Snapshot, n: TypeRef, name: &str, changes: &mut Cha
         &n.get().path
     };
     changes.refused.push(
-        Refusal::new(shown, "constant initializer required")
-            .named(name)
-            .at(new, var.value.location),
+        Refusal::new(
+            Id::ConstInitializerRequired,
+            shown,
+            "constant initializer required",
+        )
+        .named(name)
+        .at(new, var.value.location),
     );
     true
 }
@@ -3118,9 +3195,11 @@ fn dm_refused_const(var: &dreammaker::objtree::TypeVar) -> Option<&'static str> 
     why(var.value.expression.as_ref().filter(|_| is_const)?)
 }
 
-fn refused_const_warning(place: &str, name: &str, why: &str) -> String {
-    format!(
-        "{place}: const {name}: DreamMaker refuses this initializer ({why}; constant initializer required). Accepted for hot reload, but a rebuild will fail"
+fn refused_const_warning(place: &str, name: &str, why: &str) -> Diagnostic {
+    note(
+        Id::ConstRefusedByDreamMaker,
+        place,
+        format!("`const` variable `{name}`: DreamMaker refuses this initializer because {why} (constant initializer required). Accepted for hot reload, but a rebuild will fail."),
     )
 }
 
@@ -3209,9 +3288,13 @@ fn redeclare(
                 }
                 Err(e) => {
                     changes.refused.push(
-                        Refusal::new(path, format!("initializer compilation failed: {e}"))
-                            .named(name)
-                            .at(new, new.var_location(n, name)),
+                        Refusal::new(
+                            Id::InitializerFailed,
+                            path,
+                            format!("failed to compile initializer: {e}"),
+                        )
+                        .named(name)
+                        .at(new, new.var_location(n, name)),
                     );
                     return;
                 }
@@ -3251,8 +3334,12 @@ fn redeclare(
         }
     }
     if computed {
-        changes.warnings.push(format!(
-            "{path}: var {name} has a computed default; existing instances retain null"
+        changes.warnings.push(note(
+            Id::ComputedDefaultNotApplied,
+            path,
+            format!(
+                "variable `{name}` has a computed default, so existing instances retain `null`"
+            ),
         ));
     }
     changes.plan.var_defaults.extend(defaults);
@@ -3296,9 +3383,13 @@ fn var_default(
     let Some(n) = new.find_type(path) else { return };
     let Some(declaration) = n.get_var_declaration(name) else {
         changes.refused.push(
-            Refusal::new(shown, "has a value but no declaration")
-                .named(name)
-                .at(new, new.var_location(n, name)),
+            Refusal::new(
+                Id::ValueWithoutDeclaration,
+                shown,
+                "has a value but no declaration",
+            )
+            .named(name)
+            .at(new, new.var_location(n, name)),
         );
         return;
     };
@@ -3328,9 +3419,13 @@ fn var_default(
                     init,
                 }),
                 Err(e) => changes.refused.push(
-                    Refusal::new(shown, format!("const value compilation failed: {e}"))
-                        .named(name)
-                        .at(new, new.var_location(n, name)),
+                    Refusal::new(
+                        Id::ConstValueFailed,
+                        shown,
+                        format!("failed to compile `const` value: {e}"),
+                    )
+                    .named(name)
+                    .at(new, new.var_location(n, name)),
                 ),
             }
         }
@@ -3379,9 +3474,13 @@ fn var_default(
                 init,
             }),
             Err(e) => changes.refused.push(
-                Refusal::new(shown, format!("const value compilation failed: {e}"))
-                    .named(name)
-                    .at(new, new.var_location(n, name)),
+                Refusal::new(
+                    Id::ConstValueFailed,
+                    shown,
+                    format!("failed to compile `const` value: {e}"),
+                )
+                .named(name)
+                .at(new, new.var_location(n, name)),
             ),
         }
         return;
@@ -3394,7 +3493,7 @@ fn var_default(
     if builtin && in_world_record(n, name) {
         if !is_new {
             changes.deferred.push(
-                Refusal::new(path, SETTING_CHANGED)
+                Refusal::new(Id::SettingChanged, path, "changed setting")
                     .named(name)
                     .until(Until::Rebuild)
                     .at(new, new.var_location(n, name)),
@@ -3419,6 +3518,7 @@ fn var_default(
         if !in_var_table && reparent::builtin_base(n).as_deref() == Some(n.get().path.as_str()) {
             changes.refused.push(
                 Refusal::new(
+                    Id::BuiltinDefaultNotRestorable,
                     shown,
                     "cannot restore this built-in type's original default",
                 )
@@ -3428,8 +3528,10 @@ fn var_default(
             return;
         }
         if !in_var_table {
-            changes.warnings.push(format!(
-                "{shown}: {name}: built-in default applies only to new instances"
+            changes.warnings.push(note(
+                Id::BuiltinDefaultNewInstancesOnly,
+                shown,
+                format!("`{name}`: built-in default applies only to new instances"),
             ));
         }
         changes.plan.builtin_inherited.push(BuiltinInherited {
@@ -3441,8 +3543,12 @@ fn var_default(
 
     let Some(Some(value)) = default_value(n, name) else {
         if !is_new && !builtin {
-            changes.warnings.push(format!(
-                "{shown}: var {name} has a computed default; only new instances receive it"
+            changes.warnings.push(note(
+                Id::ComputedDefaultNotApplied,
+                shown,
+                format!(
+                    "variable `{name}` has a computed default, so only new instances receive it"
+                ),
             ));
         }
         return;
@@ -3474,14 +3580,20 @@ fn var_default(
     if builtin {
         if !BUILTIN_VARS.contains(&name) {
             changes.refused.push(
-                Refusal::new(shown, "unsupported built-in default change")
-                    .named(name)
-                    .at(new, new.var_location(n, name)),
+                Refusal::new(
+                    Id::UnsupportedBuiltinDefault,
+                    shown,
+                    "unsupported built-in default change",
+                )
+                .named(name)
+                .at(new, new.var_location(n, name)),
             );
             return;
         }
-        changes.warnings.push(format!(
-            "{shown}: {name}: built-in default applies only to new instances"
+        changes.warnings.push(note(
+            Id::BuiltinDefaultNewInstancesOnly,
+            shown,
+            format!("`{name}`: built-in default applies only to new instances"),
         ));
         if name == "name" {
             builtin_names(new, n, value, types, changes);
@@ -3500,8 +3612,6 @@ fn var_default(
         types,
     });
 }
-
-const SETTING_CHANGED: &str = "changed setting";
 
 const CLIENT_SETTINGS: &[&str] = &[
     "authenticate",
