@@ -3,7 +3,7 @@ use std::{
 	collections::{HashMap, HashSet},
 	ffi::{OsStr, OsString},
 	path::{Path, PathBuf},
-	sync::{mpsc, Arc},
+	sync::{mpsc, Arc, OnceLock},
 	time::{Duration, Instant, SystemTime}
 };
 
@@ -16,8 +16,16 @@ use dmasm::reload::{diff, Changes, ParseOptions, ProcKey, Refusal, Snapshot, Unt
 use crate::{adapter::Input, dap::Output, resources::Resources, script::Script, skin::Skin};
 
 const INTERVAL: Duration = Duration::from_millis(500);
+const SETTLE: Duration = Duration::from_millis(200);
+const INTERVAL_VAR: &str = "AUXTOOLS_WATCH_INTERVAL";
 const LOOKING_SHARE: u32 = 5;
 const STAMP_LAG: Duration = Duration::from_millis(50);
+
+fn interval(usual: Duration) -> Duration {
+	static GIVEN: OnceLock<Option<Duration>> = OnceLock::new();
+	let given = GIVEN.get_or_init(|| std::env::var(INTERVAL_VAR).ok()?.parse().ok().map(Duration::from_millis));
+	given.map_or(usual, |given| given.min(usual))
+}
 
 pub struct Options {
 	pub dme: PathBuf,
@@ -244,7 +252,7 @@ impl Code {
 
 	fn watch(&self, watching: &mut Watching) {
 		loop {
-			let wait = INTERVAL.max(watching.files.took * (LOOKING_SHARE - 1));
+			let wait = interval(INTERVAL).max(watching.files.took * (LOOKING_SHARE - 1));
 			match self.commands.recv_timeout(wait) {
 				Ok(Command::Connected { world, .. }) => self.connected(world),
 				Ok(Command::Defines(defines)) => self.defines_wanted(defines),
@@ -280,7 +288,7 @@ impl Code {
 		}
 
 		loop {
-			std::thread::sleep(Duration::from_millis(200));
+			std::thread::sleep(interval(SETTLE));
 			let more = watching.files.changed(&self.root);
 			if more.is_empty() {
 				break;

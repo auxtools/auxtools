@@ -106,6 +106,7 @@ fn main() {
 	for name in &wanted {
 		assert!(GROUPS.contains(&name.as_str()), "unknown group {}; available groups: {:?}", name, GROUPS);
 	}
+	std::env::set_var("AUXTOOLS_WATCH_INTERVAL", "50");
 	let res = Command::new(paths::find_dm())
 		.with_byond_paths()
 		.arg(host_file("launcher_test_host.dme"))

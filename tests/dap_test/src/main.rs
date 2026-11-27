@@ -61,6 +61,8 @@ fn main() {
 		);
 	}
 
+	std::env::set_var("AUXTOOLS_WATCH_INTERVAL", "50");
+
 	let _ = std::fs::remove_file(world::host_file("fail_early"));
 	let res = Command::new(paths::find_dm())
 		.with_byond_paths()
