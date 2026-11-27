@@ -44,6 +44,24 @@ fn last_definition(path: &str) -> Option<Proc> {
 	last
 }
 
+fn declaration(path: &str) -> Option<Proc> {
+	let overrides = Proc::overrides(path);
+	overrides.iter().find(|proc| declares(proc)).or_else(|| overrides.first()).cloned()
+}
+
+fn declares(proc: &Proc) -> bool {
+	let path = own_path(proc);
+	path.contains("/proc/") || path.contains("/verb/")
+}
+
+pub fn own_path(proc: &Proc) -> String {
+	String::from(unsafe { StringRef::from_id((*proc.entry()).path) })
+}
+
+pub fn first_override(path: &str) -> Option<Proc> {
+	Proc::overrides(path).into_iter().find(|proc| own_path(proc) == path)
+}
+
 fn added_type(path: &str) -> Option<(u8, u32)> {
 	let id = crate::hot_reload::type_id(path)?;
 	let tag = ancestry(path)
@@ -95,11 +113,11 @@ pub fn proc_path(path: &str) -> Option<dmasm::compiler::FoundProc> {
 		return None;
 	}
 	if ty.is_empty() {
-		return Proc::find(format!("/{}", name)).map(|proc| found(proc, None));
+		return declaration(path).map(|proc| found(proc, None));
 	}
 	let (at, proc) = ancestry(ty)
 		.into_iter()
-		.filter_map(|at| Proc::find(format!("{}/{}", at, name)).map(|proc| (at, proc)))
+		.filter_map(|at| declaration(&format!("{}/{}", at, name)).map(|proc| (at, proc)))
 		.last()?;
 	let warning = (at != ty).then(|| {
 		format!(
@@ -139,7 +157,12 @@ impl dmasm::assembler::AssembleEnv for AssembleEnv {
 	}
 
 	fn get_proc_index(&mut self, path: &str) -> Option<u32> {
-		Proc::find(path).map(|p| p.id.0)
+		let proc = if path.contains("/proc/") || path.contains("/verb/") {
+			declaration(path)
+		} else {
+			Proc::find(path)
+		};
+		proc.map(|p| p.id.0)
 	}
 
 	fn get_type(&mut self, path: &str) -> Option<(u8, u32)> {
@@ -160,7 +183,7 @@ impl dmasm::assembler::AssembleEnv for AssembleEnv {
 			return Some(found);
 		}
 
-		last_definition(path).map(|proc| (raw_types::values::ValueTag::ProcRef.0, proc.id.0))
+		first_override(path).map(|proc| (raw_types::values::ValueTag::ProcRef.0, proc.id.0))
 	}
 
 	fn get_resource_index(&mut self, path: &str) -> Option<u32> {
