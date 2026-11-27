@@ -1,11 +1,14 @@
 # Design notes
 
-These notes record what auxtools does that is not obvious from its code, and why: design decisions,
-how internal mechanisms work, and facts about BYOND found by experiment that the code depends on.
+These notes are reference material for contributors changing the code. They record what auxtools
+does that is not obvious from its code and why: design decisions, how internal mechanisms work, and
+facts about BYOND or DreamMaker found by experiment that the code depends on. User documentation is
+in `docs/*.md` and [README.md](../../README.md).
 
-Each note names the files and items it applies to rather than line numbers. When code that a note
-describes changes, update the note in the same change. See [by-file.md](by-file.md) for a list of
-the notes that apply to each source file.
+Each note lists the files and items it applies to rather than line numbers. To find the notes
+covering a source file, look it up in [by-file.md](by-file.md). Update a note in the same change
+when the code it describes changes. See [CONTRIBUTING.md](../../CONTRIBUTING.md#design-notes) for
+note conventions, when to add a note, and how to update the indexes.
 
 ## `auxtools` library and hook macros
 

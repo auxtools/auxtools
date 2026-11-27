@@ -1,10 +1,11 @@
 # Contributing to auxtools
 
 This guide covers building auxtools from source, running the unit, extension, and BYOND integration
-test suites, packaging the VS Code extension, and cutting releases.
+test suites, maintaining the design notes, packaging the VS Code extension, and cutting releases.
 
-The design notes in [docs/design/](docs/design/README.md) record what the code does that is not
-obvious and why. When you change code that a note describes, update the note in the same change.
+The design notes in [docs/design/](docs/design/README.md) record what auxtools does that is not
+obvious from the code and why. When you change code that a note describes, update the note in the
+same change. See [Design notes](#design-notes) for how they are organized, formatted, and indexed.
 
 ## Repository layout
 
@@ -22,6 +23,7 @@ obvious and why. When you change code that a note describes, update the note in 
 | `tests/` | — | Integration test suites (`test_runner` with the `auxtest` `cdylib`, `debug_test`, `hot_reload_test`, `launcher_test`, `dap_test`) and host worlds |
 | `tools/debug_client/` | — | Standalone debug protocol test client |
 | `ci/` | — | CI helper scripts, Windows cross-compilation setup, and BYOND build lists |
+| `docs/` | — | User documentation (`docs/*.md`) and contributor design notes ([docs/design/](docs/design/README.md)) |
 
 ## Prerequisites
 
@@ -182,6 +184,71 @@ Useful environment variables for `ci/run-tests.sh`:
   see [Checking a new BYOND build](docs/byond-builds.md#checking-a-new-byond-build).
 - To compare `dmasm-compiler` bytecode output against DreamMaker across the regression corpus, see
   [Comparing with DreamMaker](dmasm/README.md#comparing-with-dreammaker).
+
+## Design notes
+
+[docs/design/](docs/design/README.md) holds reference notes for people changing the code. Each note
+records something auxtools does that is not obvious from its code and why: a design decision, how
+an internal mechanism works, or a fact about BYOND or DreamMaker found by experiment that the code
+depends on. User documentation belongs in `docs/*.md` and [README.md](README.md), not here.
+
+The notes are organized into subdirectories under `docs/design/`, and
+[docs/design/README.md](docs/design/README.md) indexes every note by its title under one heading
+per directory, in number order:
+
+| Directory | Covers |
+| --- | --- |
+| `auxtools/` | The `auxtools` library and hook macros |
+| `debug-server/` | The debug server |
+| `cli/` | The launcher, CLI, debug adapter, and protocol |
+| `compiler/` | The dmasm compiler and bytecode |
+| `reload/` | Hot reload, build, release, and the VS Code extension |
+| `tests/` | The test suites and test worlds, and facts about BYOND that the tests rely on |
+
+### Note format
+
+Every note follows the same structure:
+
+- **File name:** Name files `NNNN-words-in-lower-case-with-hyphens.md`, where `NNNN` is a
+  four-digit number counted separately in each directory.
+- **Title:** Use a single `#` heading. Write a noun or gerund phrase (such as "Recording line
+  coverage" or "Breakpoints in shared proc bytecode"), or a short statement for an invariant or a
+  BYOND quirk (such as "A breakpoint opcode never reaches BYOND"). Do not write titles as commands.
+- **Lead paragraph:** Put one to three sentences directly under the title, with no heading before
+  them, stating the main point: what auxtools does and why, what invariant holds, or what BYOND or
+  DreamMaker behavior the code depends on.
+- **Body:** Continue a short note under the title in a few paragraphs, or divide a longer note with
+  `##` headings that name its topics.
+- **`## Applies to` section:** Close every note with `## Applies to`, listing the files it
+  describes together with the functions, types, and constants it concerns by name. Never put line
+  numbers anywhere in a note, because line numbers move.
+- **Cross-references:** Link to other notes with relative Markdown links, such as `0006-...md`
+  within the same directory or `../cli/0010-ending-and-rebooting-a-world.md` from another
+  directory.
+- **Scope and BYOND builds:** Describe the code as it is, with no status line, date, author, or
+  history of how the code got that way. Name the BYOND builds a fact was checked on where that
+  matters.
+
+### Finding, updating, and adding notes
+
+- **Finding notes for code you are changing:** Look up the file in
+  [docs/design/by-file.md](docs/design/by-file.md), which lists every note that names that file
+  along with the items it covers.
+- **Updating an existing note:** Update a note in the same change as the code it describes,
+  including its `## Applies to` list when files or items are renamed or moved. Keep existing file
+  names and numbers unchanged, because other notes and the indexes link to them. If a note's title
+  no longer fits, update the title and its link text in `docs/design/README.md` rather than
+  renaming the file. After changing a title or an `## Applies to` list, run `ci/design-notes.py`
+  to regenerate `docs/design/by-file.md`.
+- **When to add a note:** Add a note when a change makes a decision that the code alone does not
+  explain, depends on BYOND or DreamMaker behavior established by experiment, or introduces a
+  mechanism that spans several files. Do not add a note for what the code already makes clear, or
+  for how to use a feature (which belongs in user documentation).
+- **Placing and indexing a new note:** Put the file in the directory for its area using the next
+  four-digit number there, add one line at the end of that directory's list in
+  `docs/design/README.md` with the note's title as the link text, and run `ci/design-notes.py` to
+  regenerate `docs/design/by-file.md`. CI runs `ci/design-notes.py --check` to verify that every
+  note's `## Applies to` files and items exist and that `docs/design/by-file.md` is up to date.
 
 ## Continuous integration and artifacts
 
