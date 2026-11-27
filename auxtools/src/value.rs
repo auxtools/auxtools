@@ -88,11 +88,20 @@ impl Value {
 	}
 
 	/// Equivalent to DM's `null`.
-	#[deprecated(note = "please use the `NULL` const instead")]
+	#[deprecated(note = "use `Value::NULL` instead")]
 	pub const fn null() -> Value {
 		Self::NULL
 	}
 
+	/// Creates a turf `Value` for `id` without bounds checking or incrementing
+	/// its reference count.
+	///
+	/// Use `turf_by_id` for a bounds-checked alternative. Dropping the returned
+	/// `Value` still releases a BYOND reference.
+	///
+	/// # Safety
+	///
+	/// `id` must be less than `world.maxx * world.maxy * world.maxz`.
 	/// Gets a turf by ID, without bounds checking. Use turf_by_id if you're not
 	/// sure about how to check the bounds.
 	pub const unsafe fn turf_by_id_unchecked(id: u32) -> Value {
@@ -114,7 +123,7 @@ impl Value {
 		if (0..max_x * max_y * max_z).contains(&(id - 1)) {
 			Ok(unsafe { Value::turf_by_id_unchecked(id) })
 		} else {
-			Err(runtime!("Attempted to get tile with invalid ID {}", id))
+			Err(runtime!("cannot get turf with invalid ID {}", id))
 		}
 	}
 
@@ -130,7 +139,7 @@ impl Value {
 		if (0..max_x).contains(&x) && (0..max_y).contains(&y) && (0..max_z).contains(&z) {
 			Ok(unsafe { Value::turf_by_id_unchecked(x + y * max_x + z * max_x * max_y) })
 		} else {
-			Err(runtime!("Attempted to get out-of-range tile at coords {} {} {}", x + 1, y + 1, z + 1))
+			Err(runtime!("turf coordinates ({}, {}, {}) are out of range", x + 1, y + 1, z + 1))
 		}
 	}
 
@@ -143,7 +152,7 @@ impl Value {
 		unsafe {
 			if raw_types::funcs::get_variable(&mut val, self.raw, name_id) != 1 {
 				let varname: String = string::StringRef::from_id(name_id).into();
-				return Err(runtime!("Could not read {}.{}", &self, varname));
+				return Err(runtime!("could not read {}.{}", &self, varname));
 			}
 
 			Ok(Self::from_raw(val))
@@ -154,7 +163,7 @@ impl Value {
 		unsafe {
 			if raw_types::funcs::set_variable(self.raw, name_id, new_value) != 1 {
 				let varname: String = string::StringRef::from_id(name_id).into();
-				return Err(runtime!("Could not write to {}.{}", self, varname));
+				return Err(runtime!("could not write to {}.{}", self, varname));
 			}
 		}
 		Ok(())
@@ -194,7 +203,7 @@ impl Value {
 	pub fn as_number(&self) -> DMResult<f32> {
 		match self.raw.tag {
 			raw_types::values::ValueTag::Number => unsafe { Ok(self.raw.data.number) },
-			_ => Err(runtime!("Attempt to interpret non-number value as number"))
+			_ => Err(runtime!("cannot interpret non-number value as a number"))
 		}
 	}
 
@@ -202,7 +211,7 @@ impl Value {
 	pub fn as_string(&self) -> DMResult<String> {
 		match self.raw.tag {
 			raw_types::values::ValueTag::String => unsafe { Ok(string::StringRef::from_id(self.raw.data.string).into()) },
-			_ => Err(runtime!("Attempt to interpret non-string value as String"))
+			_ => Err(runtime!("cannot interpret non-string value as a String"))
 		}
 	}
 
@@ -211,6 +220,19 @@ impl Value {
 		list::List::from_value(self)
 	}
 
+	/// Synchronously calls the proc `procname` on this value on BYOND's thread,
+	/// with `null` for `usr`.
+	///
+	/// Underscores in `procname` are replaced with spaces before BYOND looks up
+	/// the proc. Takes a temporary reference to each argument so the caller's
+	/// `Value`s stay valid, and returns a `Value` owning the reference returned
+	/// by BYOND.
+	///
+	/// # Errors
+	///
+	/// Returns an error if `procname` contains a NUL byte or if BYOND fails to
+	/// invoke the proc (for example, an unknown proc name or a `null`
+	/// receiver).
 	/// Calls a method of the value with the given arguments.
 	///
 	/// # Examples:
@@ -251,7 +273,7 @@ impl Value {
 			}
 		}
 
-		Err(runtime!("External proc call failed"))
+		Err(runtime!("proc call failed"))
 	}
 
 	// ugh
@@ -274,6 +296,13 @@ impl Value {
 		}
 	}
 
+	/// Formats this value as a Rust `String` (inherent method shadowing
+	/// `Display::to_string`).
+	///
+	/// Formats `null` as `"null"`, numbers with Rust's default formatting,
+	/// strings as quoted Rust-escaped literals, and all other values using
+	/// BYOND's text conversion. Use `as_string` for an unquoted string value,
+	/// or `to_dmstring` to get the result as a `StringRef`.
 	pub fn to_string(&self) -> DMResult<String> {
 		match self.raw.tag {
 			raw_types::values::ValueTag::Null | raw_types::values::ValueTag::Number | raw_types::values::ValueTag::String => {
@@ -306,6 +335,10 @@ impl Value {
 		}
 	}
 
+	/// Returns `false` for `null` and the number `0`, and `true` for all other
+	/// values.
+	///
+	/// Unlike DM's truthiness rules, an empty string returns `true`.
 	pub fn is_truthy(&self) -> bool {
 		match self.raw.tag {
 			raw_types::values::ValueTag::Null => false,
@@ -337,7 +370,7 @@ impl Value {
 	}
 
 	pub fn from_string_raw(data: &[u8]) -> DMResult {
-		let string = CString::new(data).map_err(|_| runtime!("tried to create string containing NUL"))?;
+		let string = CString::new(data).map_err(|_| runtime!("cannot create string containing a NUL byte"))?;
 
 		unsafe {
 			let mut id = raw_types::strings::StringId(0);

@@ -7,7 +7,7 @@ use crate::{client, ok, world::World};
 /// Waits for the world after a reboot to be running
 fn rebooted(world: &mut World, worlds: usize) {
 	world.wait_count("dap: world/New", worlds);
-	world.wait_count("The world restarted", worlds - 1);
+	world.wait_count("Reconnected to the world", worlds - 1);
 }
 
 /// Resolve a pending function breakpoint when reload adds its proc or after
@@ -60,7 +60,7 @@ pub fn run() {
 	// same process, and each launcher connects to it again
 	a.run("reboot");
 	rebooted(&mut a, 2);
-	b.wait_output("The world restarted");
+	b.wait_output("Reconnected to the world");
 	a.catch_runtimes(true);
 	a.run("middle");
 	for (proc, mark) in [

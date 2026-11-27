@@ -3537,7 +3537,7 @@ impl Server {
 	/// Something in here panicked. We don't know what state that left the
 	/// session in, so the debug-client gets dropped and can connect again.
 	pub fn recover_from_panic(&mut self) {
-		eprintln!("Debug server panicked, dropping the debug clients");
+		eprintln!("Debug server panicked, disconnecting all clients");
 		self.in_eval = false;
 		// A panic mid-pause skips the cleanup at the end of handle_breakpoint.
 		// The frames in here point at procs that are about to carry on running.

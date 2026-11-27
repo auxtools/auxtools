@@ -40,15 +40,15 @@ impl Resources {
 	pub fn read(root: &Path, dmb: &Path, sources: &[PathBuf]) -> Result<Resources, String> {
 		let dirs = file_dirs(root, sources);
 		let rsc = dmb.with_extension("rsc");
-		let dmb_data = std::fs::read(dmb).map_err(|e| format!("couldn't read {}: {}", dmb.display(), e))?;
+		let dmb_data = std::fs::read(dmb).map_err(|e| format!("could not read {}: {}", dmb.display(), e))?;
 		let rsc_data = match std::fs::read(&rsc) {
 			Ok(data) => data,
 			// A world without resources has no .rsc
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Resources { dirs, ..Default::default() }),
-			Err(e) => return Err(format!("couldn't read {}: {}", rsc.display(), e))
+			Err(e) => return Err(format!("could not read {}: {}", rsc.display(), e))
 		};
 		let names = rsc_names(&rsc_data);
-		let crcs = dmb_tables::resource_crcs(&dmb_data).map_err(|e| format!("couldn't read {}'s resources: {}", dmb.display(), e))?;
+		let crcs = dmb_tables::resource_crcs(&dmb_data).map_err(|e| format!("could not read resources from {}: {}", dmb.display(), e))?;
 		let mut files: BTreeMap<PathBuf, File> = BTreeMap::new();
 		for (crc, spellings) in &names {
 			let ids: Vec<u32> = crcs.iter().enumerate().filter(|(_, c)| *c == crc).map(|(id, _)| id as u32).collect();

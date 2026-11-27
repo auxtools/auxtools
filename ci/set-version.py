@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Read or set the version shared by the workspace and VS Code extension.
 
-    ci/set-version.py            print the current version
-    ci/set-version.py VERSION    set the version, e.g. 3.0.0 or 3.0.1-dev
+    ci/set-version.py            Print the current version
+    ci/set-version.py VERSION    Set the version (e.g., 3.0.0 or 3.0.1-dev)
 
-Update Cargo.toml, inherited crate versions in Cargo.lock and the extension
-manifest.
+Updates Cargo.toml, inherited crate versions in Cargo.lock, and
+editors/vscode/package.json.
 """
 
 import json

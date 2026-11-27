@@ -1,5 +1,6 @@
 [package]
 name = "debug_client"
+description = "Command-line tool that starts a world in DreamDaemon with the debug library loaded, pauses at a given proc and line, and terminates the world when done"
 version = "0.1.0"
 publish = false
 authors.workspace = true

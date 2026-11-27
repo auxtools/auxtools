@@ -159,7 +159,9 @@ pub fn expand_with(macros: &HashMap<String, Macro>, text: &str) -> Result<Option
 		} else {
 			match closing(&tokens[i + 1..]) {
 				Some(after) => (i + 1 + after, 1),
-				None if is(tokens.get(i + 1).map(|t| &t.token), Punctuation::LParen) => return Err(format!("{}( has no ) to end it", name)),
+				None if is(tokens.get(i + 1).map(|t| &t.token), Punctuation::LParen) => {
+					return Err(format!("missing closing ')' for macro {}", name))
+				}
 				// Not a use: the name alone
 				None => {
 					i += 1;
@@ -168,10 +170,10 @@ pub fn expand_with(macros: &HashMap<String, Macro>, text: &str) -> Result<Option
 			}
 		};
 		let (Some(start), Some(end)) = (offset(tokens[i].start), offset(tokens[last].start).map(|at| at + length)) else {
-			return Err(format!("couldn't find where {} is in the text", name));
+			return Err(format!("could not locate macro {} in expression text", name));
 		};
 		let (Some(used), Some(before)) = (text.get(start..end), text.get(copied..start)) else {
-			return Err(format!("couldn't find where {} is in the text", name));
+			return Err(format!("could not locate macro {} in expression text", name));
 		};
 		let expanded = expand_use(macros, used)?;
 		out.push_str(before);
@@ -266,7 +268,7 @@ fn expand_use(macros: &HashMap<String, Macro>, used: &str) -> Result<String, Str
 		.map(|token| token.token)
 		.collect();
 	if let Some(error) = ctx.errors().iter().find(|e| e.severity() == dreammaker::Severity::Error) {
-		return Err(format!("couldn't expand the macros in {}: {}", used, error.description()));
+		return Err(format!("could not expand macros in {}: {}", used, error.description()));
 	}
 	Ok(text_of(&expanded))
 }

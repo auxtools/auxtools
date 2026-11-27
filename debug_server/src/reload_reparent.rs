@@ -193,7 +193,7 @@ fn prepare_one(
 		let mut table: BTreeMap<u32, [u32; 4]> = parent_table.chunks(4).map(|c| (c[0], [c[0], c[1], c[2], c[3]])).collect();
 		for c in current_table.chunks(4) {
 			if sets.contains(&c[0]) {
-				let var = var_of(c[0]).ok_or_else(|| format!("{}: var {} has no declaration", type_path(t), c[0]))?;
+				let var = var_of(c[0]).ok_or_else(|| format!("{}: variable name ID {} has no declaration", type_path(t), c[0]))?;
 				table.insert(c[0], [c[0], var, c[2], c[3]]);
 			} else if own_builtins.contains(&c[0]) {
 				table.insert(c[0], [c[0], c[1], c[2], c[3]]);
@@ -298,7 +298,7 @@ pub(super) fn apply_builtins(prepared: &PreparedReparents, warnings: &mut Vec<St
 				bounds
 			)),
 			Err(e) => warnings.push(format!(
-				"{}: could not inherit built-ins from the new parent: {}",
+				"{}: could not inherit built-in variables from the new parent: {}",
 				type_path(inherited.type_id),
 				e
 			))

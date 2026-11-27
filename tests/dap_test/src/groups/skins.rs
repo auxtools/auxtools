@@ -72,7 +72,7 @@ pub fn run() {
 	world.run("reboot");
 	world.wait_count("dap: world/New", 2);
 	world.reloaded("skin skin.dmf");
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	let (_, text) = skin(&mut world);
 	assert_eq!(text, text_of(&dir, "skin.dmf"));
 	// Skin changes must not enter resource reloads and defer code until

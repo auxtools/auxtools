@@ -157,7 +157,7 @@ fn bodies(world: &mut World) {
 	assert_eq!(world.argument("by"), "4");
 	let frame = world.frame_id();
 	let why = world.refused("evaluate", json!({ "expression": "q", "frameId": frame, "context": "repl" }));
-	assert_eq!(why, "undefined var: q");
+	assert_eq!(why, "undefined variable: q");
 	ok("body writes frame variables");
 
 	let frame = world.frame_id();
@@ -170,12 +170,12 @@ fn bodies(world: &mut World) {
 		}
 	};
 	fails(world, &[
-		("var/x = 1\nx = nowhere", "line 2: undefined var: nowhere"),
-		("var/x = 1\nx +", "parser error: 2:"),
+		("var/x = 1\nx = nowhere", "line 2: undefined variable: nowhere"),
+		("var/x = 1\nx +", "parse error: 2:"),
 		("var/x = 0\nreturn by / x", "runtime error: Division by zero"),
 		("var/x = 1\nreturn src.other.name", "runtime error: Cannot read null.name"),
 		// A body is over when it's answered too
-		("var/x = by\nsleep(1)\nreturn x", "evaluation aborted because the code slept")
+		("var/x = by\nsleep(1)\nreturn x", "evaluation aborted: the code slept")
 	]);
 	assert_eq!(world.eval("by"), "4");
 	assert_eq!(world.frames(0).len(), 3);
@@ -201,7 +201,7 @@ fn bodies(world: &mut World) {
 		"7"
 	);
 	let why = world.refused("evaluate", json!({ "expression": "var/x = by\nx", "context": "repl" }));
-	assert_eq!(why, "line 1: undefined var: by");
+	assert_eq!(why, "line 1: undefined variable: by");
 	ok("body evaluation without a frame");
 }
 
@@ -436,13 +436,13 @@ pub fn run() {
 	assert_eq!(world.evaluate_in(&caller, "s.name", "watch")["result"], "\"S\"");
 	// It's a global proc's frame: there's no src to have an n
 	let why = world.refused("evaluate", json!({ "expression": "n", "frameId": caller, "context": "watch" }));
-	assert_eq!(why, "undefined var: n");
+	assert_eq!(why, "undefined variable: n");
 	ok("caller-frame name resolution");
 
 	assert_eq!(world.eval_global("global_number"), "5");
 	assert_eq!(world.eval_global("leaf(1)"), "4");
 	let why = world.refused("evaluate", json!({ "expression": "by", "context": "repl" }));
-	assert_eq!(why, "undefined var: by");
+	assert_eq!(why, "undefined variable: by");
 	ok("global evaluation while paused");
 
 	world.break_on(&["leaf_1"]);
@@ -473,27 +473,27 @@ pub fn run() {
 		}
 	};
 	fails(&mut world, &[
-		("1 +", "parser error: "),
-		("", "parser error: "),
-		("by by", "expected end"),
-		("5 = by", "expected l-value")
+		("1 +", "parse error: "),
+		("", "parse error: "),
+		("by by", "unexpected trailing code"),
+		("5 = by", "expected an assignable expression")
 	]);
 	ok("expression parse diagnostics");
 
 	fails(&mut world, &[
-		("not_a_name_anywhere", "undefined var: not_a_name_anywhere"),
+		("not_a_name_anywhere", "undefined variable: not_a_name_anywhere"),
 		// A var of another type: src doesn't have it, and it's no global
-		("hp", "undefined var: hp"),
-		("hp = 3", "undefined var: hp"),
+		("hp", "undefined variable: hp"),
+		("hp = 3", "undefined variable: hp"),
 		("not_a_proc_anywhere(1)", "proc not found: /proc/not_a_proc_anywhere"),
 		(
 			"src.not_a_name_anywhere",
 			"runtime error: undefined variable /datum/thing/sub/var/not_a_name_anywhere"
 		),
-		("/datum/not_a_type", "there's no type /datum/not_a_type"),
+		("/datum/not_a_type", "type not found: /datum/not_a_type"),
 		// A statement-only builtin is compiled as a body and cannot sleep here.
-		("sleep(1)", "evaluation aborted because the code slept"),
-		("..()", "relative calls are not supported")
+		("sleep(1)", "evaluation aborted: the code slept"),
+		("..()", "`.()` and `..()` calls are not supported in debugger expressions")
 	]);
 	ok("unresolved and unsupported expression diagnostics");
 
@@ -505,7 +505,7 @@ pub fn run() {
 		// (a statement, which is a body)
 		("CRASH(\"no\")", "runtime error: no"),
 		// An expression is over when it's answered: it can't wait
-		("sleeper(1)", "evaluation aborted because the code slept")
+		("sleeper(1)", "evaluation aborted: the code slept")
 	]);
 	assert_eq!(world.eval("by"), "4");
 	assert_eq!(world.frames(0).len(), 3);
@@ -523,7 +523,7 @@ pub fn run() {
 
 	let disassembly = world.eval("#dis");
 	assert!(
-		disassembly.starts_with("Dism for Proc(\"/datum/thing/proc/inside\")") && disassembly.contains("DbgLine"),
+		disassembly.starts_with("Disassembly for Proc(\"/datum/thing/proc/inside\")") && disassembly.contains("DbgLine"),
 		"#dis said {}",
 		disassembly
 	);

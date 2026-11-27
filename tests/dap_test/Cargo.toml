@@ -1,5 +1,6 @@
 [package]
 name = "dap_test"
+description = "Integration test suite for the debug adapter"
 version = "0.1.0"
 publish = false
 authors.workspace = true

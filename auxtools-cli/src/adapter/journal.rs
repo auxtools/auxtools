@@ -50,7 +50,7 @@ pub(super) fn batch_output(inputs: mpsc::Sender<Input>) -> mpsc::Sender<String> 
 				}
 			}
 		})
-		.expect("couldn't start a thread");
+		.expect("could not start a thread");
 	lines
 }
 

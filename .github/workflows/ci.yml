@@ -17,7 +17,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: Release version; its tag must be in release.bundle
+        description: Release version (its tag must be in release.bundle)
         required: true
         type: string
 
@@ -38,7 +38,7 @@ env:
 
 jobs:
   format:
-    name: Check the formatting
+    name: Check formatting
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -48,7 +48,7 @@ jobs:
       - name: Install rustfmt
         run: rustup toolchain install "$RUSTFMT_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
 
-      - name: Check the formatting
+      - name: Check formatting
         run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all -- --check
 
   build-linux:
@@ -63,14 +63,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download the release commits
+      - name: Download release commits
         if: inputs.version
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release.bundle
           path: ${{ runner.temp }}
 
-      - name: Check out the release commit
+      - name: Check out release commit
         if: inputs.version
         env:
           VERSION: ${{ inputs.version }}
@@ -78,7 +78,7 @@ jobs:
           git fetch --no-tags "$RUNNER_TEMP/release.bundle" "refs/tags/v$VERSION:refs/tags/v$VERSION"
           git checkout --detach "v$VERSION"
 
-      - name: Install the 32-bit compiler
+      - name: Install 32-bit compilers
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib
@@ -88,7 +88,7 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET" --no-self-update
           rustup default "$RUST_VERSION"
 
-      - name: Restore downloaded crates
+      - name: Restore Cargo crate cache
         if: ${{ !inputs.version }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -102,16 +102,16 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target "$TARGET" --workspace
 
-      - name: Unit tests
+      - name: Run unit tests
         run: cargo test --release --locked --target "$TARGET" -p auxtools-cli
 
-      - name: The extension's tests
+      - name: Test VS Code extension
         run: |
           node editors/vscode/expression.test.js
           node editors/vscode/unsaved.test.js
           node editors/vscode/buildflags.test.js
 
-      - name: Split the debug information off, check and pack
+      - name: Split debug symbols, verify, and package
         run: |
           cd "target/$TARGET/release"
           "$GITHUB_WORKSPACE/ci/split-debug.sh" auxtools libdebug_server.so
@@ -121,21 +121,21 @@ jobs:
           tar -czf "$RUNNER_TEMP/auxtools-linux-symbols.tar.gz" auxtools.debug libdebug_server.so.debug
           tar -cf "$RUNNER_TEMP/bundle-linux.tar" auxtools libdebug_server.so libauxtest.so test_runner debug_test hot_reload_test launcher_test dap_test
 
-      - name: Upload the launcher and the debug library
+      - name: Upload launcher and debug library
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-linux.tar.gz
           archive: false
           if-no-files-found: error
 
-      - name: Upload their debug information
+      - name: Upload debug symbols
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-linux-symbols.tar.gz
           archive: false
           if-no-files-found: error
 
-      - name: Upload the bundle for the later jobs
+      - name: Upload build bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bundle-linux
@@ -155,14 +155,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download the release commits
+      - name: Download release commits
         if: inputs.version
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release.bundle
           path: ${{ runner.temp }}
 
-      - name: Check out the release commit
+      - name: Check out release commit
         if: inputs.version
         env:
           VERSION: ${{ inputs.version }}
@@ -170,7 +170,7 @@ jobs:
           git fetch --no-tags "$RUNNER_TEMP/release.bundle" "refs/tags/v$VERSION:refs/tags/v$VERSION"
           git checkout --detach "v$VERSION"
 
-      - name: Install LLVM's tools
+      - name: Install LLVM tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang lld llvm
@@ -180,7 +180,7 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET" --no-self-update
           rustup default "$RUST_VERSION"
 
-      - name: Restore downloaded crates
+      - name: Restore Cargo crate cache
         if: ${{ !inputs.version }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -191,14 +191,14 @@ jobs:
           key: crates-windows-${{ hashFiles('Cargo.lock') }}
           restore-keys: crates-windows-
 
-      - name: Restore the Windows SDK
+      - name: Restore Windows SDK
         if: ${{ !inputs.version }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .msvc-sdk
           key: msvc-sdk-${{ hashFiles('ci/msvc/fetch-sdk.sh') }}
 
-      - name: Fetch the Windows SDK
+      - name: Fetch Windows SDK
         run: ci/msvc/fetch-sdk.sh "$MSVC_SDK"
 
       - name: Build
@@ -206,12 +206,12 @@ jobs:
           . ci/msvc/env.sh
           cargo build --release --locked --target "$TARGET" --workspace
 
-      - name: Build the unit tests
+      - name: Build unit tests
         run: |
           . ci/msvc/env.sh
           ci/unit-tests.sh "target/$TARGET/release/unit" --release --locked --target "$TARGET" -p auxtools-cli
 
-      - name: Check and pack
+      - name: Verify and package
         run: |
           cd "target/$TARGET/release"
           "$GITHUB_WORKSPACE/ci/check-windows.sh" auxtools.exe debug_server.dll
@@ -219,21 +219,21 @@ jobs:
           python3 -m zipfile -c "$RUNNER_TEMP/auxtools-windows-symbols.zip" auxtools-cli.pdb debug_server.pdb
           tar -cf "$RUNNER_TEMP/bundle-windows.tar" auxtools.exe debug_server.dll auxtest.dll test_runner.exe debug_test.exe hot_reload_test.exe launcher_test.exe dap_test.exe unit
 
-      - name: Upload the launcher and the debug library
+      - name: Upload launcher and debug library
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-windows.zip
           archive: false
           if-no-files-found: error
 
-      - name: Upload their debug information
+      - name: Upload debug symbols
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-windows-symbols.zip
           archive: false
           if-no-files-found: error
 
-      - name: Upload the bundle for the later jobs
+      - name: Upload build bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bundle-windows
@@ -297,7 +297,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download the bundle
+      - name: Download Windows bundle
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: bundle-windows
@@ -363,21 +363,21 @@ jobs:
           ci/run-tests.sh programs .byond/byond
 
   package:
-    name: Pack the VS Code extension
+    name: Package VS Code extension
     needs: [build-linux, build-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download the release commits
+      - name: Download release commits
         if: inputs.version
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release.bundle
           path: ${{ runner.temp }}
 
-      - name: Check out the release commit
+      - name: Check out release commit
         if: inputs.version
         env:
           VERSION: ${{ inputs.version }}
@@ -385,20 +385,20 @@ jobs:
           git fetch --no-tags "$RUNNER_TEMP/release.bundle" "refs/tags/v$VERSION:refs/tags/v$VERSION"
           git checkout --detach "v$VERSION"
 
-      - name: Download the Linux bundle
+      - name: Download Linux bundle
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: bundle-linux
           path: bundle
 
-      - name: Download the Windows bundle
+      - name: Download Windows bundle
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: bundle-windows
           path: bundle
 
       # package.py takes the programs from where cargo builds them
-      - name: Pack
+      - name: Package extension
         run: |
           mkdir -p target/i686-unknown-linux-gnu/release target/i686-pc-windows-msvc/release
           tar -xf bundle/bundle-linux.tar -C target/i686-unknown-linux-gnu/release auxtools libdebug_server.so
@@ -406,7 +406,7 @@ jobs:
           python3 editors/vscode/package.py | tee packed.txt
           grep -q "(2 platforms)" packed.txt
 
-      - name: Upload the extension
+      - name: Upload extension
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: auxtools-*.vsix

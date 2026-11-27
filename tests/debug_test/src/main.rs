@@ -333,7 +333,7 @@ fn protocol(world: &World, mut client: Client) -> Client {
 		log: None
 	});
 	assert!(
-		matches!(&response, Response::BreakpointSet { result: BreakpointSetResult::Refused { reason } } if reason.starts_with("the condition doesn't compile: ")),
+		matches!(&response, Response::BreakpointSet { result: BreakpointSetResult::Refused { reason } } if reason.starts_with("condition failed to compile: ")),
 		"a condition that doesn't parse got {:?}",
 		response
 	);
@@ -586,7 +586,7 @@ fn profile(world: &World, mut client: Client) -> Client {
 	);
 	assert_eq!(
 		profile_request(&mut client, ProfileRequest::Start { procs: vec![] }),
-		Err("another profile is running".to_owned())
+		Err("another profile is already running".to_owned())
 	);
 	println!("ok: profile validation");
 
@@ -652,7 +652,7 @@ fn profile(world: &World, mut client: Client) -> Client {
 		other => panic!("expected ProcInfo, got {:?}", other)
 	};
 	let unprofiled = profile_request(&mut client, ProfileRequest::Code { code });
-	assert_eq!(unprofiled, Err("/overrun wasn't profiled".to_owned()));
+	assert_eq!(unprofiled, Err("/overrun was not profiled".to_owned()));
 
 	// Of the procs asked for alone
 	pause(&mut client);

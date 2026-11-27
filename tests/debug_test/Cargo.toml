@@ -1,5 +1,6 @@
 [package]
 name = "debug_test"
+description = "Integration test suite for the debug server's debugger"
 version = "0.1.0"
 publish = false
 authors.workspace = true

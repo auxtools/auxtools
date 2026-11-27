@@ -84,7 +84,7 @@ impl Server {
 				Ok(values)
 			}
 			Variables::ObjectVars(object, _) => Ok(Self::object_values(&object)),
-			_ => Err("rendering supports frame variables, globals and object variables".to_owned())
+			_ => Err("rendering supports frame variables, globals, and object variables".to_owned())
 		}
 	}
 

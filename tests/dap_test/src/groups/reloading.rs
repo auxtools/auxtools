@@ -95,7 +95,7 @@ fn moved(world: &mut World) -> (u64, bool) {
 
 /// Reboot and wait for the `count`th world/New and restored reloads.
 fn reboot(world: &mut World, count: usize) {
-	let restarts = world.output.matches("The world restarted").count();
+	let restarts = world.output.matches("Reconnected to the world").count();
 	world.run("reboot");
 	rebooted(world, count, restarts);
 }
@@ -105,8 +105,8 @@ fn reboot(world: &mut World, count: usize) {
 fn rebooted(world: &mut World, count: usize, restarts: usize) {
 	world.wait_count("dap: world/New", count);
 	world.wait_until("the reloads again", |output| {
-		output.matches("The world restarted").count() > restarts
-			&& output.rsplit("The world restarted").next().is_some_and(|after| reloads(after) > 0)
+		output.matches("Reconnected to the world").count() > restarts
+			&& output.rsplit("Reconnected to the world").next().is_some_and(|after| reloads(after) > 0)
 	});
 }
 
@@ -793,7 +793,7 @@ fn initializer_added_to_a_world_without() {
 	edit_held(&mut world, "bare.dm", "var/bare_n = 1\n", "var/bare_n = 3\n");
 	assert_eq!(world.eval_global("\"[bare_n] [length(bare_list)] [bare_list[1]]\""), "\"1 2 1\"");
 	for count in 2..=3 {
-		let restarts = world.count("The world restarted");
+		let restarts = world.count("Reconnected to the world");
 		world.eval_global("bare_reboot()");
 		rebooted(&mut world, count, restarts);
 		assert_eq!(
@@ -1472,7 +1472,7 @@ pub fn run() {
 	world.run("reboot");
 	world.wait_count("dap: world/New", 2);
 	world.wait_until("the reloads again", |output| {
-		output.rsplit("The world restarted").next().is_some_and(|after| reloads(after) > 0) && output.contains("The world restarted")
+		output.rsplit("Reconnected to the world").next().is_some_and(|after| reloads(after) > 0) && output.contains("Reconnected to the world")
 	});
 	world.run("middle");
 	world.stop_on("breakpoint", "/leaf", "leaf_2");
@@ -1493,7 +1493,7 @@ pub fn run() {
 	assert_eq!(states(&mut world, "icon_reloaded"), "\"second1\"");
 	reboot(&mut world, 3);
 	assert_eq!(states(&mut world, "icon_reloaded"), "\"second1\"");
-	let after = world.output.rsplit("The world restarted").next().unwrap_or_default().to_owned();
+	let after = world.output.rsplit("Reconnected to the world").next().unwrap_or_default().to_owned();
 	assert!(
 		!after.contains("applies as world/New starts"),
 		"the reload waited for world/New:\n{}",
@@ -1510,7 +1510,7 @@ pub fn run() {
 	);
 	assert_eq!(states(&mut world, "icon_new"), "\"new1\"");
 	reboot(&mut world, 4);
-	let after = world.output.rsplit("The world restarted").next().unwrap_or_default().to_owned();
+	let after = world.output.rsplit("Reconnected to the world").next().unwrap_or_default().to_owned();
 	assert!(
 		after.contains("resource files need the loaded cache (reload_new.dmi); reload applies as world/New starts"),
 		"the launcher said:\n{}",

@@ -174,10 +174,10 @@ pub fn resource_crcs(data: &[u8]) -> Result<Vec<u32>, Error> {
 		total += length as u64 + 1;
 	}
 	if major >= 468 && r.u32()? != hash {
-		return Err("string-table checksum mismatch; unsupported .dmb layout".to_owned());
+		return Err("string-table checksum mismatch (unsupported .dmb layout)".to_owned());
 	}
 	if total != u64::from(string_bytes) {
-		return Err("string-table size mismatch; unsupported .dmb layout".to_owned());
+		return Err("string-table size mismatch (unsupported .dmb layout)".to_owned());
 	}
 
 	// The misc lists
@@ -247,7 +247,7 @@ pub fn resource_crcs(data: &[u8]) -> Result<Vec<u32>, Error> {
 	let table = r.take(count.checked_mul(5).ok_or("too many resources")?)?;
 	if r.at != data.len() {
 		return Err(format!(
-			"{} trailing bytes after the resource table; unsupported .dmb layout",
+			"{} trailing bytes after the resource table (unsupported .dmb layout)",
 			data.len() - r.at
 		));
 	}

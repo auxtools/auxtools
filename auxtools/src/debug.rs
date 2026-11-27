@@ -32,6 +32,18 @@ pub(crate) fn clear_local_names() {
 	LOCAL_NAMES.with(|map| map.borrow_mut().clear());
 }
 
+/// A snapshot of a single DM call stack frame captured when reading
+/// [`CallStacks`].
+///
+/// `context` and `instance` are raw pointers into BYOND's live frame structures
+/// and remain valid only until DM code runs again. The captured `Value` fields
+/// (`usr`, `src`, `dot`, arguments, and locals) each hold a BYOND reference and
+/// remain valid as a snapshot.
+///
+/// `offset` is the current bytecode offset. An argument's name is `None` if
+/// more arguments were passed than the proc declares, and unnamed locals are
+/// labeled `<local N>`. `file_name` and `line_number` are `None` when the frame
+/// has no source file recorded. Not `Send`.
 pub struct StackFrame {
 	pub context: *mut procs::ExecutionContext,
 	pub instance: *mut procs::ProcInstance,
@@ -47,6 +59,17 @@ pub struct StackFrame {
 	                              * TODO: current instruction & bytecode offset */
 }
 
+/// Snapshots of the active DM call stack (`active`) and every sleeping proc's
+/// stack (`suspended`), each ordered with the innermost frame first.
+///
+/// The constructors and inspection methods (`new`, `active`, `suspended`,
+/// `suspended_first`, and `suspended_instances`) read BYOND's internal frame
+/// structures directly. Call them only on BYOND's thread after the library's
+/// first initialization, because the underlying pointers are null before then.
+///
+/// `suspended_first(limit)` reads at most `limit` sleeping procs in BYOND's
+/// queue order. Raw pointers returned by `suspended_instances` remain valid
+/// only until DM code runs again.
 pub struct CallStacks {
 	pub active: Vec<StackFrame>,
 	pub suspended: Vec<Vec<StackFrame>>

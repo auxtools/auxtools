@@ -101,7 +101,7 @@ impl Server {
 							changed.push((index, now));
 						}
 					}
-					None => over.push((watch.id, "watch target no longer exists"))
+					None => over.push((watch.id, "target no longer exists"))
 				},
 
 				Place::Slot {
@@ -116,7 +116,7 @@ impl Server {
 						// The original frame ended between checks; this ID now
 						// belongs to another call.
 						if (*instance).proc != *proc || *(*ctx).bytecode_offset() == 0 {
-							over.push((watch.id, "watched proc ended"));
+							over.push((watch.id, "target proc ended"));
 							continue;
 						}
 						match read_slot(ctx, *slot) {
@@ -324,9 +324,9 @@ impl Server {
 
 	/// Resolve a watch target and read its current value.
 	fn watched_place(&mut self, place: &WatchPlace) -> Result<(Place, String, Value), String> {
-		const ITS_VARS: &str = "select a variable of this value to watch";
+		const ITS_VARS: &str = "select a variable of this value to set a data breakpoint";
 		let pointed = |pointer: Value, name: String| -> Result<(Place, String, Value), String> {
-			let now = auxtools::pointer::read(&pointer).ok_or("it can't be read")?;
+			let now = auxtools::pointer::read(&pointer).ok_or("data breakpoint target cannot be read")?;
 			Ok((Place::Pointer(pointer), name, now))
 		};
 
@@ -377,7 +377,7 @@ impl Server {
 						let pointer = self.pointer_to(None, &format!("global.{}", name), vec![])?;
 						pointed(pointer, name.clone())
 					}
-					Variables::Builtins => Err("BYOND's constants don't change".to_owned()),
+					Variables::Builtins => Err("BYOND built-in constants do not change".to_owned()),
 					Variables::ObjectVars(object, holder) => {
 						let pointer = self.pointer_to(None, &format!("{}.{}", HOLDER, name), vec![(HOLDER.to_owned(), object)])?;
 						pointed(pointer, within(&holder, format!(".{}", name)))
@@ -412,7 +412,7 @@ impl Server {
 					}
 					Variables::ListPair { key, of, entry, .. } => {
 						if name != "value" {
-							return Err("list keys cannot be watched for value changes".to_owned());
+							return Err("data breakpoints cannot be set on list keys".to_owned());
 						}
 						let pointer = self.pointer_to(None, &format!("{}[{}]", HOLDER, KEY), vec![
 							(HOLDER.to_owned(), of),

@@ -1,7 +1,7 @@
 {
 	"name": "auxtools",
 	"displayName": "auxtools Debugger",
-	"description": "Debug BYOND worlds with breakpoints, stepping, variable inspection and hot reload.",
+	"description": "Debug BYOND worlds with breakpoints, stepping, variable inspection, and hot reload.",
 	"version": "3.1.2-dev",
 	"publisher": "sohpea",
 	"license": "GPL-3.0",
@@ -57,17 +57,17 @@
 			},
 			{
 				"command": "auxtools.attach",
-				"title": "Attach to a running world",
+				"title": "Attach to Running World",
 				"category": "auxtools"
 			},
 			{
 				"command": "auxtools.pickWorld",
-				"title": "Pick a running world",
+				"title": "Pick Running World",
 				"category": "auxtools"
 			},
 			{
 				"command": "auxtools.reconnectClients",
-				"title": "Reconnect players",
+				"title": "Reconnect Clients",
 				"category": "auxtools"
 			},
 			{
@@ -77,17 +77,17 @@
 			},
 			{
 				"command": "auxtools.reboot",
-				"title": "Reboot world",
+				"title": "Reboot World",
 				"category": "auxtools"
 			},
 			{
 				"command": "auxtools.menu",
-				"title": "Show world actions",
+				"title": "Show World Actions",
 				"category": "auxtools"
 			},
 			{
 				"command": "auxtools.profile",
-				"title": "Profile instructions",
+				"title": "Profile Instructions",
 				"category": "auxtools"
 			}
 		],
@@ -154,11 +154,11 @@
 				},
 				"auxtools.notifications": {
 					"type": "object",
-					"markdownDescription": "Show notifications by category.",
+					"markdownDescription": "Notification categories to show.",
 					"properties": {
 						"reconnect": {
 							"type": "boolean",
-							"description": "Offer to reconnect players after a skin or client script reload."
+							"description": "Offer to reconnect clients after a skin or client script reload."
 						},
 						"join": {
 							"type": "boolean",
@@ -170,7 +170,7 @@
 						},
 						"outdated": {
 							"type": "boolean",
-							"description": "Warn about edits that may be missing from the build."
+							"description": "Warn when source or resource files are newer than the .dmb."
 						}
 					},
 					"additionalProperties": false,
@@ -313,7 +313,7 @@
 					{
 						"type": "auxtools",
 						"request": "launch",
-						"name": "Debug world",
+						"name": "Debug World",
 						"dmb": "${workspaceFolder}/${workspaceFolderBasename}.dmb",
 						"server": "dreamdaemon"
 					}
@@ -321,7 +321,7 @@
 				"configurationSnippets": [
 					{
 						"label": "auxtools: Debug in DreamDaemon",
-						"description": "Debug the built world in DreamDaemon",
+						"description": "Debug the compiled world in DreamDaemon.",
 						"body": {
 							"type": "auxtools",
 							"request": "launch",
@@ -336,7 +336,7 @@
 						"body": {
 							"type": "auxtools",
 							"request": "attach",
-							"name": "Attach to a world",
+							"name": "Attach to Running World",
 							"processId": "^\"\\${command:auxtools.pickWorld}\""
 						}
 					}

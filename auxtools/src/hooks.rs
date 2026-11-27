@@ -62,6 +62,11 @@ impl Detours {
 
 thread_local!(static DETOURS: RefCell<Detours> = const { RefCell::new(Detours::new()) });
 
+/// Reasons installing a proc hook can fail.
+///
+/// Only `ProcNotFound` and `AlreadyHooked` are returned. `NotInitialized` and
+/// `UnknownFailure` are never produced. The `Debug` output formats each variant
+/// as a human-readable message used in initialization errors.
 pub enum HookFailure {
 	NotInitialized,
 	ProcNotFound,
@@ -72,14 +77,23 @@ pub enum HookFailure {
 impl std::fmt::Debug for HookFailure {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::NotInitialized => write!(f, "Library not initialized"),
-			Self::ProcNotFound => write!(f, "Proc not found"),
-			Self::AlreadyHooked => write!(f, "Proc is already hooked"),
-			Self::UnknownFailure => write!(f, "Unknown failure")
+			Self::NotInitialized => write!(f, "library not initialized"),
+			Self::ProcNotFound => write!(f, "proc not found"),
+			Self::AlreadyHooked => write!(f, "proc is already hooked"),
+			Self::UnknownFailure => write!(f, "unknown failure")
 		}
 	}
 }
 
+/// Installs the library's detours on BYOND's runtime-error and proc-call
+/// functions.
+///
+/// Called internally during the library's first initialization. Library authors
+/// should not call this directly.
+///
+/// # Panics
+///
+/// Panics if either detour cannot be created or enabled.
 pub fn init() -> Result<(), String> {
 	unsafe {
 		let runtime_hook = RawDetour::new(raw_types::funcs::runtime_byond as *const (), runtime_hook as *const ()).unwrap();
@@ -101,6 +115,14 @@ pub fn init() -> Result<(), String> {
 	Ok(())
 }
 
+/// Disables the detours installed by [`init`].
+///
+/// Called internally by `auxtools_full_shutdown`. Library authors should not
+/// call this directly.
+///
+/// # Panics
+///
+/// Panics if called on a thread other than the one that ran [`init`].
 pub fn shutdown() {
 	unsafe {
 		DETOURS.with(|detours_cell| {
@@ -113,6 +135,19 @@ pub fn shutdown() {
 	}
 }
 
+/// Function signature for a DM proc hook, receiving `src`, `usr`, and the call
+/// arguments.
+///
+/// While a proc is hooked, every call invokes the hook on BYOND's thread in
+/// place of the proc's DM bytecode. Returning `Ok(value)` sets the proc's
+/// return value. Returning `Err` or panicking (caught and formatted as
+/// `panicked: MESSAGE`) returns `null` to DM and passes
+/// `MESSAGE HookPath: PATH` to `/proc/auxtools_stack_trace` if the world
+/// defines it, without raising a BYOND runtime error.
+///
+/// `args` contains only the arguments passed by the caller (whereas the
+/// `#[hook]` attribute fills missing parameters with `null`). Invoking the
+/// hooked proc from inside its own hook re-enters the hook.
 pub type ProcHook = fn(&Value, &Value, Vec<Value>) -> DMResult;
 
 /// Lets a `RefCell` live in a plain `static`.
@@ -240,6 +275,10 @@ fn hook_by_id(id: raw_types::procs::ProcId, hook: ProcHook, hook_path: String) -
 	}
 }
 
+/// Removes all proc hooks installed by this library.
+///
+/// Called automatically during shutdown and on a failed initialization. Must be
+/// called on BYOND's thread because the hook table is unsynchronized.
 pub fn clear_hooks() {
 	PROC_HOOKS.0.borrow_mut().clear();
 	unsafe {
@@ -247,6 +286,19 @@ pub fn clear_hooks() {
 	}
 }
 
+/// Installs `hook` on the first definition (override ID 0) of the proc at
+/// `name`.
+///
+/// Accepts proc paths in the same format as `Proc::find`. The hook remains
+/// active until shutdown removes it and must be re-installed for each new world
+/// (use `#[hook("/path")]` to install automatically on every initialization).
+///
+/// # Errors
+///
+/// - `HookFailure::ProcNotFound` if no proc exists at `name`, or if called
+///   before initialization, after shutdown, or off BYOND's thread.
+/// - `HookFailure::AlreadyHooked` if this library already has a hook on that
+///   proc.
 pub fn hook<S: Into<String>>(name: S, hook: ProcHook) -> Result<(), HookFailure> {
 	match super::proc::get_proc(name) {
 		Some(p) => hook_by_id(p.id, hook, p.path.to_owned()),
@@ -255,6 +307,15 @@ pub fn hook<S: Into<String>>(name: S, hook: ProcHook) -> Result<(), HookFailure>
 }
 
 impl Proc {
+	/// Installs `func` on this specific proc definition (by proc ID), allowing
+	/// individual overrides to be hooked independently.
+	///
+	/// The hook remains active until shutdown removes it.
+	///
+	/// # Errors
+	///
+	/// Returns `HookFailure::AlreadyHooked` if this library already has a hook
+	/// on this proc ID.
 	pub fn hook(&self, func: ProcHook) -> Result<(), HookFailure> {
 		hook_by_id(self.id, func, self.path.to_owned())
 	}
@@ -285,12 +346,23 @@ pub fn calls_bypass_detour() -> bool {
 /// What a hooked frame runs instead of its code: `End`, which returns `.`
 static RETURN_DOT: [u32; 1] = [0x00];
 
+/// Runs per-call housekeeping and proc hook dispatch for a frame about to
+/// execute its first instruction.
+///
+/// Completes any pending world-load initialization, drains `at_proc_calls`
+/// work, increments the proc call counter, and invokes any installed hook on
+/// the frame's proc (returning the hook's result without executing the proc's
+/// bytecode). Called internally by the instruction hook on builds where
+/// [`calls_bypass_detour`] returns `true`. Library authors should not call this
+/// directly.
+///
 /// Dispatch deferred work and proc hooks at the first instruction on builds
 /// where [`calls_bypass_detour`] is true. A hook's result replaces execution
 /// of the original proc.
 ///
 /// # Safety
-/// `ctx` must be the running frame on BYOND's thread.
+///
+/// `ctx` must point to the currently executing frame on BYOND's thread.
 pub unsafe fn proc_starting(ctx: *mut raw_types::procs::ExecutionContext) {
 	if std::ptr::eq(*(*ctx).bytecode() as *const u32, RETURN_DOT.as_ptr()) {
 		return;

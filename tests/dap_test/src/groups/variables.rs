@@ -178,7 +178,7 @@ fn setting(world: &mut World, version: u64) {
 	ok("local and return-value assignment");
 
 	assert_eq!(set(world, &arguments, "first", "9")["value"], "9");
-	assert_eq!(set(world, &arguments, "undefined argument #1", "\"third\"")["value"], "\"third\"");
+	assert_eq!(set(world, &arguments, "extra argument #1", "\"third\"")["value"], "\"third\"");
 	assert_eq!(world.eval("\"[first] [args[3]]\""), "\"9 third\"");
 	assert_eq!(set(world, &arguments, "usr", "M")["value"], "player");
 	assert_eq!(world.eval("usr.hp"), "10");
@@ -231,16 +231,16 @@ fn setting(world: &mut World, version: u64) {
 	assert_eq!(set(world, &globals, "global_number", "whole")["value"], "50");
 	assert_eq!(world.eval("global_number"), "50");
 	set(world, &globals, "global_number", "5");
-	let constants = world.variable("Globals", "(BYOND's)")["variablesReference"].clone();
-	assert_eq!(cannot_set(world, &constants, "NORTH", "2"), "BYOND's constants can't be changed");
+	let constants = world.variable("Globals", "(BYOND built-ins)")["variablesReference"].clone();
+	assert_eq!(cannot_set(world, &constants, "NORTH", "2"), "BYOND built-in constants cannot be modified");
 	ok("global assignment and immutable builtins");
 
 	for (inside, name, value, why) in [
-		(&locals, "whole", "1 +", "parser error: "),
-		(&locals, "whole", "nowhere_at_all", "undefined var: nowhere_at_all"),
+		(&locals, "whole", "1 +", "parse error: "),
+		(&locals, "whole", "nowhere_at_all", "undefined variable: nowhere_at_all"),
 		(&locals, "whole", "1 / 0", "runtime error: Division by zero"),
-		(&locals, "not_a_local", "1", "the frame has no local called not_a_local"),
-		(&arguments, "third", "1", "the frame has no argument called third"),
+		(&locals, "not_a_local", "1", "frame has no local variable named not_a_local"),
+		(&arguments, "third", "1", "frame has no argument named third"),
 		(&named, "not_a_var", "1", "runtime error: ")
 	] {
 		let said = cannot_set(world, inside, name, value);
@@ -263,7 +263,7 @@ fn setting(world: &mut World, version: u64) {
 	assert_eq!(now["indexedVariables"], 1);
 	assert_eq!(world.eval("plain[1][1]"), "\"x\"");
 	let why = world.refused("setExpression", json!({ "expression": "whole + 1", "value": "3", "frameId": frame }));
-	assert_eq!(why, "expected l-value");
+	assert_eq!(why, "expected an assignable expression");
 	ok("setExpression target validation");
 
 	// What was listed before the world carried on is gone
@@ -501,7 +501,7 @@ pub fn run() {
 		("first".to_owned(), "1".to_owned()),
 		("second".to_owned(), "\"two\"".to_owned()),
 		// values() was called with one more than it declares
-		("undefined argument #1".to_owned(), "3".to_owned())
+		("extra argument #1".to_owned(), "3".to_owned())
 	]);
 	ok("src, usr and extra arguments");
 
@@ -516,9 +516,9 @@ pub fn run() {
 
 	// The hundred or so BYOND declares are apart, in the last row
 	assert!(!globals.iter().any(|(name, _)| name == "NORTH" || name == "MOB_LAYER"), "{:?}", globals);
-	let last = world.variable("Globals", "(BYOND's)");
+	let last = world.variable("Globals", "(BYOND built-ins)");
 	assert!(last["value"].as_str().unwrap().ends_with(" constants"), "{}", last);
-	assert_eq!(globals.last().unwrap().0, "(BYOND's)");
+	assert_eq!(globals.last().unwrap().0, "(BYOND built-ins)");
 	let constants = world.children(&last);
 	assert_eq!(value_of(&constants, "NORTH"), "1");
 	assert_eq!(value_of(&constants, "MOB_LAYER"), "4");

@@ -104,7 +104,7 @@ impl Adapter {
 			.stdout(Stdio::null())
 			.stderr(Stdio::null())
 			.spawn()
-			.map_err(|e| format!("couldn't start {}: {}", program.display(), e))?;
+			.map_err(|e| format!("could not start {}: {}", program.display(), e))?;
 		self.joined.clients.retain_mut(|(client, _)| matches!(client.try_wait(), Ok(None)));
 		self.joined.clients.push((client, args.close_with_world));
 		Ok(serde_json::json!({ "address": address, "opened": true }))

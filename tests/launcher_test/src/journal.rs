@@ -185,7 +185,7 @@ pub fn reloads(pid: u64, code: &Path) {
 	let source = std::fs::read_to_string(code).unwrap();
 	assert!(source.contains("\treturn 2\n"), "unexpected value() source after test setup");
 	let printed = run(pid, &["wait", "reload", "--timeout", "1"], 2);
-	assert_eq!(printed.trim(), "error: timed out after 1 second waiting for a hot reload attempt.");
+	assert_eq!(printed.trim(), "error: timed out after 1 second waiting for a hot reload attempt");
 
 	// Add a known-bug warning without moving subsequent proc lines.
 	let since = newest(pid).to_string();
@@ -217,7 +217,7 @@ pub fn reloads(pid: u64, code: &Path) {
 		errors
 	);
 	assert!(
-		printed.ends_with("\nerror: the hot reload was rejected.\n"),
+		printed.ends_with("\nerror: the hot reload was rejected\n"),
 		"unexpected wait reload output: {}",
 		printed
 	);

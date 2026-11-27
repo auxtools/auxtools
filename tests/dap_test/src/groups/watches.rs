@@ -98,7 +98,7 @@ fn pointers(world: &mut World) {
 	// A pointer to an object's var names it; one to a var of the
 	// expression's own code names nothing once that has run
 	assert_eq!(world.eval("&named.n"), "&A (/datum/thing).n");
-	assert_eq!(world.eval("&whole"), "a pointer to a var that's gone");
+	assert_eq!(world.eval("&whole"), "pointer (target no longer exists)");
 	world.resume_through("values");
 	ok("pointer lifetime after evaluation");
 }
@@ -141,10 +141,10 @@ pub fn run() {
 	}
 	ok("supported watch targets");
 
-	let constants = world.variables(&globals).into_iter().find(|v| v["name"] == "(BYOND's)").unwrap()["variablesReference"].clone();
+	let constants = world.variables(&globals).into_iter().find(|v| v["name"] == "(BYOND built-ins)").unwrap()["variablesReference"].clone();
 	for (container, name, why) in [
-		(None, "src", "select a variable of this value to watch"),
-		(Some(&constants), "NORTH", "BYOND's constants don't change"),
+		(None, "src", "select a variable of this value to set a data breakpoint"),
+		(Some(&constants), "NORTH", "BYOND built-in constants do not change"),
 		(None, "steps + 1", ""),
 		(None, "nothing_of_the_kind", "")
 	] {
@@ -194,14 +194,14 @@ pub fn run() {
 	let mut over = vec![changed(&mut world), changed(&mut world), changed(&mut world)];
 	over.sort();
 	let mut expected = vec![
-		(steps, false, "watched proc returned".to_owned()),
-		(name, false, "watch target no longer exists".to_owned()),
-		(n, false, "watch target no longer exists".to_owned()),
+		(steps, false, "target proc returned".to_owned()),
+		(name, false, "target no longer exists".to_owned()),
+		(n, false, "target no longer exists".to_owned()),
 	];
 	expected.sort();
 	assert_eq!(over, expected);
 	assert!(
-		world.output.contains("No longer watching steps: watched proc returned"),
+		world.output.contains("Data breakpoint ended for steps: target proc returned"),
 		"the console didn't say a watch was over"
 	);
 	ok("watch expiration notifications");
@@ -219,7 +219,7 @@ pub fn run() {
 		stop("/sc_watch", "watch_sleep", "steps changed: 1 → 11", steps),
 		stop("/change_number", "change_number_after", "watched_number changed: 3 → 6", number)
 	]);
-	assert_eq!(changed(&mut world), (steps, false, "watched proc returned".to_owned()));
+	assert_eq!(changed(&mut world), (steps, false, "target proc returned".to_owned()));
 	ok("debugger writes, retained watches and hit counts");
 
 	// An expression in no frame can be asked about while the world runs.
@@ -284,7 +284,7 @@ pub fn run() {
 		"patient changed: null → 1",
 		"patient changed: 1 → 2"
 	]);
-	assert_eq!(changed(&mut world), (patient, false, "watched proc returned".to_owned()));
+	assert_eq!(changed(&mut world), (patient, false, "target proc returned".to_owned()));
 	ok("frame watches exclude spawned copies");
 
 	// The next world: a global is watched in it too, but what was something
@@ -302,7 +302,7 @@ pub fn run() {
 		changed(&mut world),
 		(shown, false, "watch expired after reboot; select it again".to_owned())
 	);
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	world.run("watch");
 	let stop_now = world.stop();
 	assert_eq!((stop_now.reason.as_str(), &stop_now.hit), ("data breakpoint", &vec![number]));

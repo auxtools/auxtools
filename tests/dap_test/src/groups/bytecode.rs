@@ -92,7 +92,7 @@ pub fn run() {
 	world.request("auxtoolsProfile", json!({ "action": "start" }));
 	assert_eq!(
 		world.refused("auxtoolsProfile", json!({ "action": "start" })),
-		"another profile is running"
+		"another profile is already running"
 	);
 	let evaluated = world.request("evaluate", json!({ "expression": "middle(1)", "context": "repl" }));
 	assert_eq!(evaluated["result"], "14");
@@ -223,7 +223,7 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	let set = break_at(world, &[wide + 1, wide]);
 	assert_eq!(set[0]["verified"], false, "{}", set[0]);
 	let why = set[0]["message"].as_str().unwrap();
-	assert!(why.contains("in the middle of an instruction") && why.contains(&hex(wide)), "{}", why);
+	assert!(why.contains("is inside an instruction in") && why.contains(&hex(wide)), "{}", why);
 	assert_eq!(set[1]["verified"], true, "{}", set[1]);
 	world.run("middle");
 	let stop = world.stop();
@@ -266,7 +266,7 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	let worlds = world.count("dap: world/New");
 	world.run("reboot");
 	world.wait_count("dap: world/New", worlds + 1);
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	// Each run calls leaf(3) and leaf(8): the second x == 8 stops
 	world.run("middle");
 	world.finish("middle");

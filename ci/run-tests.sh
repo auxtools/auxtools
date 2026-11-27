@@ -8,7 +8,9 @@
 #
 # Set WINE=wine to run Windows binaries on Linux.
 #
-# With no TEST arguments, also run PROGRAMS/unit tests if that directory exists.
+# With no TEST arguments, runs all integration suites and, if the directory
+# PROGRAMS/unit exists, also runs every unit test binary under it one at a
+# time from the matching repository directory. Exits with 1 if any test fails.
 set -u
 [ $# -ge 2 ] || { sed -n '2,11p' "$0" >&2; exit 2; }
 programs=$(cd "$1" && pwd) || exit 2

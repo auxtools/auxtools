@@ -87,7 +87,7 @@ pub fn run() {
 	let set = world.try_break_if(&[("leaf_1", "x =="), ("leaf_2", "y == 4"), ("middle_3", "nowhere_at_all == 1")]);
 	assert_eq!(set[0]["verified"], false, "{}", set[0]);
 	let why = set[0]["message"].as_str().unwrap();
-	assert!(why.starts_with("the condition doesn't compile: parser error: "), "{}", why);
+	assert!(why.starts_with("condition failed to compile: parse error: "), "{}", why);
 	assert_eq!((&set[1]["verified"], &set[2]["verified"]), (&json!(true), &json!(true)));
 	world.run("middle");
 	world.stop_on("breakpoint", "/leaf", "leaf_2");
@@ -95,7 +95,7 @@ pub fn run() {
 	// it's skipped like any condition that fails
 	world.resume_through("middle");
 	// The console's message can come after the world's own output
-	let undefined = format!("{}undefined var: nowhere_at_all", failed);
+	let undefined = format!("{}undefined variable: nowhere_at_all", failed);
 	world.wait_count(&undefined, 1);
 	assert_eq!(world.count(&undefined), 1);
 	let set = world.request(
@@ -106,7 +106,7 @@ pub fn run() {
 	assert!(set["breakpoints"][0]["message"]
 		.as_str()
 		.unwrap()
-		.starts_with("the condition doesn't compile: "));
+		.starts_with("condition failed to compile: "));
 	assert_eq!(set["breakpoints"][1]["verified"], true);
 	world.function_breakpoints(&[]);
 	ok("condition compile errors at installation");
@@ -197,9 +197,9 @@ fn hit_counts(world: &mut World) {
 
 	let (file, line) = world.marks.place("recurse_1");
 	for (hit, why) in [
-		("soon", "invalid hit count \"soon\"; expected"),
+		("soon", "invalid hit count \"soon\": expected"),
 		("% 0", "hit interval must be greater than zero"),
-		("== two", "invalid hit count \"== two\"; expected")
+		("== two", "invalid hit count \"== two\": expected")
 	] {
 		let set = world.set_breakpoints(&file, json!([{ "line": line, "hitCondition": hit }]));
 		assert_eq!(set[0]["verified"], false, "{}", set[0]);

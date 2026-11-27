@@ -22,7 +22,7 @@ pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 #[command(name = "auxtools", disable_help_subcommand = true, disable_version_flag = true)]
 pub struct Cli {
 	/// The world's process: before the command or after it
-	#[arg(long, global = true, value_name = "PID", value_parser = pid, help = "Select the world process.")]
+	#[arg(long, global = true, value_name = "PID", value_parser = pid, help = "Select the world process by PID.")]
 	pub pid: Option<u32>,
 	/// Response timeout, accepted before or after the command.
 	#[arg(long, global = true, value_name = "SECONDS", value_parser = seconds, help = RESPONSE_TIMEOUT)]
@@ -123,7 +123,7 @@ pub struct Launch {
 	#[arg(
 		long,
 		value_name = "FILE",
-		help = "Set the source project used for hot reload.\n[default: NAME.dme beside NAME.dmb]"
+		help = "Set the .dme project file for hot reload.\n[default: NAME.dme beside NAME.dmb]"
 	)]
 	pub dme: Option<PathBuf>,
 	#[arg(
@@ -146,7 +146,7 @@ pub struct Launch {
 	#[arg(
 		long,
 		value_name = "PATH",
-		help = "Set the BYOND installation path.\n[default: BYOND_SYSTEM, then the installed location]"
+		help = "Use the BYOND installation at PATH.\n[default: BYOND_SYSTEM, then standard install locations]"
 	)]
 	pub byond: Option<PathBuf>,
 	/// Given to the launcher `--detach` starts in the background
@@ -210,15 +210,15 @@ pub struct Reconnect {
 pub struct Log {
 	#[arg(long, help = "Stream new entries after printing matching retained entries.")]
 	pub follow: bool,
-	#[arg(long, help = "Include runtime errors and thrown exceptions, with stacks.")]
+	#[arg(long, help = "Include runtime errors and thrown exceptions.")]
 	pub runtimes: bool,
-	#[arg(long, help = "Include hot reload attempts, results, and diagnostics.")]
+	#[arg(long, help = "Include hot reload attempts and diagnostics.")]
 	pub reloads: bool,
 	#[arg(long, help = "Include world output captured by the launcher.")]
 	pub output: bool,
-	#[arg(long, help = "Include world loads, reboots, and automatic debugger actions.")]
+	#[arg(long, help = "Include world loads, reboots, and pause timeouts.")]
 	pub world: bool,
-	#[arg(long, help = "Include results of code run by eval --spawn.")]
+	#[arg(long, help = "Include results of code run with eval --spawn.")]
 	pub spawned: bool,
 	#[arg(
 		long,
@@ -261,7 +261,7 @@ pub struct Eval {
 	/// anything else that starts with a hyphen goes after `--`.
 	#[arg(value_name = "EXPRESSION", allow_negative_numbers = true)]
 	pub expression: Vec<String>,
-	#[arg(short = 'f', long, value_name = "FILE", help = "Read the expression from FILE.")]
+	#[arg(short = 'f', long, value_name = "FILE", help = "Read the expression or statements from FILE.")]
 	pub file: Option<PathBuf>,
 	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Select a zero-based paused frame. [default: 0 when paused]")]
 	pub frame: Option<u32>,
@@ -380,16 +380,20 @@ pub struct WaitPause {
 	#[arg(
 		long = "break",
 		value_name = "LOCATION",
-		help = "Set a temporary breakpoint. Repeatable.\nLOCATION is FILE:LINE or /proc/path[#N].\n#N selects a zero-based definition. [default: 0]"
+		help = "Set a temporary breakpoint at FILE:LINE or\n/proc/path[#N] (definition index, [default: 0]).\nRepeatable."
 	)]
 	pub breaks: Vec<String>,
-	#[arg(long = "change", value_name = "EXPR", help = "Watch a variable or list entry for changes. Repeatable.")]
+	#[arg(
+		long = "change",
+		value_name = "EXPR",
+		help = "Set a data breakpoint on a variable or list entry.\nRepeatable."
+	)]
 	pub changes: Vec<String>,
 	#[arg(
 		long,
 		value_name = "N",
 		value_parser = whole::<u32>,
-		help = "Select the paused frame used to resolve watches.\n[default: 0, the innermost frame]"
+		help = "Resolve data breakpoints in paused frame N\n(0 is innermost). [default: 0] Requires --change."
 	)]
 	pub frame: Option<u32>,
 	#[arg(
@@ -431,7 +435,7 @@ pub struct WaitReload {
 		long,
 		value_name = "N",
 		value_parser = whole::<u64>,
-		help = "Use the first reload event after journal entry N.\n[default: wait for a new event]"
+		help = "Match the first reload after journal entry N.\n[default: wait for a new event]"
 	)]
 	pub since: Option<u64>,
 	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
@@ -446,7 +450,7 @@ pub struct WaitReboot {
 		long,
 		value_name = "N",
 		value_parser = whole::<u64>,
-		help = "Use the first world-load event after journal entry N.\n[default: wait for a new event]"
+		help = "Match the first world load after journal entry N.\n[default: wait for a new event]"
 	)]
 	pub since: Option<u64>,
 	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
@@ -465,13 +469,13 @@ pub struct Trace {
 		help = "Format each hit using MESSAGE with {DM expression} values.\n{{ and }} are literal braces."
 	)]
 	pub log: Option<String>,
-	#[arg(long = "if", value_name = "CONDITION", help = "Record only hits where the DM condition is true.")]
+	#[arg(long = "if", value_name = "CONDITION", help = "Record only hits where CONDITION is truthy.")]
 	pub condition: Option<String>,
 	#[arg(long, value_name = "EXPR", help = "Group hits by expression value and print counts at exit.")]
 	pub by: Option<String>,
 	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after the specified duration. [default: unlimited]")]
 	pub duration: Option<Duration>,
-	#[arg(long, value_name = "N", value_parser = positive, help = "Stop after N recorded hits. N must be positive.")]
+	#[arg(long, value_name = "N", value_parser = positive, help = "Stop after N recorded hits (positive integer).")]
 	pub count: Option<u64>,
 	#[arg(long, help = "Emit JSON Lines: bound, hit, and summary events.")]
 	pub json: bool
@@ -492,7 +496,7 @@ pub struct Profile {
 		help = "List the N slowest procs and lines. [default: 40]"
 	)]
 	pub top: u64,
-	#[arg(long, value_name = "FILE", help = "Write an HTML report to FILE.")]
+	#[arg(long, value_name = "FILE", help = "Write an interactive HTML report to FILE.")]
 	pub html: Option<PathBuf>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -564,7 +568,7 @@ fn byond_version(text: &str) -> Result<(u32, u32), String> {
 
 fn byond_version_help() -> String {
 	let latest = dmasm::ByondVersion::LATEST;
-	format!("Check for bugs affecting this BYOND build. [default: {}.{}]", latest.major, latest.build)
+	format!("Check for bugs in BYOND build VERSION.\n[default: {}.{}]", latest.major, latest.build)
 }
 
 /// Why there's no command to run

@@ -221,7 +221,7 @@ fn launch(server: &str, library: &Path) {
 	// The world reboots, and the launcher gives the new one the breakpoints
 	at_target(&mut launcher);
 	assert!(
-		launcher.output.contains("The world restarted"),
+		launcher.output.contains("Reconnected to the world"),
 		"the launcher didn't see the world restart"
 	);
 	println!("ok: breakpoint restoration after reboot");
@@ -261,7 +261,7 @@ fn command_line(pid: u64, code: &Path) {
 
 	assert_eq!(run(&["status"], 0).lines().next().unwrap_or_default(), format!("pid {}: running", pid));
 	let printed = run(&["wait", "pause", "--timeout", "1"], 2);
-	assert_eq!(printed.trim(), "error: timed out after 1 second waiting for the world to pause.");
+	assert_eq!(printed.trim(), "error: timed out after 1 second waiting for the world to pause");
 
 	let line = line_of(code, "\treturn 2").to_string();
 	let printed = run(&["wait", "pause", "--break", &format!("attach_host.dm:{}", line), "--timeout", "60"], 0);
@@ -340,7 +340,7 @@ fn command_line(pid: u64, code: &Path) {
 	);
 	let printed = run(&["wait", "pause", "--break", "nowhere.dm:3"], 1);
 	assert!(
-		printed.contains("the world has no code from a file named nowhere.dm"),
+		printed.contains("the world has no code from nowhere.dm"),
 		"unexpected wait output: {}",
 		printed
 	);
@@ -419,7 +419,7 @@ fn command_line_shape() {
 	// Alone, it's told what it can wait for, and that it waited for nothing
 	let (code, bare) = launcher_command(&["wait"]);
 	assert_eq!(code, 1, "{}", bare);
-	assert_eq!(bare, format!("{}error: wait requires a command: pause, reload, or reboot.\n", of_wait));
+	assert_eq!(bare, format!("{}error: wait requires a command: pause, reload, or reboot\n", of_wait));
 	let (code, of_pause) = launcher_command(&["help", "wait", "pause"]);
 	assert_eq!(code, 0);
 	assert!(
@@ -514,15 +514,15 @@ fn command_line_shape() {
 		(&["launch", "nothing.dmb", "--json"], "error: --json requires --detach."),
 		(
 			&["--pid", "1", "list"],
-			"error: --pid cannot be used with 'list': it does not select an existing world."
+			"error: --pid cannot be used with 'list': it does not select an existing world"
 		),
 		(
 			&["version", "--pid", "1"],
-			"error: --pid cannot be used with 'version': it does not select an existing world."
+			"error: --pid cannot be used with 'version': it does not select an existing world"
 		),
 		(
 			&["list", "--response-timeout", "1"],
-			"error: --response-timeout cannot be used with 'list': it does not select an existing world."
+			"error: --response-timeout cannot be used with 'list': it does not select an existing world"
 		),
 		(
 			&["--response-timeout", "1", "stop"],
@@ -751,7 +751,7 @@ impl Drop for KilledOnDrop {
 fn no_debugger() {
 	use auxtools_cli::{local, server_types::Response};
 
-	const WHY: &str = "Couldn't find current_execution_context (BYOND 516.1600 is outside the checked range 1637..=1688)";
+	const WHY: &str = "could not find current_execution_context (unsupported BYOND build 516.1600, checked builds 1637 to 1688)";
 	// The normal host can exit before these checks finish or leave a reboot
 	// marker if killed mid-reboot. This host runs until explicitly stopped.
 	let (dir, dme) = attach_host_copy("no_debugger");
@@ -910,10 +910,10 @@ fn command_line_more(pid: u64, dir: &Path) {
 		printed
 	);
 	let printed = run(&["eval", "1", "+"], 1);
-	assert!(printed.starts_with("error: parser error: "), "unexpected eval output: {}", printed);
+	assert!(printed.starts_with("error: parse error: "), "unexpected eval output: {}", printed);
 	assert_eq!(
 		run(&["eval", "nothing_called_this"], 1).trim(),
-		"error: undefined var: nothing_called_this"
+		"error: undefined variable: nothing_called_this"
 	);
 	assert_eq!(run(&["eval", "1", "/", "0"], 1).trim(), "error: runtime error: Division by zero");
 	println!("ok: CLI frame variables, globals and evaluation");
@@ -921,7 +921,7 @@ fn command_line_more(pid: u64, dir: &Path) {
 	assert_eq!(run(&["eval", "var/n = 0\nfor(var/i in 1 to 3)\n\tn += i\nn"], 0).trim(), "6");
 	assert_eq!(
 		run(&["eval", "var/x = 1\nx = nothing_called_this"], 1).trim(),
-		"error: line 2: undefined var: nothing_called_this"
+		"error: line 2: undefined variable: nothing_called_this"
 	);
 	println!("ok: CLI proc-body evaluation");
 	run(&["continue"], 0);
@@ -1029,7 +1029,7 @@ fn command_line_more(pid: u64, dir: &Path) {
 	);
 	let printed = run(&["wait", "pause", "--change", "1 + 1"], 1);
 	assert!(
-		printed.starts_with("error: cannot watch 1 + 1: "),
+		printed.starts_with("error: cannot set data breakpoint on 1 + 1: "),
 		"unexpected wait --change output: {}",
 		printed
 	);
@@ -1044,7 +1044,7 @@ fn command_line_more(pid: u64, dir: &Path) {
 		),
 		(
 			&["wait", "pause", "--break", "somewhere"][..],
-			"error: invalid location 'somewhere': expected FILE:LINE or /proc/path[#N]."
+			"error: invalid location 'somewhere': expected FILE:LINE or /proc/path[#N]"
 		),
 		(&["wait", "now"][..], "error: unknown wait command 'now'."),
 		(
@@ -1053,7 +1053,7 @@ fn command_line_more(pid: u64, dir: &Path) {
 		),
 		(
 			&["wait", "pause", "--break", "/proc/value", "--if", "1 =="][..],
-			"error: cannot set a breakpoint at /proc/value: the condition doesn't compile: parser error: "
+			"error: cannot set breakpoint at /proc/value: condition failed to compile: parse error: "
 		)
 	] {
 		let printed = run(args, 1);
@@ -1092,7 +1092,7 @@ fn command_line_trace(pid: u64, code: &Path) {
 		"/value  attach_host.dm:{}, called by /run_until_stopped  attach_host.dm:{}",
 		value, called
 	);
-	let summary = "summary: 3 hits, 0 skipped; ended: count".to_owned();
+	let summary = "summary: 3 hits, 0 skipped (ended: count)".to_owned();
 	assert_eq!(
 		lines,
 		[
@@ -1121,7 +1121,7 @@ fn command_line_trace(pid: u64, code: &Path) {
 	);
 	assert_eq!(
 		printed.lines().skip(1).collect::<Vec<_>>(),
-		["rounds then: 1", "rounds then: 1", "summary: 2 hits, 0 skipped; ended: count"],
+		["rounds then: 1", "rounds then: 1", "summary: 2 hits, 0 skipped (ended: count)"],
 		"unexpected trace --log output: {}",
 		printed
 	);
@@ -1139,7 +1139,7 @@ fn command_line_trace(pid: u64, code: &Path) {
 			&& lines[2].ends_with(&format!("  /tally  attach_host.dm:{}", other))
 			&& count(lines[1]) >= count(lines[2])
 			&& count(lines[2]) >= 2
-			&& lines[3] == format!("summary: {} hits, 0 skipped; ended: time", count(lines[1]) + count(lines[2])),
+			&& lines[3] == format!("summary: {} hits, 0 skipped (ended: time)", count(lines[1]) + count(lines[2])),
 		"trace --by caller said {}",
 		printed
 	);
@@ -1150,7 +1150,7 @@ fn command_line_trace(pid: u64, code: &Path) {
 			&& lines[1].ends_with("  1")
 			&& lines[2].ends_with("  2")
 			&& count(lines[1]) == 6 - count(lines[2])
-			&& lines[3] == "summary: 6 hits, 0 skipped; ended: count",
+			&& lines[3] == "summary: 6 hits, 0 skipped (ended: count)",
 		"trace --by n said {}",
 		printed
 	);
@@ -1163,7 +1163,7 @@ fn command_line_trace(pid: u64, code: &Path) {
 		printed.contains("failed; skipping affected hits (reported once): runtime error: Cannot read ")
 			&& printed
 				.lines()
-				.any(|line| line.starts_with("summary: 0 hits, ") && !line.contains(", 0 skipped") && line.ends_with(" skipped; ended: time"))
+				.any(|line| line.starts_with("summary: 0 hits, ") && !line.contains(", 0 skipped") && line.ends_with(" skipped (ended: time)"))
 			&& !printed.contains("called by"),
 		"unexpected trace --if output: {}",
 		printed
@@ -1253,15 +1253,15 @@ fn command_line_trace(pid: u64, code: &Path) {
 	for (args, said) in [
 		(
 			&["trace", "nowhere.dm:3"][..],
-			"error: cannot set a breakpoint at nowhere.dm:3: the world has no code from a file named nowhere.dm."
+			"error: cannot set breakpoint at nowhere.dm:3: the world has no code from nowhere.dm"
 		),
 		(
 			&["trace", "/proc/value", "/proc/nothing_called_this"][..],
-			"error: cannot set a breakpoint at /proc/nothing_called_this: "
+			"error: cannot set breakpoint at /proc/nothing_called_this: "
 		),
 		(
 			&["trace", "/proc/value", "--if", "1 =="][..],
-			"error: cannot set a breakpoint at /proc/value: the condition doesn't compile: "
+			"error: cannot set breakpoint at /proc/value: condition failed to compile: "
 		),
 		(
 			&["trace", "/proc/value", "--for=-1"][..],
@@ -1381,7 +1381,7 @@ fn attach_and_reload(server: &str, library: &Path) -> Attached {
 	second.request("attach", json!({ "processId": pid, "dme": dme, "hotReload": true }));
 	second.event("initialized");
 	second.request("configurationDone", json!({}));
-	second.wait_output("Hot reload disabled: the launcher (pid ");
+	second.wait_output("Hot reload disabled: the launcher (PID ");
 	assert!(
 		second.output.contains("already owns hot reload for this world"),
 		"unexpected second-session output: {}",
@@ -1759,7 +1759,7 @@ fn launch_from_the_command_line(server: &str) {
 	wait_for_text("launch", "Hot reload: reloaded /value", read);
 	wait_for_text("launch", "attach test: 2", read);
 	// Removing these definitions must not claim runtime removals.
-	wait_for_text("launch", "var unbuilt was removed from source and isn't in the running world", read);
+	wait_for_text("launch", "variable unbuilt was removed from source and is not in the running world", read);
 	let printed = read();
 	assert!(
 		printed.contains("Hot reload: reloaded /value in ")
@@ -1909,7 +1909,7 @@ fn launch_from_the_command_line(server: &str) {
 	assert_eq!(run(&["status"], 0).lines().next().unwrap_or_default(), format!("pid {}: running", pid));
 	let again: serde_json::Value = serde_json::from_str(&run(&["reboot", "--json", "--timeout", "60"], 0)).unwrap();
 	assert_eq!(again, json!({ "pid": pid, "rebooted": true }));
-	wait_for_text("the background launcher's log", "The world restarted", read_log);
+	wait_for_text("the background launcher's log", "Reconnected to the world", read_log);
 	println!("ok: reboot waits for reconnection");
 
 	// Reboot must wait for hot reloads to be restored.
@@ -2109,7 +2109,7 @@ fn launch_from_the_command_line(server: &str) {
 	let ended = if cfg!(windows) {
 		"The world exited with code 1"
 	} else {
-		"The world was terminated"
+		"The world exited without an exit code"
 	};
 	wait_for_text("the background launcher's log", ended, || {
 		std::fs::read_to_string(&log).unwrap_or_default()

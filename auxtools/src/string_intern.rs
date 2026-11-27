@@ -2,6 +2,16 @@ use std::cell::UnsafeCell;
 
 use crate::{inventory, StringRef};
 
+/// Evaluates a string literal to a cached `&'static StringRef`.
+///
+/// All `byond_string!` literals are interned on each library initialization and
+/// dropped at shutdown. Call only on BYOND's thread because the backing storage
+/// is unsynchronized. Do not keep the returned reference across a shutdown, or
+/// it will dangle.
+///
+/// # Panics
+///
+/// Panics if evaluated before initialization or after shutdown.
 #[macro_export]
 macro_rules! byond_string {
 	($s:literal) => {

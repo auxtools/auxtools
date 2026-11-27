@@ -150,7 +150,7 @@ pub(crate) fn run(code: &str, params: &[(&str, &Value)]) -> Result<Value, String
 	let values: Vec<&Value> = params.iter().map(|(_, value)| *value).collect();
 	let body = dmasm::compiler::compile_body_in(code, &names, None, crate::world_byond()).map_err(|e| e.to_string())?;
 	let assembly = dmasm::assembler::assemble(&body.nodes, &mut crate::assemble_env::AssembleEnv).map_err(|e| format!("{:?}", e))?;
-	let proc = Proc::find("/proc/auxtools_expr_stub").ok_or("the world has no evaluation stub")?;
+	let proc = Proc::find("/proc/auxtools_expr_stub").ok_or("this world has no evaluation stub (/proc/auxtools_expr_stub)")?;
 	proc.set_bytecode(assembly);
 	let result = crate::server::Server::call_with_locals(&proc, &body.locals, &values)?.map_err(|e| e.message)?;
 	// The stub returns list(result, params...)
@@ -165,7 +165,7 @@ pub(crate) fn text(value: &str) -> Result<Value, String> {
 pub fn set(request: &SkinRequest) -> Result<SkinReloaded, String> {
 	let field = field()?;
 	if !std::path::Path::new(&request.path).is_file() {
-		return Err(format!("{}: no such file", request.path));
+		return Err(format!("{}: file not found", request.path));
 	}
 	let resource = run("fcopy_rsc(file)", &[("file", &text(&request.path)?)])?;
 	if resource.raw.tag != ValueTag::Resource {

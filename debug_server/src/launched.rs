@@ -32,7 +32,7 @@ pub const DEBUG_VAR: &str = "AUXTOOLS_DEBUG";
 /// world's `world/Del()`. Reinitialize only after a reboot loads a new world.
 const HELPER_PROCS: &str = r#"
 /proc/auxtools_expr_stub()
-	CRASH("auxtools_expr_stub is where the debugger evaluates expressions")
+	CRASH("auxtools_expr_stub is reserved for debugger expression evaluation")
 
 /proc/auxtools_stack_trace(msg)
 	CRASH(msg)
@@ -59,14 +59,14 @@ const HELPER_PROCS: &str = r#"
 	return null
 
 /proc/auxtools_spawn_stub()
-	CRASH("auxtools_spawn_stub is where the debugger runs what it's asked to spawn")
+	CRASH("auxtools_spawn_stub is reserved for running spawned debugger code")
 
 /proc/auxtools_spawned(number, list/given)
 	set waitfor = FALSE
 	auxtools_spawn_done(number, auxtools_spawn_stub(arglist(given)))
 
 /proc/auxtools_spawn_done(number, result)
-	CRASH("the debugger's library isn't loaded")
+	CRASH("the auxtools debug library is not loaded")
 
 /proc/auxtools_kept()
 	// Keep values between evaluations: `auxtools_kept()["m"] = m`.
@@ -74,13 +74,13 @@ const HELPER_PROCS: &str = r#"
 	return kept
 
 /proc/auxtools_launched_world_del(failed)
-	CRASH("the debugger's library isn't loaded")
+	CRASH("the auxtools debug library is not loaded")
 
 /proc/auxtools_launched_world_reboot()
-	CRASH("the debugger's library isn't loaded")
+	CRASH("the auxtools debug library is not loaded")
 
 /proc/auxtools_launched_world_reboot_declined()
-	CRASH("the debugger's library isn't loaded")
+	CRASH("the auxtools debug library is not loaded")
 
 /world/Reboot()
 	auxtools_launched_world_reboot()
@@ -93,7 +93,7 @@ const HELPER_PROCS: &str = r#"
 	auxtools_launched_world_reboot_declined()
 
 /proc/auxtools_launched_world_new()
-	CRASH("the debugger's library isn't loaded")
+	CRASH("the auxtools debug library is not loaded")
 
 // Runs once the world has read its data, before any client logs in
 /world/New()
@@ -130,9 +130,11 @@ pub fn can_spawn() -> Result<(), String> {
 		return Ok(());
 	}
 	if !KEEPALIVE_OURS.load(Ordering::Relaxed) && Proc::find("/proc/auxtools_keepalive").is_some() {
-		return Err("this world can't run spawned code: it has an /proc/auxtools_keepalive of its own, which doesn't run it".to_owned());
+		return Err(
+			"cannot run spawned code: this world defines its own /proc/auxtools_keepalive, so auxtools did not add its keepalive proc".to_owned()
+		);
 	}
-	Err("this world can't run spawned code: it doesn't have the debugger's helper procs for it".to_owned())
+	Err("cannot run spawned code: the auxtools spawn helper procs are missing or not hooked".to_owned())
 }
 
 /// Identify the debugger helpers that form the outer frames of spawned code.
@@ -325,7 +327,7 @@ fn ready() {
 	let mut server = match Server::listen() {
 		Ok(server) => server,
 		Err(e) => {
-			eprintln!("auxtools: couldn't listen for debuggers at {}: {}", connection::world_name(), e);
+			eprintln!("auxtools: could not listen for debuggers at {}: {}", connection::world_name(), e);
 			return;
 		}
 	};
@@ -411,6 +413,6 @@ fn spawn_done(_: &Value, _: &Value, args: Vec<Value>) -> auxtools::DMResult {
 
 /// Report initialization failure to connecting clients.
 fn failed(error: &str) {
-	eprintln!("auxtools: couldn't start the debugger: {}", error);
+	eprintln!("auxtools: could not start the debugger: {}", error);
 	Server::refuse(error.to_owned());
 }

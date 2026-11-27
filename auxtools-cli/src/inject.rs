@@ -44,7 +44,7 @@ fn read<T: Copy>(process: HANDLE, address: usize) -> Result<T, String> {
 		)
 	};
 	if ok == FALSE {
-		return Err(last_error("couldn't read the program's memory"));
+		return Err(last_error("could not read target process memory"));
 	}
 	Ok(unsafe { value.assume_init() })
 }
@@ -52,7 +52,7 @@ fn read<T: Copy>(process: HANDLE, address: usize) -> Result<T, String> {
 fn write(process: HANDLE, address: usize, bytes: &[u8]) -> Result<(), String> {
 	let ok = unsafe { WriteProcessMemory(process, address as *mut c_void, bytes.as_ptr() as *const c_void, bytes.len(), null_mut()) };
 	if ok == FALSE {
-		return Err(last_error("couldn't write to the program's memory"));
+		return Err(last_error("could not write target process memory"));
 	}
 	Ok(())
 }
@@ -75,7 +75,7 @@ fn entry_point(process: HANDLE) -> Result<usize, String> {
 	let query: NtQueryInformationProcess = unsafe {
 		let function = GetProcAddress(GetModuleHandleA(c"ntdll.dll".as_ptr()), c"NtQueryInformationProcess".as_ptr());
 		if function.is_null() {
-			return Err(last_error("couldn't find NtQueryInformationProcess"));
+			return Err(last_error("could not locate NtQueryInformationProcess in ntdll.dll"));
 		}
 		std::mem::transmute(function)
 	};
@@ -92,7 +92,7 @@ fn entry_point(process: HANDLE) -> Result<usize, String> {
 		)
 	};
 	if !NT_SUCCESS(status) {
-		return Err(format!("couldn't find the program's PEB (status {:#x})", status));
+		return Err(format!("could not find process PEB (NTSTATUS {:#x})", status));
 	}
 
 	// PEB.ImageBaseAddress, then the PE header's AddressOfEntryPoint
@@ -108,7 +108,7 @@ fn kernel32(name: &[u8]) -> Result<u32, String> {
 		let module = GetModuleHandleA(c"kernel32.dll".as_ptr());
 		let function = GetProcAddress(module, name.as_ptr() as *const i8);
 		if function.is_null() {
-			return Err(last_error("couldn't find kernel32's functions"));
+			return Err(last_error("could not resolve kernel32.dll export"));
 		}
 		Ok(function as usize as u32)
 	}
@@ -131,7 +131,7 @@ pub fn attach_on_entry(process: HANDLE, library: &Path) -> Result<(), String> {
 	let size = CODE_LEN + PATCH_LEN + path.len() + ATTACH_EXPORT.len();
 	let stub = unsafe { VirtualAllocEx(process, null_mut(), size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) } as usize;
 	if stub == 0 {
-		return Err(last_error("couldn't allocate memory in the program"));
+		return Err(last_error("could not allocate memory in target process"));
 	}
 	let saved = stub + CODE_LEN;
 	let path_at = saved + PATCH_LEN;
@@ -176,7 +176,7 @@ pub fn attach_on_entry(process: HANDLE, library: &Path) -> Result<(), String> {
 	// The stub writes the entry point back from inside the program
 	let mut old = 0;
 	if unsafe { VirtualProtectEx(process, entry as *mut c_void, PATCH_LEN, PAGE_EXECUTE_READWRITE, &mut old) } == FALSE {
-		return Err(last_error("couldn't make the program's entry point writable"));
+		return Err(last_error("could not make target process entry point writable"));
 	}
 	let mut patch = vec![0x68];
 	patch.extend(le(stub));
@@ -195,7 +195,7 @@ pub fn resume(pid: u32) -> Result<(), String> {
 	unsafe {
 		let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
 		if snapshot == INVALID_HANDLE_VALUE {
-			return Err(last_error("couldn't list the program's threads"));
+			return Err(last_error("could not enumerate process threads"));
 		}
 
 		let mut entry: THREADENTRY32 = std::mem::zeroed();
@@ -217,7 +217,7 @@ pub fn resume(pid: u32) -> Result<(), String> {
 		CloseHandle(snapshot);
 
 		if resumed == 0 {
-			return Err(last_error("couldn't start the program"));
+			return Err(last_error("could not resume target process"));
 		}
 	}
 	Ok(())

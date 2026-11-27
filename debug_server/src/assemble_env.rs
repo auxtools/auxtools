@@ -93,13 +93,13 @@ fn found(proc: Proc, warning: Option<String>) -> dmasm::compiler::FoundProc {
 /// matching DreamMaker.
 pub fn type_proc(ty: &str, name: &str) -> Result<dmasm::compiler::FoundProc, String> {
 	if dmasm::assembler::AssembleEnv::get_type(&mut AssembleEnv, ty).is_none() {
-		return Err(format!("there's no type {} in the running world", ty));
+		return Err(format!("type {} not found in the running world", ty));
 	}
 	ancestry(ty)
 		.iter()
 		.find_map(|at| last_definition(&format!("{}/{}", at, name)))
 		.map(|proc| found(proc, None))
-		.ok_or_else(|| format!("{} has no proc called {}", ty, name))
+		.ok_or_else(|| format!("{} has no proc named {}", ty, name))
 }
 
 /// Resolve `/type/proc/name` or `/type/verb/name` to the first definition on

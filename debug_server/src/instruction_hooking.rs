@@ -376,7 +376,7 @@ unsafe fn in_try_above_expression(mut ctx: *mut raw_types::procs::ExecutionConte
 unsafe fn thrown(ctx: *mut raw_types::procs::ExecutionContext) -> String {
 	let size = unsafe { *(*ctx).stack_size() } as usize;
 	if size == 0 {
-		return "an exception".to_owned();
+		return "unnamed exception".to_owned();
 	}
 	let value = unsafe { Value::from_raw(*(*(*ctx).stack()).add(size - 1)) };
 	if let Ok(name) = value.get(byond_string!("name")) {
@@ -393,7 +393,7 @@ unsafe fn thrown(ctx: *mut raw_types::procs::ExecutionContext) -> String {
 	}
 	match value.as_string() {
 		Ok(text) => text,
-		Err(_) => value.to_string().unwrap_or_else(|_| "an exception".to_owned())
+		Err(_) => value.to_string().unwrap_or_else(|_| "unnamed exception".to_owned())
 	}
 }
 

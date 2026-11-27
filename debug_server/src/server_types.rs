@@ -9,7 +9,7 @@ pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Shutdown notification sent before disconnecting clients; not used for
 /// reboot.
-pub const WORLD_SHUTTING_DOWN: &str = "The world is shutting down";
+pub const WORLD_SHUTTING_DOWN: &str = "the world is shutting down";
 
 /// Evaluation context for shutdown and reboot. Resume the world and suppress
 /// pauses so sleeping code can finish. Older servers ignore this context.
@@ -912,7 +912,7 @@ impl HitCondition {
 			Ok(0) if make(0) == Self::Every(0) => Err("hit interval must be greater than zero".to_owned()),
 			Ok(number) => Ok(make(number)),
 			Err(_) => Err(format!(
-				"invalid hit count {:?}; expected N or an operator (==, >, >=, <, <=, %) followed by N",
+				"invalid hit count {:?}: expected N or an operator (=, ==, >, >=, <, <=, %) followed by N",
 				text
 			))
 		}

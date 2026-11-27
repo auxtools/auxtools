@@ -11,7 +11,7 @@ pub struct List {
 impl List {
 	pub fn from_value(val: &Value) -> DMResult<Self> {
 		if !Self::is_list(val) {
-			return Err(runtime!("attempted to create List from non-list value"));
+			return Err(runtime!("cannot create List from a non-list value"));
 		}
 
 		Ok(Self { value: val.clone() })
@@ -52,7 +52,7 @@ impl List {
 				return Ok(Value::from_raw_owned(value));
 			}
 
-			Err(runtime!("failed to get assoc list entry (probably given an invalid list or key)"))
+			Err(runtime!("could not read list entry (invalid list, index, or key)"))
 		}
 	}
 
@@ -65,7 +65,7 @@ impl List {
 				return Ok(());
 			}
 
-			Err(runtime!("failed to set assoc list entry (probably given an invalid list or key)"))
+			Err(runtime!("could not write list entry (invalid list, index, or key)"))
 		}
 	}
 
@@ -109,7 +109,7 @@ impl List {
 	/// returns.
 	pub fn alist_pairs(&self) -> DMResult<Vec<(Value, Value)>> {
 		if !self.is_alist() {
-			return Err(runtime!("attempted to read alist pairs of a non-alist"));
+			return Err(runtime!("cannot read alist pairs from a non-alist value"));
 		}
 
 		let id = unsafe { self.value.raw.data.id } as usize;
@@ -117,14 +117,14 @@ impl List {
 			// raw reads of BYOND's table, so a stale id has to be turned away
 			// here
 			if id >= *raw_types::funcs::ALIST_TABLE_COUNT as usize {
-				return Err(runtime!("alist id {} is outside the alist table", id));
+				return Err(runtime!("alist ID {} is outside the alist table", id));
 			}
 			// BYOND reallocates the table as it grows, so read the pointer
 			// every time
 			*(*raw_types::funcs::ALIST_TABLE).add(id)
 		};
 		if record.is_null() {
-			return Err(runtime!("alist id {} has no record", id));
+			return Err(runtime!("alist ID {} has no record", id));
 		}
 
 		let mut pairs = vec![];

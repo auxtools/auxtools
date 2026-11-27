@@ -176,7 +176,7 @@ fn told_along_the_way() {
 
 	world.run("reboot");
 	world.wait_count("dap: world/New", 2);
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	let events = progress(&mut world);
 	assert_eq!(
 		events[..2],
@@ -479,7 +479,7 @@ fn output_and_exit() {
 	let mut world = World::start();
 	world.try_request("disconnect", json!({ "terminateDebuggee": false }));
 	assert!(
-		world.output.contains("Stopping the world launched by this session"),
+		world.output.contains("Terminating the world launched by this session"),
 		"the launcher didn't say the world would end"
 	);
 	assert!(world.launcher.child.wait().unwrap().success());

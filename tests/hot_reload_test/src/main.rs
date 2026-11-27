@@ -1376,7 +1376,11 @@ fn main() {
 	}
 	let refused = expect_reload_result(watcher.request(unmarked));
 	assert!(!refused.applied, "duplicate var was accepted: {:?}", refused);
-	assert!(refused.errors.iter().any(|e| e.contains("duplicate definition")), "{:?}", refused.errors);
+	assert!(
+		refused.errors.iter().any(|e| e.contains("already has a variable with this name")),
+		"{:?}",
+		refused.errors
+	);
 	let result = reload(&mut watcher, &changes);
 	assert!(
 		result

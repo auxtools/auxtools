@@ -89,6 +89,15 @@ impl WeakValue {
 }
 
 impl Value {
+	/// Creates a `WeakValue` referencing this datum.
+	///
+	/// Reads the datum's `__auxtools_weakref_id` variable and assigns a new ID
+	/// if it does not already hold one.
+	///
+	/// # Errors
+	///
+	/// Returns an error if this value does not have an `__auxtools_weakref_id`
+	/// variable.
 	/// Creates a [`WeakValue`] referencing this datum.
 	pub fn as_weak(&self) -> DMResult<WeakValue> {
 		WeakValue::new(self)

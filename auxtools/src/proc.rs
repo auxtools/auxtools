@@ -112,6 +112,15 @@ impl Proc {
 		})
 	}
 
+	/// Returns the source file named by this proc's first instruction, if any.
+	///
+	/// Returns `None` if the bytecode does not start with a file record (opcode
+	/// `0x84`) or if that record names no file.
+	///
+	/// # Safety
+	///
+	/// Reads the proc's bytecode via [`Proc::bytecode`] and requires the same
+	/// safety invariants.
 	pub unsafe fn file_name(&self) -> Option<StringRef> {
 		let bytecode = self.bytecode();
 		if bytecode.len() < 2 || bytecode[0] != 0x84 {
@@ -144,6 +153,13 @@ impl Proc {
 		crate::bytecode_manager::set_bytecode(self, bytecode);
 	}
 
+	/// Registers all procs from ID `first` to the end of BYOND's proc table in
+	/// the library's lookup table (`find`, `overrides`).
+	///
+	/// Intended for procs added after initialization with
+	/// `runtime_tables::add_proc`. Each proc is appended to its path's override
+	/// list, so registering the same ID more than once duplicates the entry and
+	/// shifts subsequent override IDs.
 	/// Register proc table entries appended since `first` for name lookup.
 	pub fn add_to_table(first: raw_types::procs::ProcId) {
 		let mut id = first.0;
@@ -158,10 +174,28 @@ impl Proc {
 		unsafe { raw_types::misc::get_locals(*(*self.entry()).metadata.locals()).1 }
 	}
 
+	/// Returns a mutable pointer to this proc's current bytecode buffer and its
+	/// length in 32-bit words.
+	///
+	/// # Safety
+	///
+	/// Must be called on BYOND's thread for a proc ID valid in the current
+	/// world. Other procs may share the same bytecode buffer, so writing
+	/// through the pointer affects them unless `own_code` is called first. The
+	/// pointer remains valid only until the proc's bytecode is replaced or the
+	/// world shuts down.
 	pub unsafe fn bytecode_mut_ptr(&self) -> (*mut u32, u16) {
 		raw_types::misc::get_bytecode(*(*self.entry()).metadata.bytecode())
 	}
 
+	/// Returns this proc's current bytecode as a slice of at most 65,535 words.
+	///
+	/// # Safety
+	///
+	/// Requires the same invariants as [`Proc::bytecode_mut_ptr`]. In addition,
+	/// the returned slice's lifetime is not tied to the underlying buffer and
+	/// must not be held across [`Proc::set_bytecode`], DM execution, or
+	/// shutdown.
 	pub unsafe fn bytecode(&self) -> &[u32] {
 		let (ptr, count) = self.bytecode_mut_ptr();
 		std::slice::from_raw_parts(ptr, count as usize)
@@ -201,7 +235,7 @@ impl Proc {
 			}
 		}
 
-		Err(runtime!("External proc call failed"))
+		Err(runtime!("proc call failed"))
 	}
 
 	/// Exclude a debugger helper from source override numbering.

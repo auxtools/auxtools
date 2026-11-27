@@ -41,10 +41,7 @@ fn from_environment(value: Option<&str>) -> Result<Option<Duration>> {
 		Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => Ok(Some(Duration::from_secs_f64(seconds.min(super::args::MANY_SECONDS)))),
 		_ => Err(Failure(
 			1,
-			format!(
-				"invalid value '{}' for {}: expected a non-negative number of seconds.",
-				text, HOLD_MAX_VAR
-			)
+			format!("invalid value '{}' for {}: expected a non-negative number of seconds", text, HOLD_MAX_VAR)
 		))
 	}
 }

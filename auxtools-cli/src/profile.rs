@@ -166,8 +166,8 @@ pub fn listing(disassembly: &Disassembly, measured: &[ProfiledInstruction], mut 
 				offset: instruction.offset,
 				text: match (&instruction.text, &disassembly.error) {
 					(text, _) if !text.is_empty() => text.clone(),
-					(_, Some(error)) => format!("(not read: {})", error),
-					(_, None) => "(not read)".to_owned()
+					(_, Some(error)) => format!("(not disassembled: {})", error),
+					(_, None) => "(not disassembled)".to_owned()
 				},
 				line,
 				source: line.filter(|_| new_line).and_then(&mut source),
@@ -187,14 +187,14 @@ pub fn stop<E: From<String>>(ended: &'static str, listed: Option<usize>, mut ask
 		other => Err(E::from(format!("unexpected response from the world: {:?}", other)))
 	};
 	let ProfileReply::Totals(totals) = profile(ProfileRequest::Stop)?? else {
-		return Err(E::from("unexpected response from the world: no totals".to_owned()));
+		return Err(E::from("unexpected response from the world: missing profile totals".to_owned()));
 	};
 	let mut report = Report::new(totals, ended);
 	let listed = listed.map_or(report.procs.len(), |listed| listed.min(report.procs.len()));
 	let mut measured = vec![];
 	for at in &report.procs[..listed] {
 		let ProfileReply::Code(instructions) = profile(ProfileRequest::Code { code: at.code.code })?? else {
-			return Err(E::from("unexpected response from the world: no instructions".to_owned()));
+			return Err(E::from("unexpected response from the world: missing instruction counts".to_owned()));
 		};
 		measured.push(instructions);
 	}

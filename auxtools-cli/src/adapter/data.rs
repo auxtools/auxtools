@@ -204,7 +204,7 @@ impl Adapter {
 		};
 		breakpoint.watch = None;
 		breakpoint.message = Some(reason.to_owned());
-		self.out.console(format!("No longer watching {}: {}", breakpoint.name, reason));
+		self.out.console(format!("Data breakpoint ended for {}: {}", breakpoint.name, reason));
 		self.out.event(dap::BreakpointEvent {
 			reason: "changed".to_owned(),
 			breakpoint: breakpoint.shown()

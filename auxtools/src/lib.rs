@@ -57,6 +57,14 @@ pub use weak_value::WeakValue;
 #[cfg(windows)]
 extern crate winapi;
 
+/// Controls whether the library pins itself in memory on Windows.
+///
+/// Defaults to `true` unless `pin_dll!(false)` clears it at library load time.
+/// The value is read during the first initialization, when pinning takes
+/// permanent effect, and again during `auxtools_full_shutdown`, which calls
+/// `FreeLibrary` when this flag is `false`. Has no effect on Linux.
+///
+/// Configure this flag with `pin_dll!` rather than storing to it directly.
 pub static PIN_DLL: AtomicBool = AtomicBool::new(true);
 
 /// wrapper for [`byond_scan::MODULE_NAME`](byond_scan::MODULE_NAME)
@@ -142,7 +150,7 @@ fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), Stri
 		}
 
 		for cthook in inventory::iter::<hooks::CompileTimeHook> {
-			hooks::hook(cthook.proc_path, cthook.hook).map_err(|e| format!("Could not hook proc {}: {:?}", cthook.proc_path, e))?;
+			hooks::hook(cthook.proc_path, cthook.hook).map_err(|e| format!("could not hook proc {}: {:?}", cthook.proc_path, e))?;
 		}
 		set_init_level(InitLevel::None);
 	}
@@ -163,8 +171,8 @@ fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), Stri
 fn init_full() -> Result<(), String> {
 	version::init()?;
 	symbols::resolve_full()?;
-	pin_dll().map_err(|()| "Could not pin the library in memory.".to_owned())?;
-	hooks::init().map_err(|_| "Couldn't initialize proc hooking".to_owned())?;
+	pin_dll().map_err(|()| "could not pin the library in memory".to_owned())?;
+	hooks::init().map_err(|_| "could not initialize proc hooking".to_owned())?;
 	instruction_hook::init()?;
 
 	set_init_level(InitLevel::Partial);
@@ -389,7 +397,7 @@ byond_ffi_fn! { auxtools_full_shutdown(_input) {
 			);
 
 			if get_handle_res == 0 {
-				return Some("FAILED (Could not unpin the library from memory.)".to_owned())
+				return Some("FAILED (could not unpin the library from memory)".to_owned())
 			}
 
 			FreeLibrary(module);

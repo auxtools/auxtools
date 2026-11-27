@@ -604,7 +604,7 @@ fn arguments<T: for<'de> Deserialize<'de>>(arguments: Option<Value>) -> Result<T
 	let arguments = arguments
 		.filter(|arguments| !arguments.is_null())
 		.unwrap_or_else(|| Value::Object(Default::default()));
-	serde_json::from_value(arguments).map_err(|e| format!("bad arguments: {}", e))
+	serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {}", e))
 }
 
 fn json(value: impl serde::Serialize) -> Handled {
@@ -1676,7 +1676,7 @@ impl Adapter {
 	const fn not_connected(&self) -> &'static str {
 		match self.unavailable {
 			true => UNAVAILABLE,
-			false => "world is not running"
+			false => "not connected to the debug server"
 		}
 	}
 
@@ -2197,7 +2197,7 @@ impl Adapter {
 				}
 				Some(start) if start != offset => {
 					breakpoints.push(unverified(format!(
-						"{} is in the middle of an instruction of {}, which starts at {}",
+						"{} is inside an instruction in {} (the instruction starts at {})",
 						address_text(address),
 						proc.path,
 						address_text(aux::address(place, start))
@@ -2605,7 +2605,7 @@ impl Adapter {
 	/// Return exactly the requested disassembly window.
 	/// Mark entries outside the bytecode as invalid instructions.
 	fn disassemble(&mut self, args: DisassembleArguments) -> Handled {
-		let count = usize::try_from(args.instructionCount).map_err(|_| "the instruction count is negative".to_owned())?;
+		let count = usize::try_from(args.instructionCount).map_err(|_| "instruction count cannot be negative".to_owned())?;
 		let reference = parse_address(&args.memoryReference).ok_or_else(|| format!("invalid instruction address: {:?}", args.memoryReference))?;
 		// An address counts words, as the code does
 		let reference = reference.wrapping_add_signed(args.offset.unwrap_or(0));

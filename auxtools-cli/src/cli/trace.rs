@@ -218,7 +218,7 @@ pub fn trace(world: &mut World, args: &args::Trace) -> Result<()> {
 		}
 		let skipped = skipped.map(|n| format!(", {} skipped", n)).unwrap_or_default();
 		out.line(&format!(
-			"summary: {} {}{}; ended: {}",
+			"summary: {} {}{} (ended: {})",
 			hits,
 			if hits == 1 { "hit" } else { "hits" },
 			skipped,
@@ -232,7 +232,7 @@ pub fn trace(world: &mut World, args: &args::Trace) -> Result<()> {
 }
 
 /// Label for hits without a caller.
-const NO_CALLER: &str = "nothing (spawned, or called by the world)";
+const NO_CALLER: &str = "BYOND or spawn (no DM caller)";
 
 /// Lines to stdout, until it's closed
 struct Out {

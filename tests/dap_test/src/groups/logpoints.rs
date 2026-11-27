@@ -95,7 +95,7 @@ pub fn run() {
 	world.run_through("middle");
 	assert_eq!(
 		logged(&mut world, from, 2)[0],
-		"3 has {x.len: runtime error: Cannot read 3.len} and {nowhere_at_all: undefined var: nowhere_at_all}\n"
+		"3 has {x.len: runtime error: Cannot read 3.len} and {nowhere_at_all: undefined variable: nowhere_at_all}\n"
 	);
 	ok("inline evaluation errors");
 
@@ -105,7 +105,7 @@ pub fn run() {
 		set["message"]
 			.as_str()
 			.unwrap()
-			.starts_with("the message's {x +} doesn't compile: parser error: "),
+			.starts_with("log message expression {x +} failed to compile: parse error: "),
 		"{}",
 		set
 	);

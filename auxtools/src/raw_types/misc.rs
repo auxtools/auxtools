@@ -140,6 +140,16 @@ impl Parameters_V2 {
 	}
 }
 
+/// Points the misc bytecode entry `id` directly at `new_bytecode`
+/// (`new_bytecode_count` words) for every proc sharing that entry.
+///
+/// Performs no copying and does not manage the buffer's lifetime. The caller
+/// must ensure `new_bytecode` outlives every frame that may execute it. Prefer
+/// `Proc::set_bytecode` for managed bytecode replacement.
+///
+/// # Panics
+///
+/// Panics if BYOND raises an error for `id`.
 pub fn set_bytecode(id: BytecodeId, new_bytecode: *mut u32, new_bytecode_count: u16) {
 	let mut misc: *mut c_void = std::ptr::null_mut();
 	unsafe {

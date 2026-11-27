@@ -191,7 +191,7 @@ pub fn reboot(world: &mut World, args: &args::Reboot) -> Result<()> {
 			Ok(None) => {
 				return Err(Failure(
 					TIMED_OUT,
-					format!("timed out after {} waiting for the world to reboot.", seconds_text(timeout))
+					format!("timed out after {} waiting for the world to reboot", seconds_text(timeout))
 				))
 			}
 			Err(Failure(HUNG_UP, _)) => break,

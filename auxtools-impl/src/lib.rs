@@ -4,6 +4,13 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{spanned::Spanned, Lit};
 
+/// Internal attribute macro for BYOND structs whose memory layout varies across
+/// builds.
+///
+/// Generates a concrete struct for each build layout along with accessor
+/// methods that dispatch to the running build's layout. Intended solely for
+/// internal use within the `auxtools` crate, because its expansion refers to
+/// `crate::init` and `crate::inventory`.
 #[proc_macro_attribute]
 pub fn versioned(attr: TokenStream, item: TokenStream) -> TokenStream {
 	versioned_struct::versioned(attr.into(), item.into()).into()
@@ -16,6 +23,21 @@ fn extract_args(a: &syn::FnArg) -> &syn::PatType {
 	}
 }
 
+/// Registers a `fn() -> Result<(), String>` callback to run on BYOND's thread
+/// during library initialization.
+///
+/// Requires either `#[init(full)]` or `#[init(partial)]` (any other argument is
+/// a compile error):
+///
+/// - `full` runs on the first initialization after the library loads and on the
+///   first initialization after `auxtools_full_shutdown`, once the proc table
+///   is ready and `#[hook("...")]` hooks are installed, before `partial`
+///   callbacks.
+/// - `partial` runs on every initialization, once per world.
+///
+/// Execution order among callbacks of the same kind is unspecified. Returning
+/// `Err` or panicking fails initialization and causes `auxtools_init` to return
+/// `FAILED (message)` to DM.
 #[proc_macro_attribute]
 pub fn init(attr: TokenStream, item: TokenStream) -> TokenStream {
 	let init_type = syn::parse_macro_input!(attr as syn::Ident);
@@ -42,6 +64,13 @@ pub fn init(attr: TokenStream, item: TokenStream) -> TokenStream {
 	code.into()
 }
 
+/// Registers a `fn(&str)` callback to receive each BYOND runtime error message
+/// on BYOND's thread before BYOND handles it.
+///
+/// BYOND text macros are stripped from the message, and panics inside the
+/// callback are caught. Runtime errors caught internally by auxtools API calls
+/// (such as a failed `Value::get`) are not forwarded. Remains active from the
+/// first initialization until `auxtools_full_shutdown`.
 #[proc_macro_attribute]
 pub fn runtime_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 	let func = syn::parse_macro_input!(item as syn::ItemFn);
@@ -61,6 +90,13 @@ pub fn runtime_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 	code.into()
 }
 
+/// Registers a `fn()` callback to run on BYOND's thread on every world shutdown
+/// (`auxtools_shutdown`, `shut_down_with_world`, and
+/// `init_on_next_world_load`).
+///
+/// Runs while BYOND data and `byond_string!` strings are still valid, making it
+/// the place to drop any `Value`s kept by the library. Panics are caught and
+/// ignored.
 #[proc_macro_attribute]
 pub fn shutdown(_: TokenStream, item: TokenStream) -> TokenStream {
 	let func = syn::parse_macro_input!(item as syn::ItemFn);
@@ -80,6 +116,12 @@ pub fn shutdown(_: TokenStream, item: TokenStream) -> TokenStream {
 	code.into()
 }
 
+/// Registers a `fn()` callback to run during `auxtools_full_shutdown`, after
+/// world shutdown completes and detours are disabled.
+///
+/// Runs immediately before the library may be unloaded, making it the place to
+/// stop background threads spawned by the library. Panics are caught and
+/// ignored.
 #[proc_macro_attribute]
 pub fn full_shutdown(_: TokenStream, item: TokenStream) -> TokenStream {
 	let func = syn::parse_macro_input!(item as syn::ItemFn);

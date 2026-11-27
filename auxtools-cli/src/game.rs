@@ -93,7 +93,7 @@ impl Game {
 
 		let mut child = command
 			.spawn()
-			.map_err(|e| format!("couldn't start {}: {}", launch.program.display(), e))?;
+			.map_err(|e| format!("could not start {}: {}", launch.program.display(), e))?;
 		let pid = child.id();
 
 		#[cfg(windows)]
@@ -203,7 +203,7 @@ mod windows {
 			unsafe {
 				let job = CreateJobObjectW(null_mut(), null_mut());
 				if job.is_null() {
-					return Err(format!("couldn't make a job object: {}", std::io::Error::last_os_error()));
+					return Err(format!("could not create job object: {}", std::io::Error::last_os_error()));
 				}
 				let job = Self(job);
 

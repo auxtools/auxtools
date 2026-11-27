@@ -14,7 +14,7 @@ pub fn profile(world: &mut World, args: &args::Profile) -> Result<()> {
 	let named = !procs.is_empty();
 	world
 		.profile(ProfileRequest::Start { procs })
-		.map_err(|Failure(code, why)| Failure(code, format!("cannot start a profile: {}.", why.trim_end_matches('.'))))?;
+		.map_err(|Failure(code, why)| Failure(code, format!("cannot start profiling: {}", why)))?;
 	if args.duration.is_none() {
 		eprintln!("profiling until interrupted");
 	}

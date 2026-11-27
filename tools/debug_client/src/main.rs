@@ -19,8 +19,8 @@ use auxtools_cli::{
 const USAGE: &str = "\
 usage: debug_client WORLD.dmb --proc PATH --line N [options] [WATCH...]
 
-Starts the world in DreamDaemon with the debug library loaded into it, as the
-launcher does, and ends it when done.
+Starts the world in DreamDaemon with the debug library loaded the same way
+the launcher does, and ends the world when done.
 
   --byond DIR         where BYOND is (default: where it's installed)
   --library PATH      the debug library (default: the one next to debug_client)
@@ -33,8 +33,8 @@ launcher does, and ends it when done.
   --skip-inspect      go straight to the watches, without the requests VS Code sends on a stop
   --wait-file PATH    before the watches, wait until PATH exists (time to attach a debugger)
 
-A WATCH is evaluated in the top frame like a VS Code watch; prefix it with
-`repl:` to evaluate it like the debug console does.";
+A WATCH is evaluated in the top frame like a VS Code watch. Prefix it with
+`repl:` to evaluate it like the Debug Console does.";
 
 struct Options {
 	dmb: PathBuf,

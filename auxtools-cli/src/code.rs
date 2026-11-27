@@ -148,7 +148,7 @@ pub fn start(mut options: Options, out: Arc<Output>, inputs: mpsc::Sender<Input>
 			};
 			code.run();
 		})
-		.expect("couldn't start the code's thread");
+		.expect("could not start code watcher thread");
 	commands
 }
 
@@ -420,7 +420,7 @@ impl Code {
 		let new = match self.parse_with(selected.clone()) {
 			Ok(new) => new,
 			Err(e) => {
-				self.log(format!("couldn't read the code: {}", e));
+				self.log(format!("could not read source code: {}", e));
 				return self.not_reloaded(e);
 			}
 		};
@@ -501,7 +501,7 @@ impl Code {
 						return false;
 					}
 				}
-				Err(e) => self.log(format!("couldn't read the code: {}", e))
+				Err(e) => self.log(format!("could not read source code: {}", e))
 			}
 			watching.applied = None;
 			watching.edited_since_built.clear();
@@ -726,7 +726,7 @@ impl Code {
 	/// disconnected.
 	fn not_reloaded(&self, error: String) -> bool {
 		self.send(Event::NotReloaded {
-			summary: "couldn't read the code".to_owned(),
+			summary: "could not read source code".to_owned(),
 			errors: vec![error],
 			refused: vec![],
 			warnings: vec![]
@@ -1218,15 +1218,15 @@ impl Summary {
 			(
 				"added",
 				named(changes.new_vars.iter().map(|v| var(&v.type_path, &v.var)).collect()),
-				"vars"
+				"variables"
 			),
 			(
 				"updated declarations for",
 				named(changes.redeclared.iter().map(|v| var(&v.type_path, &v.var)).collect()),
-				"vars"
+				"variables"
 			),
 			(
-				"set the default of",
+				"updated defaults for",
 				named(
 					changes
 						.var_defaults
@@ -1235,15 +1235,15 @@ impl Summary {
 						.map(|d| var(&d.types[0], &d.var))
 						.collect()
 				),
-				"vars"
+				"variables"
 			),
 			(
 				"restored inherited defaults for",
 				named(changes.builtin_inherited.iter().map(|d| var(&d.types[0], &d.var)).collect()),
-				"vars"
+				"variables"
 			),
 			(
-				"rebuilt the init procs of",
+				"rebuilt init procs for",
 				named(changes.init_procs.iter().map(|i| i.type_path.clone()).collect()),
 				"types"
 			),
@@ -1538,7 +1538,7 @@ const NOT_THE_CODES: [&str; 4] = ["DM_VERSION", "DM_BUILD", "FILE_DIR", "SPACEMA
 /// Use the snapshot's defines and BYOND version; exclude built-in macros.
 pub fn macros(dme: &Path, options: &ParseOptions) -> Result<Vec<Macro>, String> {
 	let ctx = dreammaker::Context::default();
-	let mut pp = dreammaker::Preprocessor::new(&ctx, dme.to_owned()).map_err(|e| format!("couldn't read {}: {}", dme.display(), e))?;
+	let mut pp = dreammaker::Preprocessor::new(&ctx, dme.to_owned()).map_err(|e| format!("could not read {}: {}", dme.display(), e))?;
 	let mut prelude = String::from("#undef SPACEMAN_DMM\n");
 	if let Some((version, build)) = options.byond {
 		prelude += &format!(

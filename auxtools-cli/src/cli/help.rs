@@ -89,7 +89,7 @@ Exit codes:
 	},
 	Page {
 		path: &["list"],
-		brief: "List worlds with the debug library loaded",
+		brief: "List local worlds with the debug library loaded",
 		summary: "List local worlds with the debug library loaded.",
 		usage: "auxtools list [--json]",
 		arguments: "",
@@ -127,7 +127,7 @@ Exit codes:
 	},
 	Page {
 		path: &["stop"],
-		brief: "Request shutdown and wait for the process to exit",
+		brief: "Request graceful shutdown and wait for exit",
 		summary: "Request graceful shutdown and wait for the world process to exit.",
 		usage: "auxtools [--pid PID] stop [--timeout SECONDS] [--kill [--kill-timeout SECONDS]] [--json]",
 		arguments: "",
@@ -143,13 +143,14 @@ Exit codes:
   Success depends on the process exiting within the additional kill timeout.
 
 Output:
-  JSON contains pid, stopped, and killed. killed is true when the process was
-  terminated.
+  JSON contains pid, stopped, and killed (true when the process was forcibly
+  terminated).
 
 Exit codes:
-  0  Process exited.
+  0  World process exited.
   1  Shutdown or forced termination failed.
-  2  Graceful shutdown timed out without --kill, or forced termination timed out."
+  2  Graceful shutdown timed out without --kill, or forced termination timed
+     out."
 	},
 	Page {
 		path: &["reboot"],
@@ -174,7 +175,7 @@ Exit codes:
 	},
 	Page {
 		path: &["reconnect"],
-		brief: "Reconnect clients to load a changed skin or client script",
+		brief: "Reconnect clients to load a changed skin or script",
 		summary: "Reconnect clients to load the current skin and client script.",
 		usage: "auxtools [--pid PID] reconnect [--timeout SECONDS] [--json]",
 		arguments: "",
@@ -191,14 +192,14 @@ Output:
   rebooted.
 
 Exit codes:
-  0  Clients asked to reconnect, or the world rebooted and started running.
+  0  Clients were asked to reconnect, or the world rebooted and started.
   1  Request failed.
-  2  Reboot timed out.
-  3  World process exited instead of rebooting."
+  2  Reboot timed out, or the world did not respond in time.
+  3  World process exited or connection ended."
 	},
 	Page {
 		path: &["log"],
-		brief: "Read or follow world events",
+		brief: "Read or follow world journal events",
 		summary: "Read or follow the world's event journal.",
 		usage: "auxtools [--pid PID] log [OPTIONS]",
 		arguments: "",
@@ -219,12 +220,12 @@ Output:
 Exit codes:
   0  Entries were printed; with --follow, the world exited.
   1  Command failed.
-  2  The world did not respond in time."
+  2  World did not respond in time."
 	},
 	Page {
 		path: &["stack"],
-		brief: "Show stack frames",
-		summary: "Show stack frames, starting with the innermost frame.",
+		brief: "Show paused stack frames",
+		summary: "Show stack frames for a paused world, innermost first.",
 		usage: "auxtools [--pid PID] stack [--all] [--json]",
 		arguments: "",
 		sections: "Behavior:
@@ -236,7 +237,7 @@ Output:
 	},
 	Page {
 		path: &["vars"],
-		brief: "Show frame arguments, local variables, and optional globals",
+		brief: "Show frame arguments, locals, and optional globals",
 		summary: "Show arguments and local variables for a paused stack frame.",
 		usage: "auxtools [--pid PID] vars [--frame N] [--globals] [--json [--depth N]]",
 		arguments: "",
@@ -252,7 +253,7 @@ Output:
 	},
 	Page {
 		path: &["eval"],
-		brief: "Evaluate a DM expression",
+		brief: "Evaluate a DM expression or proc body",
 		summary: "Evaluate a DM expression in the world or a paused stack frame.",
 		usage: "auxtools [--pid PID] eval EXPRESSION [OPTIONS]
 auxtools [--pid PID] eval --file FILE [OPTIONS]
@@ -300,7 +301,7 @@ Exit codes:
 	},
 	Page {
 		path: &["proc"],
-		brief: "Show a proc's source location, definitions, and reload status",
+		brief: "Show a proc's location, definitions, and reload status",
 		summary: "Show a proc's source location, definition count, and hot reload status.",
 		usage: "auxtools [--pid PID] proc /PATH[#N] [--json]",
 		arguments: "/PATH  Proc path, with or without /proc/: /mob/proc/attack or /mob/attack.
@@ -308,12 +309,12 @@ Exit codes:
        (in list) and (var initializer).
 #N     Zero-based definition index. [default: 0]",
 		sections: "Output:
-  JSON contains proc, file, line, definitions, and reloaded.
-  reloaded is null, \"lines\", \"code\", or \"added\"."
+  JSON contains proc, file, line, definitions, and reloaded (null, \"lines\",
+  \"code\", or \"added\")."
 	},
 	Page {
 		path: &["disassemble"],
-		brief: "Show a proc's current bytecode",
+		brief: "Disassemble a proc's current bytecode",
 		summary: "Disassemble a proc's current bytecode.",
 		usage: "auxtools [--pid PID] disassemble /PATH[#N] [--json]",
 		arguments: "/PATH  Proc path, with or without /proc/, or a name stacks show for
@@ -327,8 +328,8 @@ Exit codes:
 	},
 	Page {
 		path: &["pause"],
-		brief: "Pause execution and report the location",
-		summary: "Pause execution and report the location.",
+		brief: "Pause execution and report the current location",
+		summary: "Pause execution and report the current location.",
 		usage: "auxtools [--pid PID] pause [--hold-max SECONDS] [--json]",
 		arguments: "",
 		sections: "Behavior:
@@ -342,7 +343,7 @@ Output:
 	},
 	Page {
 		path: &["continue"],
-		brief: "Resume execution",
+		brief: "Resume a paused world",
 		summary: "Resume execution of a paused world.",
 		usage: "auxtools [--pid PID] continue [--json]",
 		arguments: "",
@@ -429,7 +430,7 @@ Output:
 Exit codes:
   0  World paused, or was already paused.
   1  Setup or command failed.
-  2  Wait timed out.
+  2  Wait timed out, or the world did not respond in time.
   3  World exited or rebooted before a pause was reported.
 
 Examples:
@@ -482,11 +483,11 @@ Exit codes:
 	},
 	Page {
 		path: &["trace"],
-		brief: "Log or count breakpoint hits without pausing execution",
+		brief: "Log or count breakpoint hits without pausing",
 		summary: "Log or count breakpoint hits without pausing execution.",
 		usage: "auxtools [--pid PID] trace LOCATION... [OPTIONS]",
-		arguments: "LOCATION  FILE:LINE or /proc/path[#N]. Specify one or more locations.
-          #N selects a zero-based definition. [default: 0]",
+		arguments: "LOCATION  One or more FILE:LINE or /proc/path[#N] locations.
+          #N selects a zero-based definition index. [default: 0]",
 		sections: "Behavior:
   Default output identifies each hit location and caller.
   --by suppresses per-hit output and sorts counts from highest to lowest.
@@ -501,17 +502,17 @@ Input:
   Use @@ to represent a literal leading @.
 
 Exit codes:
-  0  Duration or hit limit reached, or interrupted with Ctrl-C.
+  0  Duration or hit limit reached, or interrupted with Ctrl+C.
   1  Setup or command failed.
-  2  The world did not respond in time.
+  2  World did not respond in time.
   3  World exited or rebooted."
 	},
 	Page {
 		path: &["profile"],
-		brief: "Profile instruction execution",
-		summary: "Measure execution time by proc, source line and instruction.",
+		brief: "Profile instruction execution time",
+		summary: "Measure execution time by proc, source line, and instruction.",
 		usage: "auxtools [--pid PID] profile [/PATH[#N]...] [OPTIONS]",
-		arguments: "/PATH  Proc to measure, with or without /proc/. Specify any number.
+		arguments: "/PATH  One or more procs to measure, with or without /proc/.
        [default: every proc]
 #N     Zero-based definition index. [default: 0]",
 		sections: "Behavior:
@@ -534,9 +535,9 @@ Output:
   Instruction listings are limited by --top unless proc paths are given.
 
 Exit codes:
-  0  Duration reached, or interrupted with Ctrl-C.
+  0  Duration reached, or interrupted with Ctrl+C.
   1  Setup or command failed.
-  2  The world did not respond in time.
+  2  World did not respond in time.
   3  World exited or rebooted."
 	},
 	Page {
@@ -544,7 +545,7 @@ Exit codes:
 		brief: "Check project source for known BYOND bugs",
 		summary: "Report known BYOND bugs detected in project source.",
 		usage: "auxtools check [DME] [OPTIONS]",
-		arguments: "DME  Path to the source project.
+		arguments: "DME  Path to the .dme project file.
      [default: the only .dme in the current directory]",
 		sections: "Behavior:
   Compile every proc and report known bugs affecting the selected BYOND build.
@@ -567,7 +568,7 @@ Exit codes:
 	},
 	Page {
 		path: &["dap"],
-		brief: "Serve the Debug Adapter Protocol over stdin and stdout",
+		brief: "Serve the Debug Adapter Protocol over stdio",
 		summary: "Serve the Debug Adapter Protocol over stdin and stdout.",
 		usage: "auxtools dap",
 		arguments: "",
@@ -1096,10 +1097,10 @@ mod tests {
 			text
 		);
 		let (_, eval) = commands.iter().find(|(path, _)| path == &["eval".to_owned()]).unwrap();
-		assert!(render(page(&["eval"]).unwrap(), eval).contains("\n  -f, --file FILE             Read the expression from FILE.\n"));
+		assert!(render(page(&["eval"]).unwrap(), eval).contains("\n  -f, --file FILE             Read the expression or statements from FILE.\n"));
 		let (_, launch) = commands.iter().find(|(path, _)| path == &["launch".to_owned()]).unwrap();
 		assert!(
-			render(page(&["launch"]).unwrap(), launch).contains("\n  -D NAME[=VALUE]   Set a preprocessor define used by hot reload. Repeatable.\n")
+			render(page(&["launch"]).unwrap(), launch).contains("\n  -D NAME[=VALUE]   Define a preprocessor macro for hot reload. Repeatable.\n")
 		);
 		let (_, trace) = commands.iter().find(|(path, _)| path == &["trace".to_owned()]).unwrap();
 		assert!(render(page(&["trace"]).unwrap(), trace).contains(

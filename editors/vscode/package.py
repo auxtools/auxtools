@@ -127,14 +127,14 @@ def main():
 		built = [ROOT / "target" / target / args.profile / name for name in names]
 		missing = [str(path) for path in built if not path.is_file()]
 		if missing:
-			print(f"warning: omitting {platform}; missing binaries: {', '.join(missing)}", file=sys.stderr)
+			print(f"warning: omitting {platform} due to missing binaries: {', '.join(missing)}", file=sys.stderr)
 			continue
 		for path in built:
 			files[f"extension/bin/{platform}/{path.name}"] = (stripped(path), True)
 		platforms += 1
 
 	if platforms == 0:
-		sys.exit("no platform binaries found; build a target before packaging")
+		sys.exit("no platform binaries found, so build a target before packaging")
 
 	with zipfile.ZipFile(out, "w") as archive:
 		add(archive, "extension.vsixmanifest", manifest(package))

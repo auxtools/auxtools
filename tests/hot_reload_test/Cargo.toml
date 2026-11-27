@@ -1,5 +1,6 @@
 [package]
 name = "hot_reload_test"
+description = "Integration test suite for hot reload"
 version = "0.1.0"
 publish = false
 authors.workspace = true

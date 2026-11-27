@@ -14,7 +14,7 @@ impl Server {
 					.map(|proc| Self::proc_info(proc).map(|info| info.code.proc))
 					.collect::<Result<_, _>>()?;
 				if profiler::running() {
-					return Err("another profile is running".to_owned());
+					return Err("another profile is already running".to_owned());
 				}
 				profiler::start((!only.is_empty()).then_some(only));
 				self.profiling = self.current;
@@ -41,7 +41,7 @@ impl Server {
 				}
 				profiler::instructions(bytecode)
 					.map(ProfileReply::Code)
-					.ok_or_else(|| format!("{} wasn't profiled", proc.path))
+					.ok_or_else(|| format!("{} was not profiled", proc.path))
 			}
 		}
 	}

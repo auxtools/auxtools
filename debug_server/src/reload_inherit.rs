@@ -10,7 +10,7 @@ fn places(var: &str) -> Result<Vec<BuiltinWrite>, String> {
 	[ConstValue::Null, ConstValue::Number(1.0), ConstValue::String("neuter".to_owned())]
 		.iter()
 		.find_map(|value| builtin_writes(var, value).ok())
-		.ok_or_else(|| format!("{}: built-in var is unsupported by hot reload", var))
+		.ok_or_else(|| format!("{}: built-in variable cannot be changed by hot reload", var))
 }
 
 /// A movable's bound and step vars are also kept worked out in a block at

@@ -17,7 +17,7 @@ static mut STDDEF: Option<&'static str> = None;
 fn stddef_init() -> Result<(), String> {
 	let symbol = find_export(STDDEF_FN_SYMBOL);
 	if symbol.is_null() {
-		return Err("Couldn't find STDDEF_FN in BYONDCORE".into());
+		return Err("could not find built-in definitions export in BYOND's core library".into());
 	}
 	let stddef_fn: extern "C" fn(*const c_void) -> *const c_char = unsafe { std::mem::transmute(symbol) };
 
@@ -28,7 +28,7 @@ fn stddef_init() -> Result<(), String> {
 				crate::macros::set_builtin(crate::macros::builtin_macros(str));
 			}
 			Err(e) => {
-				return Err(format!("Couldn't convert STDDEF from CStr: {}", e));
+				return Err(format!("BYOND built-in definitions are not valid UTF-8: {}", e));
 			}
 		}
 	}

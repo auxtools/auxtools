@@ -44,7 +44,7 @@ pub struct ProcMetadata {
 #[repr(C)]
 pub struct ProcInstance {
 	pub proc: ProcId,
-	/// The `proc_type` this frame was called with. `..()` reads it back.
+	/// The `proc_type` value this frame was invoked with, read back by `..()`.
 	pub flags: u8,
 	/// Which override of the proc this frame runs, 0 for the most derived.
 	pub override_depth: u8,
@@ -95,6 +95,18 @@ struct ProcInstanceInner {
 	pub time_to_resume: u32
 }
 
+/// BYOND's in-memory representation of a DM execution frame.
+///
+/// Because the struct layout varies across BYOND builds (for example, changing
+/// on Windows at `516.1668`), read and write fields through the generated
+/// `field()` and `field_mut()` accessor methods rather than direct field
+/// access.
+///
+/// Those accessors default to the newest layout until the library's first
+/// initialization has completed its init functions, so calling them during
+/// `WorldLoad::prepare` or inside `#[init(full)]` callbacks on the first
+/// initialization may read incorrect offsets. Pointers to an `ExecutionContext`
+/// are valid only on BYOND's thread while the frame is alive.
 // Linux is 148 bytes against Windows' 152: from `cache` onward the fields sit 4
 // bytes earlier, which is the same shape Windows had before 1668. So Linux
 // always takes the Pre1668 variant.

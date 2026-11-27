@@ -140,7 +140,7 @@ async function pickWorld(context) {
 	}
 	const items = worlds.map((world) => ({
 		label: world.dmb ? path.basename(world.dmb) : world.program,
-		description: `process ${world.pid}`,
+		description: `PID ${world.pid}`,
 		detail: world.dmb || world.args.join(" "),
 		pid: String(world.pid),
 	}));
@@ -244,7 +244,7 @@ class AdapterFactory {
 	createDebugAdapterDescriptor() {
 		const launcher = launcherPath(this.context);
 		if (!fs.existsSync(launcher)) {
-			vscode.window.showErrorMessage(`Auxtools launcher not found: ${launcher}.`);
+			vscode.window.showErrorMessage(`auxtools launcher not found at ${launcher}.`);
 			return undefined;
 		}
 		ensureExecutable(launcher);
@@ -257,7 +257,7 @@ async function attach() {
 	await vscode.debug.startDebugging(undefined, {
 		type: DEBUG_TYPE,
 		request: "attach",
-		name: "Attach to a world",
+		name: "Attach to Running World",
 	});
 }
 
@@ -341,10 +341,10 @@ async function reconnectClients(session) {
 		if (done && done.rebooted) {
 			vscode.window.showInformationMessage("Rebooting the DreamSeeker-hosted world.");
 		} else if (done) {
-			vscode.window.showInformationMessage(`Asked ${done.reconnected} ${done.reconnected === 1 ? "player" : "players"} to reconnect.`);
+			vscode.window.showInformationMessage(`Asked ${done.reconnected} ${done.reconnected === 1 ? "client" : "clients"} to reconnect.`);
 		}
 	} catch (e) {
-		vscode.window.showErrorMessage(`Could not reconnect the players: ${e.message}`);
+		vscode.window.showErrorMessage(`Could not reconnect clients: ${e.message}`);
 	}
 }
 
@@ -368,7 +368,7 @@ class Profiles {
 		this.running = new Set();
 		this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
 		this.item.text = "$(pulse) Profiling";
-		this.item.tooltip = "Stop profiling and open report";
+		this.item.tooltip = "Stop profiling and open the report.";
 		this.item.command = "auxtools.profile";
 		context.subscriptions.push(
 			this.item,
@@ -449,7 +449,7 @@ function showProfile(session, report) {
 
 // Offer the address when DreamSeeker is unavailable.
 async function offerAddress(address, started) {
-	const message = started ? `The world started at ${address}.` : `The world is at ${address}.`;
+	const message = started ? `The world started at ${address}.` : `The world is listening at ${address}.`;
 	if ((await vscode.window.showInformationMessage(message, "Copy Address")) === "Copy Address") {
 		await vscode.env.clipboard.writeText(address);
 	}
@@ -513,7 +513,7 @@ const STATES = {
 		tooltip: "Reboot required. See the Problems panel, then reboot.",
 		background: "statusBarItem.warningBackground",
 	},
-	failed: { text: "$(error) Hot reload failed", tooltip: "The last hot reload failed: ", background: "statusBarItem.errorBackground" },
+	failed: { text: "$(error) Hot reload failed", tooltip: "Last hot reload failed: ", background: "statusBarItem.errorBackground" },
 	off: { text: "$(circle-slash) Hot reload off", tooltip: "Hot reload is off: " },
 };
 
@@ -603,7 +603,7 @@ class ReloadStatus {
 			vscode.window.showWarningMessage(message, button, "Show Problems").then((action) => {
 				if (action === "Reboot") {
 					reboot(session);
-				} else if (action === "Rebuild and Restart") {
+				} else if (action === "Restart") {
 					vscode.commands.executeCommand("workbench.action.debug.restart");
 				} else if (action === "Show Problems") {
 					vscode.commands.executeCommand("workbench.actions.view.problems");
@@ -614,7 +614,7 @@ class ReloadStatus {
 		} else {
 			// Restart runs the configured preLaunchTask.
 			const first = problems.find((problem) => !rebootOnly(problem));
-			shown(`Rebuild required: ${first.message}${more}.`, "Rebuild and Restart");
+			shown(`Rebuild required: ${first.message}${more}.`, "Restart");
 		}
 	}
 
@@ -643,8 +643,8 @@ async function outdated(event) {
 	if (!files || !files.length || !notifies("outdated")) {
 		return;
 	}
-	const named = files.slice(0, 3).join(", ") + (files.length > 3 ? ` and ${files.length - 3} more` : "");
-	const message = `Files changed since the build: ${named}. Rebuild and restart to include any missing edits.`;
+	const named = files.slice(0, 3).join(", ") + (files.length > 3 ? `, and ${files.length - 3} more` : "");
+	const message = `Files changed since the last build: ${named}. Rebuild and restart to include any missing edits.`;
 	if ((await vscode.window.showWarningMessage(message, "Restart")) === "Restart") {
 		await vscode.commands.executeCommand("workbench.action.debug.restart");
 	}
@@ -658,12 +658,12 @@ async function worldMenu(status, profiles) {
 	}
 	const items = [
 		{ label: "$(person-add) Join with DreamSeeker", run: () => join(session) },
-		{ label: "$(plug) Reconnect players", run: () => reconnectClients(session) },
+		{ label: "$(plug) Reconnect Clients", run: () => reconnectClients(session) },
 		{ label: "$(debug-restart) Restart", detail: "Run preLaunchTask, then restart the world", run: () => vscode.commands.executeCommand("workbench.action.debug.restart") },
-		{ label: "$(refresh) Reboot world", run: () => reboot() },
+		{ label: "$(refresh) Reboot World", run: () => reboot() },
 		profiles.running.has(session.id)
-			? { label: "$(pulse) Stop profiling", detail: "Open report", run: () => profiles.toggle(session) }
-			: { label: "$(pulse) Profile instructions", run: () => profiles.toggle(session) },
+			? { label: "$(pulse) Stop Profiling", detail: "Open report", run: () => profiles.toggle(session) }
+			: { label: "$(pulse) Profile Instructions", run: () => profiles.toggle(session) },
 		{ label: "$(debug-stop) Stop", run: () => vscode.commands.executeCommand("workbench.action.debug.stop") },
 	];
 	if (["refused", "held"].includes(status.state(session).state)) {
@@ -682,8 +682,8 @@ async function skinReloaded(event) {
 		return;
 	}
 	const message = hosted
-		? `Skin ${file} updated. Reboot the world to update DreamSeeker's interface.`
-		: `Skin ${file} reloaded. ${clients} connected ${clients === 1 ? "player needs" : "players need"} to reconnect to load the new interface.`;
+		? `Skin ${file} reloaded. Reboot the world to update DreamSeeker's interface.`
+		: `Skin ${file} reloaded. ${clients} connected ${clients === 1 ? "client needs" : "clients need"} to reconnect to load the new interface.`;
 	const action = hosted ? "Reboot" : "Reconnect";
 	if ((await vscode.window.showInformationMessage(message, action)) === action) {
 		await reconnectClients(event.session);
@@ -697,8 +697,8 @@ async function scriptReloaded(event) {
 		return;
 	}
 	const message = hosted
-		? "Client script updated. Reboot the world to update DreamSeeker's script."
-		: `Client script reloaded. ${clients} connected ${clients === 1 ? "player needs" : "players need"} to reconnect to load the new script.`;
+		? "Client script reloaded. Reboot the world to update DreamSeeker's script."
+		: `Client script reloaded. ${clients} connected ${clients === 1 ? "client needs" : "clients need"} to reconnect to load the new script.`;
 	const action = hosted ? "Reboot" : "Reconnect";
 	if ((await vscode.window.showInformationMessage(message, action)) === action) {
 		await reconnectClients(event.session);

@@ -81,7 +81,7 @@ pub fn run() {
 	world.run("reboot");
 	world.wait_count("dap: world/New", 2);
 	world.reloaded("client script");
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	assert_eq!(script(&mut world).2, "<style>x {}</style>\n\n<style>third {}</style>");
 	ok("client script reload after reboot");
 

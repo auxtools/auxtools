@@ -64,7 +64,7 @@ impl Adapter {
 	/// Return none when no clients are connected.
 	pub(super) fn waiting_clients(&self, clients: u32, hosted: bool, what: &str) -> Option<String> {
 		// VS Code offers the action; CLI callers need the command.
-		let how = if self.out.to_client() { "" } else { " Run auxtools reconnect." };
+		let how = if self.out.to_client() { "" } else { " Run 'auxtools reconnect'." };
 		match (clients, hosted) {
 			(0, _) => None,
 			(_, true) => Some(format!("Reboot the DreamSeeker-hosted world to load the new {}.{}", what, how)),

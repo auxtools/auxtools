@@ -46,7 +46,7 @@ pub fn prepare(resources: &[HotReloadResource]) -> Result<Vec<Prepared>, Vec<Str
 				id,
 				replaces: resource.ids.iter().copied().filter(|&old| old != id).collect()
 			}),
-			None => errors.push(format!("resource reload: couldn't read {}", resource.path))
+			None => errors.push(format!("resource reload: could not read {}", resource.path))
 		}
 	}
 	if errors.is_empty() {

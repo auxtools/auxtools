@@ -65,14 +65,14 @@ pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
 	let program = match &args.server {
 		Some(name) => serde_json::from_value::<Server>(json!(name)).map_err(|_| {
 			format!(
-				"invalid value '{}' for --server: expected dreamdaemon, dreamdaemon-gui, or dreamseeker.",
+				"invalid value '{}' for --server: expected dreamdaemon, dreamdaemon-gui, or dreamseeker",
 				name
 			)
 		})?,
 		None => Server::default_for_platform()
 	};
 	if args.port.is_some() && program == Server::DreamSeeker && cfg!(windows) {
-		return Err("--port cannot be used with DreamSeeker. Use --server dreamdaemon.".into());
+		return Err("--port cannot be used with DreamSeeker. Use --server dreamdaemon (or dreamdaemon-gui).".into());
 	}
 	let options = Options {
 		dmb,
@@ -96,7 +96,7 @@ pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
 }
 
 fn absolute(path: &Path) -> Result<PathBuf> {
-	std::path::absolute(path).map_err(|e| format!("invalid path {}: {}.", path.display(), e).into())
+	std::path::absolute(path).map_err(|e| format!("invalid path {}: {}", path.display(), e).into())
 }
 
 /// Where what's printed goes
@@ -163,7 +163,7 @@ fn run(options: &Options, detached: bool) -> Result<()> {
 			} else {
 				File::create(log)
 			};
-			Printer::File(Mutex::new(file.map_err(|e| format!("cannot write {}: {}.", log.display(), e))?))
+			Printer::File(Mutex::new(file.map_err(|e| format!("cannot write {}: {}", log.display(), e))?))
 		}
 		None => Printer::Terminal
 	});
@@ -240,9 +240,9 @@ fn run(options: &Options, detached: bool) -> Result<()> {
 	}
 	match outcome.exit_code {
 		Some(0) => Ok(()),
-		Some(code) if code >= 0 => Err(Failure(WORLD_FAILED, format!("the world exited with code {}.", code))),
+		Some(code) if code >= 0 => Err(Failure(WORLD_FAILED, format!("the world exited with code {}", code))),
 		// Killed, or ended by a second interrupt
-		_ => Err(Failure(WORLD_FAILED, "the world was terminated.".to_owned()))
+		_ => Err(Failure(WORLD_FAILED, "the world was terminated".to_owned()))
 	}
 }
 
@@ -265,7 +265,7 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 	let log = options.log.clone().unwrap_or_else(|| default_log(&options.dmb));
 	let stderr = File::create(&log)
 		.and_then(|_| OpenOptions::new().append(true).open(&log))
-		.map_err(|e| format!("cannot write {}: {}.", log.display(), e))?;
+		.map_err(|e| format!("cannot write {}: {}", log.display(), e))?;
 
 	let mut args: Vec<std::ffi::OsString> = vec!["launch".into(), options.dmb.clone().into()];
 	let mut flag = |name: &str, value: Option<std::ffi::OsString>| {
@@ -291,10 +291,10 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 		args.extend(theirs.iter().map(Into::into));
 	}
 
-	let program = std::env::current_exe().map_err(|e| format!("cannot find the auxtools program: {}.", e))?;
+	let program = std::env::current_exe().map_err(|e| format!("cannot locate auxtools executable: {}", e))?;
 	let mut command = Command::new(program);
 	command.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(stderr);
-	let mut launcher = background::spawn(&mut command).map_err(|e| format!("cannot start the launcher in the background: {}.", e))?;
+	let mut launcher = background::spawn(&mut command).map_err(|e| format!("cannot start background launcher: {}", e))?;
 	let launcher_pid = launcher.id();
 
 	// The first line reports readiness; EOF indicates launcher exit.

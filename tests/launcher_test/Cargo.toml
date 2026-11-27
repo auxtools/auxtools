@@ -1,5 +1,6 @@
 [package]
 name = "launcher_test"
+description = "Integration test suite for the launcher and CLI"
 version = "0.1.0"
 publish = false
 authors.workspace = true

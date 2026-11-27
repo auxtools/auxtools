@@ -161,10 +161,10 @@ fn eval_failures(pid: &str, code: &Path) {
 		"\"first\"\n"
 	);
 	let said = fails(pid, &["eval", "/datum/twice::nope()"]);
-	assert!(said.contains("/datum/twice has no proc called nope"), "unexpected eval output: {}", said);
+	assert!(said.contains("/datum/twice has no proc named nope"), "unexpected eval output: {}", said);
 	// Reject modified types that would persist in runtime tables.
 	let said = fails(pid, &["eval", "new /datum/twice{tag = \"x\"}()"]);
-	assert!(said.contains("use new and assign the vars"), "unexpected eval output: {}", said);
+	assert!(said.contains("use `new` and assign the variables"), "unexpected eval output: {}", said);
 	println!("ok: eval's type proc references");
 
 	// Long loops yield in the background, so synchronous eval loses the result.
@@ -195,8 +195,8 @@ fn eval_failures(pid: &str, code: &Path) {
 		ran.err
 	);
 	for (args, said) in [
-		(&["eval", "1 +"][..], "parser error: "),
-		(&["eval", "nothing_called_this"][..], "undefined var: nothing_called_this"),
+		(&["eval", "1 +"][..], "parse error: "),
+		(&["eval", "nothing_called_this"][..], "undefined variable: nothing_called_this"),
 		(&["eval", "--frame", "9", "1"][..], "frame 9 does not exist: the paused stack has "),
 		(&["eval"][..], "eval requires an expression: EXPRESSION, --file FILE, or - for stdin.")
 	] {
@@ -258,7 +258,7 @@ fn from_files(pid: &str, dir: &Path) {
 	// Two @s are one, and no file
 	let said = fails(pid, &["wait", "pause", "--break", "/proc/value", "--if", &format!("@@{}", never)]);
 	assert!(
-		said.starts_with("cannot set a breakpoint at /proc/value: the condition doesn't compile"),
+		said.starts_with("cannot set breakpoint at /proc/value: condition failed to compile"),
 		"unexpected wait output: {}",
 		said
 	);
@@ -302,7 +302,7 @@ fn procs(pid: &str, code: &Path) {
 	assert_eq!(
 		printed,
 		format!(
-			"/value  attach_host.dm:{}\ndefinitions: 1\nreloaded: code (new code)\n",
+			"/value  attach_host.dm:{}\ndefinitions: 1\nreloaded: code (bytecode replaced)\n",
 			line_of(code, "\treturn 2")
 		)
 	);
@@ -332,10 +332,10 @@ fn procs(pid: &str, code: &Path) {
 			&["proc", "/datum/twice/act#2"][..],
 			"/datum/twice/act has 2 definitions, #0 to #1: there's no #2"
 		),
-		(&["proc", "value"][..], "invalid proc path 'value': expected /PATH[#N]."),
+		(&["proc", "value"][..], "invalid proc path 'value': expected /PATH[#N]"),
 		(
 			&["proc", "/value#x"][..],
-			"invalid definition index 'x' in '/value#x': expected a non-negative integer."
+			"invalid definition index 'x' in '/value#x': expected a non-negative integer"
 		),
 		(
 			&["proc"][..],
@@ -402,7 +402,7 @@ fn where_breakpoints_bound(pid: &str, code: &Path) {
 		ran.err,
 		format!(
 			"breakpoint set at /fail_in  attach_host.dm:{}\nbreakpoint set at /datum/twice/act#1  attach_host.dm:{}\nerror: timed out after 1 \
-			 second waiting for the world to pause.\n",
+			 second waiting for the world to pause\n",
 			line_of(code, "\tvar/got = fail_deeper(n)"),
 			line_of(code, "\t. = ..()")
 		)
@@ -436,18 +436,18 @@ fn where_breakpoints_bound(pid: &str, code: &Path) {
 	let nowhere = [
 		(
 			"nowhere.dm:3",
-			"cannot set a breakpoint at nowhere.dm:3: the world has no code from a file named nowhere.dm.".to_owned()
+			"cannot set breakpoint at nowhere.dm:3: the world has no code from nowhere.dm".to_owned()
 		),
 		(
 			"attach_host.dm:9999",
 			format!(
-				"cannot set a breakpoint at attach_host.dm:9999: attach_host.dm has no code after line {}.",
+				"cannot set breakpoint at attach_host.dm:9999: attach_host.dm has no code after line {}",
 				last
 			)
 		),
 		(
 			"/proc/nothing_called_this",
-			"cannot set a breakpoint at /proc/nothing_called_this: the world has no proc /proc/nothing_called_this".to_owned()
+			"cannot set breakpoint at /proc/nothing_called_this: the world has no proc /proc/nothing_called_this".to_owned()
 		),
 		(
 			"/value#2",
@@ -701,7 +701,7 @@ fn on_an_object(pid: &str) {
 		fails(pid, &["eval", "--src", &bare, "--frame", "0", "count"]),
 		"--frame and --src cannot be used together."
 	);
-	assert!(fails(pid, &["eval", "--src", &bare, "nothing_called_this"]).starts_with("undefined var: nothing_called_this"));
+	assert!(fails(pid, &["eval", "--src", &bare, "nothing_called_this"]).starts_with("undefined variable: nothing_called_this"));
 	println!("ok: invalid object reference diagnostics");
 }
 
@@ -723,7 +723,7 @@ fn eval_becomes(pid: &str, expression: &str, wanted: &str) {
 fn macros(pid: &str, code: &Path) {
 	assert_eq!(run(pid, &["eval", "DOUBLE_IT(ANSWER) + 1"], 0).out, "85\n");
 	assert_eq!(run(pid, &["eval", "\"[ANSWER]!\""], 0).out, "\"42!\"\n");
-	assert!(fails(pid, &["eval", "GONE"]).starts_with("undefined var: GONE"));
+	assert!(fails(pid, &["eval", "GONE"]).starts_with("undefined variable: GONE"));
 	let reference = run(pid, &["eval", "ref(held)"], 0).out.trim().trim_matches('"').to_owned();
 	assert_eq!(run(pid, &["eval", "--src", &reference, "DOUBLE_IT(count)"], 0).out, "6\n");
 	println!("ok: source macro expansion and undefinition");
@@ -773,7 +773,7 @@ fn macros(pid: &str, code: &Path) {
 	eval_becomes(pid, "ANSWER + GONE", "45");
 	std::fs::write(code, &source).unwrap();
 	eval_becomes(pid, "ANSWER", "42");
-	assert!(fails(pid, &["eval", "GONE"]).starts_with("undefined var: GONE"));
+	assert!(fails(pid, &["eval", "GONE"]).starts_with("undefined variable: GONE"));
 	println!("ok: macro updates after reload");
 }
 
@@ -844,7 +844,7 @@ fn spawned(pid: &str, code: &Path) {
 	assert_eq!(ran.out, "1\n", "unexpected eval output: {}", ran.out);
 	if build < 1689 {
 		assert!(
-			ran.err.starts_with("warning: line 2: pick() ends with a zero-weight entry"),
+			ran.err.starts_with("warning: line 2: `pick()` ends with a zero-weight entry"),
 			"unexpected eval output: {}",
 			ran.err
 		);
@@ -987,7 +987,7 @@ fn spawned(pid: &str, code: &Path) {
 		ran.out,
 		ran.err
 	);
-	assert!(fails(pid, &["eval", "--spawn", "1 +"]).starts_with("parser error: "));
+	assert!(fails(pid, &["eval", "--spawn", "1 +"]).starts_with("parse error: "));
 	assert!(fails(pid, &["eval", "--spawn", "--src", "[0x2100ffff]", "1"]).starts_with("object not found: [0x2100ffff]"));
 	assert_eq!(fails(pid, &["eval", "--wait", "1"]), "--wait requires --spawn.");
 	assert_eq!(fails(pid, &["eval", "--spawn", "--timeout", "1", "1"]), "--timeout requires --wait.");

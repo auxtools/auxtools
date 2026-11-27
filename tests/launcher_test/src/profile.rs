@@ -128,7 +128,7 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	println!("ok: JSON and HTML profiles");
 
 	// Reject concurrent profiles and discard profiles on client exit.
-	let busy = "error: cannot start a profile: another profile is running.\n";
+	let busy = "error: cannot start profiling: another profile is already running\n";
 	// Retry if the competing profile starts first.
 	let left_running = |args: &[&str]| {
 		for wait in 1..=10 {
@@ -148,9 +148,9 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 		(&["profile", "--for", "1"][..], busy),
 		(
 			&["profile", "/proc/nothing_called_this"],
-			"error: cannot start a profile: the world has no proc /proc/nothing_called_this.\n"
+			"error: cannot start profiling: the world has no proc /proc/nothing_called_this\n"
 		),
-		(&["profile", "tick"], "error: invalid proc path 'tick': expected /PATH[#N].\n")
+		(&["profile", "tick"], "error: invalid proc path 'tick': expected /PATH[#N]\n")
 	] {
 		assert_eq!(run(pid, args, 1), said, "{:?}", args);
 	}

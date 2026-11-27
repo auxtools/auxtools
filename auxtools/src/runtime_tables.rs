@@ -34,7 +34,7 @@ impl ProcEntryWords {
 	pub const SETTINGS: usize = 6;
 }
 
-/// No proc, string or misc entry.
+/// Sentinel value (`0xFFFF`) indicating an absent proc, string, or misc entry.
 pub const NONE: u32 = 0xFFFF;
 
 /// One type's proc names, sorted by key.
@@ -58,6 +58,12 @@ pub struct ProcNameBucket {
 	pub no_link: u8
 }
 
+/// Byte offsets of fields within a BYOND type table entry, for use with
+/// `type_field`, `set_type_field`, `set_type_half`, and `set_type_byte`.
+///
+/// Fields are 32 bits wide unless noted otherwise. An entry is `0x8C` bytes on
+/// Linux and `0x90` bytes on Windows before build 1641, growing to `0x94` and
+/// `0x98` bytes from build 1641 onward.
 /// Byte offsets into a type table entry. The same on Windows and Linux.
 pub mod type_fields {
 	pub const PATH: usize = 0x00;
@@ -528,7 +534,7 @@ fn resolve() -> Result<Functions, String> {
 		use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
 		let module = GetModuleHandleA(c"ucrtbase.dll".as_ptr());
 		if module.is_null() {
-			return Err("Couldn't find ucrtbase.dll".to_owned());
+			return Err("could not find ucrtbase.dll".to_owned());
 		}
 		let realloc = GetProcAddress(module, c"realloc".as_ptr());
 		if realloc.is_null() {
@@ -1039,6 +1045,16 @@ pub fn proc_entry(id: ProcId) -> Option<ProcEntryWords> {
 	}
 }
 
+/// Writes `value` to word index `word` (`0`–`10`, see [`ProcEntryWords`]) of
+/// the proc entry for `id`.
+///
+/// Does nothing if `id` does not exist in BYOND's proc table. Does not adjust
+/// reference counts, so the caller is responsible for managing references to
+/// any strings or misc entries named by the old and new words.
+///
+/// # Panics
+///
+/// Panics if `word` is greater than `10`.
 /// Overwrites one word of a proc's table entry.
 pub fn set_proc_entry_word(id: ProcId, word: usize, value: u32) {
 	let mut entry: *mut crate::raw_types::procs::ProcEntry = std::ptr::null_mut();
@@ -1061,7 +1077,7 @@ pub fn set_proc_entry(id: ProcId, words: &ProcEntryWords) {
 pub fn add_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 	let id = (functions()?.procdef_add)(entry);
 	if id == NONE {
-		return Err("BYOND couldn't add the proc".to_owned());
+		return Err("BYOND could not add the proc".to_owned());
 	}
 	recache_path(entry.0[ProcEntryWords::PATH], [PROC_VALUE, id]);
 	Ok(ProcId(id))
@@ -1120,7 +1136,7 @@ pub fn misc_words(id: u32) -> Option<Vec<u32>> {
 /// BYOND shares entries with the same words.
 pub fn intern_misc(words: &[u32]) -> Result<u32, String> {
 	if words.len() > u16::MAX as usize {
-		return Err(format!("{} words is too many for a misc entry", words.len()));
+		return Err(format!("misc entry length of {} words exceeds the 65535-word limit", words.len()));
 	}
 	let functions = functions()?;
 	let id = match functions.misc_intern {
@@ -1129,13 +1145,13 @@ pub fn intern_misc(words: &[u32]) -> Result<u32, String> {
 			// allocated as BYOND allocates them, so it can free them
 			let entry = (functions.crt_realloc)(std::ptr::null_mut(), 12) as *mut u8;
 			if entry.is_null() {
-				return Err("out of memory making a misc entry".to_owned());
+				return Err("out of memory allocating a misc entry".to_owned());
 			}
 			let mut data = std::ptr::null_mut::<u32>();
 			if !words.is_empty() {
 				data = (functions.crt_realloc)(std::ptr::null_mut(), words.len() * 4) as *mut u32;
 				if data.is_null() {
-					return Err("out of memory making a misc entry".to_owned());
+					return Err("out of memory allocating a misc entry".to_owned());
 				}
 				std::ptr::copy_nonoverlapping(words.as_ptr(), data, words.len());
 			}
@@ -1147,7 +1163,7 @@ pub fn intern_misc(words: &[u32]) -> Result<u32, String> {
 		}
 	};
 	if id == NONE {
-		return Err("BYOND couldn't make the misc entry".to_owned());
+		return Err("BYOND could not create the misc entry".to_owned());
 	}
 	misc::add_ref(&misc::MiscId::from_raw(id));
 	Ok(id)
@@ -1161,7 +1177,7 @@ fn type_entry(type_id: u32) -> Result<*mut u8, String> {
 	let functions = functions()?;
 	unsafe {
 		if type_id >= *functions.type_count {
-			return Err(format!("there's no type {}", type_id));
+			return Err(format!("type ID {} does not exist", type_id));
 		}
 		Ok((*functions.type_table).add(type_id as usize * functions.type_stride))
 	}
@@ -1308,7 +1324,7 @@ pub fn forget_type_appearance(type_id: u32) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
 		if type_id >= *functions.type_count {
-			return Err(format!("there's no type {}", type_id));
+			return Err(format!("type ID {} does not exist", type_id));
 		}
 		*(*functions.appearance_cache).add(type_id as usize) = NONE;
 	}
@@ -1320,7 +1336,7 @@ fn name_map(type_id: u32) -> Result<*mut ProcNameMap, String> {
 	let functions = functions()?;
 	unsafe {
 		if type_id >= *functions.type_count {
-			return Err(format!("there's no type {}", type_id));
+			return Err(format!("type ID {} does not exist", type_id));
 		}
 		Ok((*functions.name_maps).add(type_id as usize))
 	}
@@ -1406,7 +1422,7 @@ fn set_named_procs_in(map: *mut ProcNameMap, key: u32, procs: &[u32]) -> Result<
 
 		let ids = (functions.alloc_shared)(procs.len().max(1) * 4) as *mut u32;
 		if ids.is_null() {
-			return Err("out of memory for a proc name map entry".to_owned());
+			return Err("out of memory allocating a proc name map entry".to_owned());
 		}
 		std::ptr::copy_nonoverlapping(procs.as_ptr(), ids, procs.len());
 
@@ -1425,7 +1441,7 @@ pub fn set_global_value(var_id: u32, value: crate::Value) -> Result<(), String> 
 	let functions = functions()?;
 	unsafe {
 		if var_id >= variable_count() {
-			return Err(format!("var ID {} does not exist", var_id));
+			return Err(format!("variable ID {} does not exist", var_id));
 		}
 		let slot = (*functions.global_values as *mut crate::raw_types::values::Value).add(var_id as usize);
 		drop(crate::Value::from_raw_owned(*slot));
@@ -1441,7 +1457,7 @@ pub fn set_global_words(var_id: u32, tag: u8, data: u32) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
 		if var_id >= variable_count() {
-			return Err(format!("var ID {} does not exist", var_id));
+			return Err(format!("variable ID {} does not exist", var_id));
 		}
 		let slot = (*functions.global_values as *mut [u32; 2]).add(var_id as usize);
 		drop(crate::Value::from_raw_owned(*(slot as *const crate::raw_types::values::Value)));
@@ -1450,12 +1466,21 @@ pub fn set_global_words(var_id: u32, tag: u8, data: u32) -> Result<(), String> {
 	Ok(())
 }
 
+/// Returns the raw value stored in the global variable slot for `var_id`
+/// without taking a BYOND reference.
+///
+/// Pass the result to `Value::from_raw` to obtain a reference-counted `Value`.
+///
+/// # Errors
+///
+/// Returns an error if `var_id` does not exist or if required runtime table
+/// symbols are unavailable.
 /// The value of a var id's global slot (see `Functions::global_values`).
 pub fn global_value(var_id: u32) -> Result<crate::raw_types::values::Value, String> {
 	let functions = functions()?;
 	unsafe {
 		if var_id >= variable_count() {
-			return Err(format!("var ID {} does not exist", var_id));
+			return Err(format!("variable ID {} does not exist", var_id));
 		}
 		Ok(*(*functions.global_values).add(var_id as usize))
 	}
@@ -1466,8 +1491,8 @@ pub fn global_value(var_id: u32) -> Result<crate::raw_types::values::Value, Stri
 pub fn add_global_vars(vars: &[(u32, u32)]) -> Result<(), String> {
 	let global_vars = functions()?.global_vars.clone()?;
 	let current = unsafe { *global_vars };
-	let mut words = misc_words(current).ok_or_else(|| format!("global-var misc entry {} is missing", current))?;
-	let name = |var_id: u32| variable_name(var_id).ok_or_else(|| format!("var ID {} does not exist", var_id));
+	let mut words = misc_words(current).ok_or_else(|| format!("global-variable misc entry {} is missing", current))?;
+	let name = |var_id: u32| variable_name(var_id).ok_or_else(|| format!("variable ID {} does not exist", var_id));
 	for &(var_id, flags) in vars {
 		if words.chunks(2).any(|pair| pair[0] == var_id) {
 			continue;
@@ -1492,7 +1517,7 @@ pub fn add_global_vars(vars: &[(u32, u32)]) -> Result<(), String> {
 /// Var IDs listed by `global.vars`.
 pub fn global_var_ids() -> Result<Vec<u32>, String> {
 	let current = unsafe { *functions()?.global_vars.clone()? };
-	let words = misc_words(current).ok_or_else(|| format!("global-var misc entry {} is missing", current))?;
+	let words = misc_words(current).ok_or_else(|| format!("global-variable misc entry {} is missing", current))?;
 	Ok(words.chunks(2).map(|pair| pair[0]).collect())
 }
 
@@ -1520,14 +1545,14 @@ pub fn add_variable(name: u32, tag: u8, data: u32) -> Result<u32, String> {
 
 		let names = (functions.crt_realloc)(*entries as *mut c_void, (count + 1) * 4) as *mut u32;
 		if names.is_null() {
-			return Err("out of memory growing the var names".to_owned());
+			return Err("out of memory growing the variable names".to_owned());
 		}
 		*entries = names as *const crate::raw_types::strings::StringId;
 
 		let slots = functions.global_values as *mut *mut [u32; 2];
 		let values = (functions.crt_realloc)(*slots as *mut c_void, (count + 1) * 8) as *mut [u32; 2];
 		if values.is_null() {
-			return Err("out of memory growing the var values".to_owned());
+			return Err("out of memory growing the variable values".to_owned());
 		}
 		*slots = values;
 
@@ -1550,7 +1575,7 @@ pub fn add_type(parent: u32, path: u32) -> Result<u32, String> {
 	unsafe {
 		let count = *functions.type_count as usize;
 		if parent as usize >= count {
-			return Err(format!("there's no type {}", parent));
+			return Err(format!("type ID {} does not exist", parent));
 		}
 		if count + 1 >= NONE as usize {
 			return Err("BYOND type ID limit reached".to_owned());
@@ -1736,7 +1761,7 @@ pub fn plan_name_map(type_id: u32, entries: &[(u32, Vec<u32>, u8)]) -> Result<Na
 	unsafe {
 		let buckets = (functions.crt_realloc)(std::ptr::null_mut(), size) as *mut ProcNameBucket;
 		if buckets.is_null() {
-			return Err("out of memory for a proc name map".to_owned());
+			return Err("out of memory allocating a proc name map".to_owned());
 		}
 		let mut plan = NameMapPlan {
 			map,
@@ -1747,7 +1772,7 @@ pub fn plan_name_map(type_id: u32, entries: &[(u32, Vec<u32>, u8)]) -> Result<Na
 		for (key, ids, no_link) in entries {
 			let buffer = (functions.alloc_shared)(ids.len() * 4) as *mut u32;
 			if buffer.is_null() {
-				return Err("out of memory for a proc name map entry".to_owned());
+				return Err("out of memory allocating a proc name map entry".to_owned());
 			}
 			std::ptr::copy_nonoverlapping(ids.as_ptr(), buffer, ids.len());
 			buckets.add(plan.count as usize).write(ProcNameBucket {
@@ -1814,7 +1839,7 @@ pub fn plan_parents(changes: &[(u32, u32)]) -> Result<ParentPlan, String> {
 	let count = type_count()? as usize;
 	for &(type_id, parent) in changes {
 		if type_id as usize >= count || parent as usize >= count {
-			return Err(format!("type {} or parent {} does not exist", type_id, parent));
+			return Err(format!("type ID {} or parent ID {} does not exist", type_id, parent));
 		}
 	}
 	unsafe {
@@ -1901,7 +1926,7 @@ pub fn copy_type_matrix(type_id: u32, from: u32, offset: usize) -> Result<(), St
 	let size = match offset {
 		TRANSFORM => 6 * 4,
 		COLOR_MATRIX => 20 * 4,
-		_ => return Err(format!("+{:#x} isn't a type's matrix", offset))
+		_ => return Err(format!("offset +{:#x} is not a type matrix", offset))
 	};
 	let functions = functions()?;
 	unsafe {

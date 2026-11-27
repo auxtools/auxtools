@@ -531,6 +531,13 @@ unsafe fn take_table(execute_instruction: usize) -> Result<(), &'static str> {
 	}
 }
 
+/// Enables or disables CPU time-stamp counter sampling around instruction
+/// handler calls.
+///
+/// Disabled by default. When enabled, the library reads the CPU's time-stamp
+/// counter before and after each handler invocation so [`ticks_since_last`] can
+/// report the interval spent inside BYOND. Must be called on BYOND's thread
+/// because the flag is unsynchronized.
 /// Enable timestamps at hook entry and exit for `ticks_since_last`.
 pub fn time_instructions(timed: bool) {
 	unsafe {
@@ -591,9 +598,9 @@ fn detour() -> Result<(), String> {
 	};
 
 	unsafe {
-		let hook = RawDetour::new(execute_instruction as *const (), versioned_hook).map_err(|_| "Couldn't detour execute_instruction")?;
+		let hook = RawDetour::new(execute_instruction as *const (), versioned_hook).map_err(|_| "could not detour execute_instruction")?;
 
-		hook.enable().map_err(|_| "Couldn't enable execute_instruction detour")?;
+		hook.enable().map_err(|_| "could not enable execute_instruction detour")?;
 
 		execute_instruction_original = hook.trampoline() as *const () as *const c_void;
 

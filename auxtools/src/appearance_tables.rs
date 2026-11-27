@@ -414,7 +414,7 @@ fn find() -> Result<Tables, String> {
 		}
 	};
 	if tables.unlink as usize == tables.rebalance as usize {
-		return Err("Could not distinguish appearance-tree unlink and rebalance functions".to_owned());
+		return Err("could not distinguish appearance-tree unlink and rebalance functions".to_owned());
 	}
 	Ok(tables)
 }
@@ -434,7 +434,7 @@ pub fn check() -> Result<(), String> {
 
 /// Report a tree validation failure.
 fn unexpected(why: String) -> String {
-	format!("BYOND's appearance tree isn't laid out as expected ({why}); the resource reload changed nothing")
+	format!("BYOND's appearance tree is not laid out as expected ({why}), so the resource reload made no changes")
 }
 
 unsafe fn word(at: *mut u8, offset: usize) -> *mut *mut u8 {
@@ -469,7 +469,7 @@ impl<'a> Appearances<'a> {
 	unsafe fn new(tables: &'a Tables) -> Result<Self, String> {
 		let manager = *(tables.manager as *const *mut u8);
 		if manager.is_null() {
-			return Err("the appearance manager isn't set up yet".to_owned());
+			return Err("the appearance manager is not initialized yet".to_owned());
 		}
 		Ok(Appearances {
 			tables,
@@ -502,7 +502,7 @@ impl<'a> Appearances<'a> {
 			return bad("the root has a parent");
 		}
 		if color(root) != BLACK {
-			return bad("the root isn't black");
+			return bad("the root is not black");
 		}
 		let mut black_height = None;
 		// In order, without recursion
@@ -514,15 +514,15 @@ impl<'a> Appearances<'a> {
 			node = link(node, LEFT);
 		}
 		if node != *self.tree.add(1) {
-			return bad("the smallest node isn't the header's");
+			return bad("the smallest node does not match the header");
 		}
 		while !node.is_null() {
 			count += 1;
 			if count > live + 1 {
-				return bad("the tree has more nodes than there are appearances");
+				return bad("the tree has more nodes than appearances");
 			}
 			if link(node, SMALLER) != previous {
-				return bad("the threaded list doesn't follow the tree");
+				return bad("the threaded list does not follow the tree");
 			}
 			let node_color = color(node);
 			if node_color != RED && node_color != BLACK {
@@ -533,7 +533,7 @@ impl<'a> Appearances<'a> {
 				let child = link(node, child);
 				leaf |= child.is_null();
 				if !child.is_null() && link(child, PARENT) != node {
-					return bad("a child doesn't name its parent");
+					return bad("a child does not point to its parent");
 				}
 				if node_color == RED && color(child) == RED {
 					return bad("a red node has a red child");
@@ -548,18 +548,18 @@ impl<'a> Appearances<'a> {
 					at = link(at, PARENT);
 				}
 				if *black_height.get_or_insert(blacks) != blacks || depth == 128 {
-					return bad("the tree isn't balanced as a red-black tree is");
+					return bad("the tree is not balanced as a red-black tree");
 				}
 			}
 			if !previous.is_null() && self.compare(previous, node) > 0 {
-				return bad("the nodes aren't in the comparator's order");
+				return bad("the nodes are not in comparator order");
 			}
 			let id = *(node.add(ID) as *const u32) as usize;
 			let listed = id < self.capacity && *self.table.add(id) == node;
 			if !listed {
 				let unlisted = id == UNUSED_ID && (id >= self.capacity || (*self.table.add(id)).is_null());
 				if !unlisted || skipped_id > 0 {
-					return bad("a node's id doesn't lead back to it");
+					return bad("a node's ID does not map back to it");
 				}
 				skipped_id += 1;
 			}
@@ -580,14 +580,14 @@ impl<'a> Appearances<'a> {
 				}
 			}
 			if !node.is_null() && link(previous, LARGER) != node {
-				return bad("the threaded list doesn't follow the tree");
+				return bad("the threaded list does not follow the tree");
 			}
 		}
 		if previous != *self.tree.add(2) {
-			return bad("the largest node isn't the header's");
+			return bad("the largest node does not match the header");
 		}
 		if count - skipped_id != live {
-			return bad("some appearances aren't in the tree");
+			return bad("some appearances are not in the tree");
 		}
 		Ok(())
 	}
@@ -789,7 +789,7 @@ pub fn repoint(mappings: &[(u32, u32)]) -> Result<Repointed, String> {
 			appearances.insert(node);
 			if let Some(same) = appearances.equal_neighbour(node) {
 				warnings.push(format!(
-					"appearance {} now duplicates appearance {}; both IDs are retained with their existing client appearances",
+					"appearance {} now duplicates appearance {}, keeping both IDs with their existing client appearances",
 					*(node.add(ID) as *const u32),
 					*(same.add(ID) as *const u32)
 				));
@@ -797,7 +797,7 @@ pub fn repoint(mappings: &[(u32, u32)]) -> Result<Repointed, String> {
 		}
 		if let Err(why) = appearances.check() {
 			warnings.push(format!(
-				"appearance-tree validation failed after reload ({why}); restart the world to avoid incorrect behavior"
+				"appearance-tree validation failed after reload ({why}). Restart the world to avoid incorrect behavior."
 			));
 		}
 		Ok(Repointed {

@@ -94,7 +94,7 @@ impl Output {
 		let To::Client(stdout) = &self.to else {
 			return;
 		};
-		let json = serde_json::to_string(message).expect("a DAP message that can't be encoded");
+		let json = serde_json::to_string(message).expect("could not encode DAP message");
 		let mut stdout = stdout.lock().unwrap();
 		// Nobody to tell if the client has gone
 		let _ = write!(stdout, "Content-Length: {}\r\n\r\n{}", json.len(), json);

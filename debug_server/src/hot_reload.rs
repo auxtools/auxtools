@@ -430,7 +430,7 @@ fn describe(proc: &ProcRef) -> String {
 }
 
 fn find(proc: &ProcRef) -> Result<Proc, String> {
-	Proc::find_override(&proc.path, proc.override_id).ok_or_else(|| format!("{}: there's no such proc in the running world", describe(proc)))
+	Proc::find_override(&proc.path, proc.override_id).ok_or_else(|| format!("{}: proc not found in the running world", describe(proc)))
 }
 
 /// A proc path the way auxtools keys procs: without `/proc` or `/verb`.
@@ -467,7 +467,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	for var in removed_vars {
 		warnings.push(if world_lacks(var) {
 			format!(
-				"{}: var {} was removed from source and isn't in the running world",
+				"{}: variable {} was removed from source and is not in the running world",
 				var.type_path, var.var
 			)
 		} else {
@@ -706,7 +706,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	if errors.is_empty() {
 		match type_vars.intern() {
 			Ok(fields) => prepared.type_fields = fields,
-			Err(e) => errors.push(format!("couldn't make the types' new vars: {}", e))
+			Err(e) => errors.push(format!("could not create updated type variable tables: {}", e))
 		}
 	}
 
@@ -761,7 +761,7 @@ fn assemble_with(
 
 	if bytecode.len() > u16::MAX as usize {
 		return Err(format!(
-			"{}: the new code is {} words long, and BYOND's limit is {}",
+			"{}: new code is {} words long, exceeding BYOND's limit of {}",
 			name,
 			bytecode.len(),
 			u16::MAX
@@ -781,7 +781,7 @@ fn prepare_code(
 	let name = describe(&reload.proc);
 	let proc = find(&reload.proc)?;
 	if proc.is_hooked() {
-		warnings.push(format!("{}: auxtools has hooked it, so the hook runs instead of the new code", name));
+		warnings.push(format!("{}: hooked by auxtools, so the hook runs instead of the new code", name));
 	}
 	let original = original_bytecode(&proc);
 	let bytecode = assemble(&name, reload, &original, pending, world_globals, added)?;
@@ -1123,7 +1123,9 @@ pub(crate) fn locals_table(names: &[String], empty: u32) -> Result<u32, String> 
 			Some(id) => id,
 			None => {
 				let count = unsafe { *raw_types::funcs::VARIABLE_NAME_COUNT };
-				(0..count).find(null_slot).ok_or("no var id has a null value to start a local with")?
+				(0..count)
+					.find(null_slot)
+					.ok_or("no variable ID has a null value to initialize a local")?
 			}
 		};
 		words.push(id);
@@ -1253,10 +1255,10 @@ fn world_lacks(var: &RemovedVar) -> bool {
 
 /// The type whose path is `path`.
 fn find_type(path: &str) -> Result<u32, String> {
-	let id = StringRef::new(path).map_err(|_| format!("couldn't make the string {}", path))?.get_id().0;
+	let id = StringRef::new(path).map_err(|_| format!("could not create string {}", path))?.get_id().0;
 	(0..runtime_tables::type_count()?)
 		.find(|&t| runtime_tables::type_field(t, type_fields::PATH) == Ok(id))
-		.ok_or_else(|| format!("there's no type {} in the running world", path))
+		.ok_or_else(|| format!("type {} not found in the running world", path))
 }
 
 /// Resolve a type path from the runtime table.
@@ -1321,7 +1323,7 @@ fn prepare_init_proc(
 		Some(proc) => runtime_tables::proc_entry(proc.id),
 		None => proc_template().ok()
 	}
-	.ok_or_else(|| fail("couldn't find a proc entry to copy".to_owned()))?;
+	.ok_or_else(|| fail("could not find a proc entry to copy".to_owned()))?;
 	let original = current.as_ref().map(original_bytecode).unwrap_or_default();
 
 	let bytecode = assemble(&shown, code, &original, pending, world_globals, added)?;
@@ -1353,7 +1355,7 @@ fn prepare_removal(removed: &RemovedProc, staged: &mut StagedProcs) -> Result<Pr
 	let shown = describe(&proc_ref);
 	let fail = |e: String| format!("{}: {}", shown, e);
 	let id = find(&proc_ref)?.id.0;
-	let entry = staged.entry(id).ok_or_else(|| fail("couldn't read its table entry".to_owned()))?;
+	let entry = staged.entry(id).ok_or_else(|| fail("could not read proc table entry".to_owned()))?;
 	let next = entry.0[ProcEntryWords::NEXT_OVERRIDE];
 
 	// Keep removed global procs for old call sites but exclude them from
@@ -1722,7 +1724,7 @@ fn new_statics(
 		let value = match (&local.value, &local.init) {
 			(Some(value), _) => const_value(value, pending).map_err(|e| format!("static local {}: {}", local.name, e))?,
 			(None, Some(_)) => (0, 0),
-			(None, None) => return Err(format!("static local {} has no initial value to start with", local.name))
+			(None, None) => return Err(format!("static local {} has no initial value", local.name))
 		};
 		let id = added.add(leaked_string(&local.name)?, value);
 		if let (None, Some(init)) = (&local.value, &local.init) {
@@ -1809,7 +1811,7 @@ fn builtin_writes(var: &str, value: &ConstValue) -> Result<Vec<BuiltinWrite>, St
 			ConstValue::Null => NONE,
 			ConstValue::Resource(file) => AssembleEnv
 				.get_resource_index(file)
-				.ok_or_else(|| format!("couldn't find the file {}", file))?,
+				.ok_or_else(|| format!("could not find file {}", file))?,
 			_ => return Err("expected a resource file".to_owned())
 		})],
 		"layer" => vec![Word(type_fields::LAYER, number()?.to_bits())],
@@ -1827,7 +1829,7 @@ fn builtin_writes(var: &str, value: &ConstValue) -> Result<Vec<BuiltinWrite>, St
 				ConstValue::String(g) if g == "male" => 1,
 				ConstValue::String(g) if g == "female" => 2,
 				ConstValue::String(g) if g == "plural" => 3,
-				_ => return Err("has to be \"neuter\", \"male\", \"female\" or \"plural\"".to_owned())
+				_ => return Err("must be \"neuter\", \"male\", \"female\", or \"plural\"".to_owned())
 			};
 			vec![Bits(type_fields::FLAGS, 0xC0, gender << 6)]
 		}
@@ -1839,14 +1841,14 @@ fn builtin_writes(var: &str, value: &ConstValue) -> Result<Vec<BuiltinWrite>, St
 				1 => 0,
 				2 => 0x4000,
 				3 | -1 => 0x8000,
-				_ => return Err("has to be -1, 0, 1, 2 or 3".to_owned())
+				_ => return Err("must be -1, 0, 1, 2, or 3".to_owned())
 			};
 			vec![Bits(type_fields::FLAGS, 0xC400, bits)]
 		}
 		"appearance_flags" => {
 			let flags = number()? as u32;
 			if flags >= 1 << 12 {
-				return Err("flags cannot be stored in the type record".to_owned());
+				return Err("exceeds the 12-bit type record limit (maximum 4095)".to_owned());
 			}
 			vec![
 				Bits(type_fields::FLAGS, 0x7FF << 21, (flags & 0x7FF) << 21),
@@ -1968,7 +1970,7 @@ fn const_value(value: &ConstValue, pending: &Pending) -> Result<(u32, u32), Stri
 			0x0C,
 			AssembleEnv
 				.get_resource_index(file)
-				.ok_or_else(|| format!("couldn't find the file {}", file))?
+				.ok_or_else(|| format!("could not find file {}", file))?
 		)
 	})
 }
@@ -2165,11 +2167,11 @@ fn prepare_redeclared(
 }
 
 fn prepare_var_default(default: &HotReloadVarDefault, pending: &Pending, type_vars: &mut TypeVars, added: &mut AddedVars) -> Result<(), String> {
-	let fail = |e: String| format!("var {}: {}", default.var, e);
+	let fail = |e: String| format!("variable {}: {}", default.var, e);
 
 	let value = const_value(&default.value, pending).map_err(fail)?;
 	let key = StringRef::new(&default.var)
-		.map_err(|_| fail("couldn't make its name".to_owned()))?
+		.map_err(|_| fail("could not create name string".to_owned()))?
 		.get_id()
 		.0;
 
@@ -2648,7 +2650,7 @@ fn make_waiting_world_edits() -> bool {
 	}
 	for edit in std::mem::take(&mut *WAITING_WORLD_EDITS.lock().unwrap()) {
 		if let Err(e) = edit_built_world_names(&edit) {
-			eprintln!("auxtools: couldn't change the world's procs: {}", e);
+			eprintln!("auxtools: could not update world procs: {}", e);
 		}
 	}
 	true
@@ -2755,7 +2757,7 @@ fn proc_template() -> Result<ProcEntryWords, String> {
 	Proc::find("/proc/auxtools_expr_stub")
 		.or_else(|| Proc::find("/icon/proc/Width"))
 		.and_then(|proc| runtime_tables::proc_entry(proc.id))
-		.ok_or_else(|| "couldn't find a proc entry to copy (/proc/auxtools_expr_stub or /icon/proc/Width)".to_owned())
+		.ok_or_else(|| "could not find a proc entry to copy (/proc/auxtools_expr_stub or /icon/proc/Width)".to_owned())
 }
 
 // Worked out once per world
@@ -2861,11 +2863,11 @@ fn describe_assemble_error(e: &dmasm::assembler::AssembleError) -> String {
 	use dmasm::assembler::AssembleError::*;
 	let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
 	match e {
-		ProcNotFound(path) => format!("proc not found: {} in the running world", path),
-		StringNotFound(s) => format!("couldn't make the string {:?}", text(s)),
+		ProcNotFound(path) => format!("proc not found in the running world: {}", path),
+		StringNotFound(s) => format!("could not create string {:?}", text(s)),
 		VariableNameNotFound(name) => format!("variable not found in the running world: {}", text(name)),
 		TypeNotFound(path) => format!("type not found in the running world: {}", path),
-		ResourceNotFound(path) => format!("couldn't find the file {}", path),
+		ResourceNotFound(path) => format!("could not find file {}", path),
 		InstanceNotFound(path) => format!("prefab instance not found: {}{{...}}", path),
 		LabelNotFound(label) => format!("undefined label in compiled code: {}", label)
 	}
@@ -3028,7 +3030,7 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 
 	fn get_instance(&mut self, path: &str, init: &[u32]) -> Option<u32> {
 		let Some(value) = AssembleEnv.get_type(path) else {
-			self.error = Some(format!("there's no type {} in the running world", path));
+			self.error = Some(format!("type {} not found in the running world", path));
 			return None;
 		};
 		match self.instances.find_or_add(path, value, init) {
@@ -3091,7 +3093,7 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 		let candidates = variable_ids(name);
 		match candidates.len() {
 			0 => {
-				self.error = Some(format!("there's no global var {} in the running world", shown));
+				self.error = Some(format!("global variable not found in the running world: {}", shown));
 				return None;
 			}
 			1 => return Some(candidates[0]),

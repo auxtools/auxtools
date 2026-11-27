@@ -198,7 +198,7 @@ mod tests {
 			format!("/area: layer, luminosity, icon: {}", why),
 			format!("/mob: layer: {}", why),
 			"/area: icon: another reason".to_owned(),
-			"/proc/f: doesn't compile: x".to_owned()
+			"/proc/f: failed to compile: x".to_owned()
 		]);
 	}
 }

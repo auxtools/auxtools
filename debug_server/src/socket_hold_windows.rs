@@ -45,7 +45,7 @@ pub fn install() -> Result<usize, String> {
 		let close = GetProcAddress(wsock, c"closesocket".as_ptr()) as usize;
 		let shutdown = GetProcAddress(wsock, c"shutdown".as_ptr()) as usize;
 		if close == 0 || shutdown == 0 {
-			return Err("wsock32.dll lacks closesocket or shutdown".to_owned());
+			return Err("wsock32.dll does not export closesocket or shutdown".to_owned());
 		}
 		CLOSE.store(close, Ordering::Relaxed);
 		SHUTDOWN.store(shutdown, Ordering::Relaxed);
@@ -67,7 +67,7 @@ pub fn install() -> Result<usize, String> {
 				while *slot != 0 {
 					if *slot == close {
 						region::protect(slot as *const u8, 4, region::Protection::READ_WRITE)
-							.map_err(|e| format!("cannot write socket import: {}", e))?;
+							.map_err(|e| format!("cannot make socket import writable: {}", e))?;
 						*slot = held_close as *const () as usize;
 						replaced += 1;
 					}

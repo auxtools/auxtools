@@ -112,7 +112,7 @@ pub fn wait_reboot(world: &mut World, since: Option<u64>, timeout: Option<Durati
 				if until.is_some_and(|until| Instant::now() >= until) {
 					return Err(Failure(
 						TIMED_OUT,
-						format!("timed out{} waiting for the rebooted world to start running.", limit(timeout))
+						format!("timed out{} waiting for the rebooted world to start running", limit(timeout))
 					));
 				}
 				std::thread::sleep(Duration::from_millis(50));
@@ -479,12 +479,12 @@ mod tests {
 		let entry = JournalEntry {
 			event: JournalEvent::Reload {
 				applied: false,
-				summary: "couldn't read the code".to_owned(),
+				summary: "could not read source code".to_owned(),
 				errors: vec!["a.dm, line 3: bad".to_owned()],
 				warnings: vec!["careful".to_owned()]
 			},
 			..runtime()
 		};
-		assert!(block(&entry).ends_with("hot reload not applied: couldn't read the code\n  error: a.dm, line 3: bad\n  warning: careful"));
+		assert!(block(&entry).ends_with("hot reload not applied: could not read source code\n  error: a.dm, line 3: bad\n  warning: careful"));
 	}
 }

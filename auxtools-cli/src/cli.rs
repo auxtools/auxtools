@@ -116,13 +116,13 @@ fn execute(raw: &[String]) -> Result<()> {
 		return help::show(&[]);
 	};
 	if cli.pid.is_some() && !command.selects_world() {
-		return Err(format!("--pid cannot be used with '{}': it does not select an existing world.", command.name()).into());
+		return Err(format!("--pid cannot be used with '{}': it does not select an existing world", command.name()).into());
 	}
 	if cli.response_timeout.is_some() && !command.awaits_responses() {
 		return Err(match command {
 			Command::Stop(_) => "--response-timeout cannot be used with 'stop': it waits for the process to exit; use --timeout.".to_owned(),
 			_ => format!(
-				"--response-timeout cannot be used with '{}': it does not select an existing world.",
+				"--response-timeout cannot be used with '{}': it does not select an existing world",
 				command.name()
 			)
 		}
@@ -142,7 +142,7 @@ fn execute(raw: &[String]) -> Result<()> {
 		Command::Check(check) => check::check(&check),
 		Command::Wait(args::Wait { event: None }) => {
 			help::show(&["wait".to_owned()])?;
-			Err("wait requires a command: pause, reload, or reboot.".into())
+			Err("wait requires a command: pause, reload, or reboot".into())
 		}
 		command => {
 			let hold_max = hold::max(&command)?;
@@ -242,7 +242,7 @@ fn given_text(value: &str) -> Result<String> {
 
 /// Read a file and remove its final line ending.
 fn read_text(file: &str) -> Result<String> {
-	let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read {}: {}.", file, e))?;
+	let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read {}: {}", file, e))?;
 	Ok(text.trim_end_matches(['\r', '\n']).to_owned())
 }
 
@@ -253,7 +253,7 @@ fn read_stdin() -> Result<String> {
 		return Err("'-' reads the expression from stdin, but stdin is a terminal.".into());
 	}
 	let mut text = String::new();
-	io::stdin().read_to_string(&mut text).map_err(|e| format!("cannot read stdin: {}.", e))?;
+	io::stdin().read_to_string(&mut text).map_err(|e| format!("cannot read stdin: {}", e))?;
 	Ok(text.trim_end_matches(['\r', '\n']).to_owned())
 }
 
@@ -266,7 +266,7 @@ fn expression(words: &[String], file: Option<&std::path::Path>, stdin: impl FnOn
 		(_, None) => return Ok(words.join(" "))
 	};
 	if expression.trim().is_empty() {
-		return Err(format!("{} contains no expression.", from).into());
+		return Err(format!("{} contains no expression", from).into());
 	}
 	Ok(expression)
 }
@@ -275,13 +275,13 @@ fn expression(words: &[String], file: Option<&std::path::Path>, stdin: impl FnOn
 /// the name of a proc without a path, such as `(global init)`.
 fn proc_ref(text: &str) -> Result<ProcRef> {
 	if !text.starts_with(['/', '(']) {
-		return Err(format!("invalid proc path '{}': expected /PATH[#N].", text).into());
+		return Err(format!("invalid proc path '{}': expected /PATH[#N]", text).into());
 	}
 	let (path, override_id) = match text.split_once('#') {
 		Some((path, id)) => (
 			path,
 			id.parse()
-				.map_err(|_| format!("invalid definition index '{}' in '{}': expected a non-negative integer.", id, text))?
+				.map_err(|_| format!("invalid definition index '{}' in '{}': expected a non-negative integer", id, text))?
 		),
 		None => (text, 0)
 	};
@@ -545,7 +545,7 @@ impl World {
 					eprintln!("{}", message);
 					self.failed_conditions.push(message);
 				}
-				Response::WatchEnded { reason, .. } => self.aside(&format!("watch ended: {}", reason)),
+				Response::WatchEnded { reason, .. } => self.aside(&format!("data breakpoint ended: {}", reason)),
 				response => return Ok(Some(response))
 			}
 		}
@@ -700,7 +700,7 @@ impl World {
 			.find(|instruction| u32::from(instruction.offset) == offset)
 			.map(|instruction| instruction.text.clone())
 			.filter(|text| !text.is_empty())
-			.unwrap_or_else(|| "(not read)".to_owned());
+			.unwrap_or_else(|| "(not disassembled)".to_owned());
 		Ok((offset, text))
 	}
 
@@ -775,7 +775,7 @@ impl World {
 			globals: global_vars
 		} = self.request(Request::Scopes { frame_id })?
 		else {
-			return Err("the world did not report the frame's variables.".into());
+			return Err("the world did not report the frame's variables".into());
 		};
 		let mut scopes = vec![("arguments", arguments), ("locals", locals)];
 		if globals {
@@ -809,7 +809,7 @@ impl World {
 				count: None
 			})?;
 			let Response::Variables { vars } = listed else {
-				return Err(format!("the world did not list the {}.", name).into());
+				return Err(format!("the world did not list the {}", name).into());
 			};
 			for var in vars {
 				say!("  {} = {}", var.name, short(&var.value));
@@ -936,7 +936,7 @@ impl World {
 					}
 					return Ok(());
 				}
-				JournalEvent::Loaded { .. } => return Err(Failure(HUNG_UP, format!("the world rebooted before spawn {} finished.", number))),
+				JournalEvent::Loaded { .. } => return Err(Failure(HUNG_UP, format!("the world rebooted before spawn {} finished", number))),
 				// Report non-fatal callee errors. The journal cannot identify
 				// which spawn caused them.
 				JournalEvent::Runtime {
@@ -985,8 +985,8 @@ impl World {
 			format!("definitions: {}", info.definitions),
 			format!("reloaded: {}", match info.reloaded {
 				None => "no",
-				Some(Reloaded::Lines) => "lines (same code, moved to other lines)",
-				Some(Reloaded::Code) => "code (new code)",
+				Some(Reloaded::Lines) => "lines (line numbers updated)",
+				Some(Reloaded::Code) => "code (bytecode replaced)",
 				Some(Reloaded::Added) => "added (new proc)"
 			})
 		];
@@ -1008,8 +1008,8 @@ impl World {
 		// One the world couldn't read says so where its text would be
 		let text = |instruction: &BytecodeInstruction| match (&instruction.text, &disassembly.error) {
 			(text, _) if !text.is_empty() => text.clone(),
-			(_, Some(error)) => format!("(not read: {})", error),
-			(_, None) => "(not read)".to_owned()
+			(_, Some(error)) => format!("(not disassembled: {})", error),
+			(_, None) => "(not disassembled)".to_owned()
 		};
 		if self.json.is_some() {
 			let instructions: Vec<_> = disassembly
@@ -1115,7 +1115,7 @@ impl World {
 	/// `continue`: lets a paused world carry on, and doesn't wait for more
 	fn resume(&mut self) -> Result<()> {
 		if self.paused()?.is_none() {
-			return Err("the world is not paused.".into());
+			return Err("the world is not paused".into());
 		}
 		self.request(Request::Continue {
 			kind: ContinueKind::Continue
@@ -1328,7 +1328,7 @@ impl World {
 			None => Err(Failure(
 				TIMED_OUT,
 				format!(
-					"timed out after {} waiting for the world to pause.",
+					"timed out after {} waiting for the world to pause",
 					seconds_text(wait.timeout.unwrap_or_default())
 				)
 			))
@@ -1343,13 +1343,13 @@ impl World {
 			// Asked first, for what's wrong with it if it isn't there
 			let proc = self
 				.find_proc(&proc_ref(place)?)
-				.map_err(|Failure(code, why)| Failure(code, format!("cannot set a breakpoint at {}: {}", place, why)))?;
+				.map_err(|Failure(code, why)| Failure(code, format!("cannot set breakpoint at {}: {}", place, why)))?;
 			(vec![InstructionRef { proc: proc.proc, offset: 0 }], None)
 		} else {
 			let (file, line) = place
 				.rsplit_once(':')
 				.and_then(|(file, line)| Some((file, line.parse::<u32>().ok()?)))
-				.ok_or_else(|| format!("invalid location '{}': expected FILE:LINE or /proc/path[#N].", place))?;
+				.ok_or_else(|| format!("invalid location '{}': expected FILE:LINE or /proc/path[#N]", place))?;
 			match self.request(Request::Locate { file: file.to_owned(), line })? {
 				Response::Locate { instructions } if instructions.is_empty() => return Err(self.nowhere(file, line)?),
 				Response::Locate { instructions } => (instructions, Some(line)),
@@ -1566,7 +1566,7 @@ mod tests {
 		let Err(Failure(1, why)) = expression(&args(&["-"]), None, || Ok("\n".to_owned())) else {
 			panic!("nothing was an expression");
 		};
-		assert_eq!(why, "stdin contains no expression.");
+		assert_eq!(why, "stdin contains no expression");
 	}
 
 	#[test]

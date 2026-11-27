@@ -178,7 +178,7 @@ pub fn run() {
 	ids.sort_unstable();
 	ids.dedup();
 	assert_eq!(ids.len(), threads.len(), "threads share ids");
-	assert!(!world.output.contains("procs are asleep"), "the launcher said the list was cut short");
+	assert!(!world.output.contains("Sleeping procs:"), "the launcher said the list was cut short");
 	world.resume_through("many");
 	ok("multiple sleeping threads");
 
@@ -217,7 +217,7 @@ pub fn run() {
 	world.break_on(&[]);
 	let threads = world.threads();
 	assert_eq!(threads_in(&threads, "/sc_many").len(), 150);
-	assert!(!world.output.contains("procs are asleep"), "the launcher said the list was cut short");
+	assert!(!world.output.contains("Sleeping procs:"), "the launcher said the list was cut short");
 	// The last of them is a thread like any other
 	let last = threads.last().unwrap().0;
 	assert_eq!(world.frames(last)[0]["line"], at.line("many_sleep"));

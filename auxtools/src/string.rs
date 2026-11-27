@@ -20,6 +20,17 @@ pub fn text_of(bytes: &[u8]) -> String {
 	String::from_utf8_lossy(&text).into_owned()
 }
 
+/// A reference-counted handle to a BYOND string.
+///
+/// Holds one BYOND reference and is not `Send`. `String::from` extracts plain
+/// text with BYOND text macros removed, while `Display` (`to_string`) and
+/// `Debug` format a quoted DM string literal with escape sequences and
+/// spelled-out macros. `data` borrows the raw bytes for the lifetime of the
+/// `StringRef`.
+///
+/// `new` and `from_raw` return `Err` if the input contains a NUL byte. There is
+/// no `From<&str>` implementation, so APIs accepting `Into<StringRef>` require
+/// a `StringRef`, `&StringRef`, or `byond_string!`.
 /// A wrapper around [Values](struct.Value.html) that make working with strings
 /// a little easier
 pub struct StringRef {
@@ -51,6 +62,12 @@ impl StringRef {
 		})
 	}
 
+	/// Creates a `StringRef` from a BYOND string ID, taking a new reference.
+	///
+	/// # Safety
+	///
+	/// Must be called on BYOND's thread, and `id` must refer to a currently
+	/// live entry in BYOND's string table.
 	pub unsafe fn from_id(id: raw_types::strings::StringId) -> Self {
 		StringRef {
 			value: Value::from_raw(raw_types::values::Value {
@@ -60,6 +77,14 @@ impl StringRef {
 		}
 	}
 
+	/// Returns the name of the variable identified by `id` as a `StringRef`,
+	/// taking a new reference.
+	///
+	/// # Safety
+	///
+	/// Must be called on BYOND's thread while the library is initialized (the
+	/// variable name table pointer is null after shutdown), and `id` must be
+	/// less than BYOND's variable count.
 	pub unsafe fn from_variable_id(id: raw_types::strings::VariableId) -> Self {
 		let string_id = *(*raw_types::funcs::VARIABLE_NAME_ENTRIES).add(id.0 as usize);
 

@@ -1,5 +1,6 @@
 [package]
 name = "test_runner"
+description = "Test runner that compiles the auxtest_host world, runs it with the auxtest library, and reports the result"
 version = "0.1.0"
 authors = ["Sophie Wallace <sophie@wiox.me>"]
 edition = "2018"
