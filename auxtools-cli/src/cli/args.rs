@@ -5,7 +5,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use super::{help, hold, json, launch};
 
 pub const JSON: &str = "Emit one JSON value on stdout.";
-const HOLD_MAX: &str = "Automatically resume a retained pause after this many\nseconds with no debugger connected.";
+const HOLD_MAX: &str = "Resume after SECONDS with no debugger connected.";
 
 pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -19,7 +19,7 @@ fn default_seconds(default: Duration) -> String {
 
 pub fn response_timeout_help() -> String {
 	format!(
-		"Set the wait for each response from the world. {}",
+		"Wait up to SECONDS for each world response. {}",
 		default_seconds(DEFAULT_RESPONSE_TIMEOUT)
 	)
 }
@@ -29,7 +29,7 @@ fn hold_max_help(help: &str) -> String {
 }
 
 fn depth_help() -> String {
-	format!("Set JSON value expansion depth. Requires --json. [default: {}]", json::DEFAULT_DEPTH)
+	format!("Limit JSON expansion to N levels. [default: {}]\nRequires --json.", json::DEFAULT_DEPTH)
 }
 
 #[derive(Parser)]
@@ -141,14 +141,17 @@ pub fn scope_of(name: &str) -> Option<Scope> {
 pub struct Launch {
 	#[arg(value_name = "DMB")]
 	pub dmb: PathBuf,
-	#[arg(long, help = "Run in the background; return when startup completes.")]
+	#[arg(long, help = "Run in the background and return once the world starts.")]
 	pub detach: bool,
-	#[arg(long, help = "Emit {pid, launcher, log}. Requires --detach.")]
+	#[arg(long, help = "Print {pid, launcher, log, unavailable} as JSON.\nRequires --detach.")]
 	pub json: bool,
 	#[arg(
 		long,
 		value_name = "FILE",
-		help = format!("Write launcher output to FILE.\nWith --detach, default: NAME.{} beside NAME.dmb.", launch::LOG_EXTENSION)
+		help = format!(
+			"Write launcher and world output to FILE.\n[default: terminal, or NAME.{} beside NAME.dmb\nwith --detach]",
+			launch::LOG_EXTENSION
+		)
 	)]
 	pub log: Option<PathBuf>,
 	#[arg(
@@ -160,7 +163,7 @@ pub struct Launch {
 	#[arg(
 		short = 'D',
 		value_name = "NAME[=VALUE]",
-		help = "Set a preprocessor define used by hot reload. Repeatable.\nUse the same defines used to compile the DMB."
+		help = "Define a preprocessor macro for hot reload. Repeatable.\nPass the defines used to compile the .dmb."
 	)]
 	pub defines: Vec<String>,
 	#[arg(long, help = "Disable source watching and hot reload.")]
@@ -168,11 +171,11 @@ pub struct Launch {
 	#[arg(
 		long,
 		value_name = "PROGRAM",
-		help = "Select dreamdaemon, dreamdaemon-gui, or dreamseeker.\n[default: dreamdaemon]\nOn Windows, dreamdaemon runs dd.exe and \
-		        dreamdaemon-gui runs DreamDaemon.exe\nwith its window. Linux supports DreamDaemon only."
+		help = "Select the BYOND host: dreamdaemon, dreamdaemon-gui, or\ndreamseeker. [default: dreamdaemon]\nWindows: dreamdaemon runs dd.exe and \
+		        dreamdaemon-gui runs\nwindowed dreamdaemon.exe. Linux supports DreamDaemon only."
 	)]
 	pub server: Option<String>,
-	#[arg(long, value_name = "N", value_parser = port, help = "Set the listening port for DreamDaemon.")]
+	#[arg(long, value_name = "N", value_parser = port, help = "Listen on port N (DreamDaemon only).")]
 	pub port: Option<u16>,
 	#[arg(
 		long,
@@ -204,16 +207,19 @@ pub struct Stop {
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = format!("Set the graceful shutdown deadline. {}", default_seconds(DEFAULT_STOP_TIMEOUT))
+		help = format!("Wait up to SECONDS for graceful shutdown. {}", default_seconds(DEFAULT_STOP_TIMEOUT))
 	)]
 	pub timeout: Option<Duration>,
-	#[arg(long, help = "Terminate the process if graceful shutdown times out.")]
+	#[arg(long, help = "Terminate the process if shutdown fails or times out.")]
 	pub kill: bool,
 	#[arg(
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = format!("Set the wait after forced termination. {}\nRequires --kill.", default_seconds(DEFAULT_KILL_TIMEOUT))
+		help = format!(
+			"Wait up to SECONDS for exit after termination.\n{} Requires --kill.",
+			default_seconds(DEFAULT_KILL_TIMEOUT)
+		)
 	)]
 	pub kill_timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
@@ -226,7 +232,7 @@ pub struct Reboot {
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = format!("Set the reboot deadline. {}", default_seconds(DEFAULT_REBOOT_TIMEOUT))
+		help = format!("Wait up to SECONDS for the reboot. {}", default_seconds(DEFAULT_REBOOT_TIMEOUT))
 	)]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
@@ -239,7 +245,10 @@ pub struct Reconnect {
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = format!("Set the reboot deadline for DreamSeeker-hosted worlds. {}", default_seconds(DEFAULT_REBOOT_TIMEOUT))
+		help = format!(
+			"Wait up to SECONDS when DreamSeeker hosts and\nreboots the world. {}",
+			default_seconds(DEFAULT_REBOOT_TIMEOUT)
+		)
 	)]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
@@ -248,7 +257,7 @@ pub struct Reconnect {
 
 #[derive(Args)]
 pub struct Log {
-	#[arg(long, help = "Stream new entries after printing matching retained entries.")]
+	#[arg(long, help = "Stream new entries after printing existing ones.")]
 	pub follow: bool,
 	#[arg(long, help = "Include runtime errors and thrown exceptions.")]
 	pub runtimes: bool,
@@ -263,13 +272,12 @@ pub struct Log {
 	#[arg(
 		long,
 		value_name = "FILTER",
-		help = "Show only runtime errors whose messages match FILTER:\ncomma-separated substrings, any of which matches;\n! excludes one. \
-		        Case-insensitive. Implies --runtimes."
+		help = "Filter runtime errors by comma-separated terms\n(case-insensitive). Prefix with ! to exclude.\nImplies --runtimes."
 	)]
 	pub runtime_filter: Option<String>,
-	#[arg(long, value_name = "N", value_parser = whole::<u64>, help = "Read entries with sequence numbers greater than N.")]
+	#[arg(long, value_name = "N", value_parser = whole::<u64>, help = "Show entries numbered after N.")]
 	pub since: Option<u64>,
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Limit initial output to the last N matching entries.")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Show only the last N matching journal entries.")]
 	pub last: Option<u32>,
 	#[arg(long, help = "Emit JSON Lines, one journal entry per line.")]
 	pub json: bool
@@ -277,7 +285,7 @@ pub struct Log {
 
 #[derive(Args)]
 pub struct Stack {
-	#[arg(long, help = "Include sleeping proc stacks and their stable stack IDs.")]
+	#[arg(long, help = "Include sleeping proc stacks with their stack IDs.")]
 	pub all: bool,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -285,7 +293,7 @@ pub struct Stack {
 
 #[derive(Args)]
 pub struct Vars {
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Select a zero-based frame; 0 is innermost. [default: 0]")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Inspect frame N (0 is innermost). [default: 0]")]
 	pub frame: Option<u32>,
 	#[arg(long, help = "Include global variables.")]
 	pub globals: bool,
@@ -301,26 +309,26 @@ pub struct Eval {
 	pub expression: Vec<String>,
 	#[arg(short = 'f', long, value_name = "FILE", help = "Read the expression or statements from FILE.")]
 	pub file: Option<PathBuf>,
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Select a zero-based paused frame. [default: 0 when paused]")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Evaluate in paused frame N.\n[default: 0 when paused]")]
 	pub frame: Option<u32>,
 	#[arg(
 		long,
 		value_name = "REF",
-		help = "Evaluate outside any frame, with src set to the object whose\nref() is REF: [0x2000001] or 0x2000001."
+		help = "Evaluate outside any frame with src set to REF\n(a ref() value such as [0x2000001] or 0x2000001)."
 	)]
 	pub src: Option<String>,
 	#[arg(
 		long,
-		help = "Run the code as the world's own on its next tick instead of\nevaluating it now. Report its spawn number and return."
+		help = "Schedule code on the next tick instead of running\nit now. Prints the spawn number and returns."
 	)]
 	pub spawn: bool,
-	#[arg(long, help = "Wait for spawned code to finish and report its value.\nRequires --spawn.")]
+	#[arg(long, help = "Wait for spawned code to finish and print its\nresult. Requires --spawn.")]
 	pub wait: bool,
 	#[arg(
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = "Set the --wait deadline. Requires --wait. [default: unlimited]"
+		help = "Wait up to SECONDS for spawned code to finish.\n[default: unlimited] Requires --wait."
 	)]
 	pub timeout: Option<Duration>,
 	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = depth_help())]
@@ -361,12 +369,9 @@ pub struct Continue {
 
 #[derive(Args)]
 pub struct StepOver {
-	#[arg(
-		long,
-		help = "Step by one bytecode instruction, stepping over proc calls.\nInclude the resulting instruction offset and text."
-	)]
+	#[arg(long, help = "Step one bytecode instruction, over proc calls,\nand report the next instruction.")]
 	pub instruction: bool,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the step deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS for the step.\n[default: unlimited]")]
 	pub timeout: Option<Duration>,
 	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = hold_max_help(HOLD_MAX))]
 	pub hold_max: Option<Duration>,
@@ -376,12 +381,9 @@ pub struct StepOver {
 
 #[derive(Args)]
 pub struct StepIn {
-	#[arg(
-		long,
-		help = "Step by one bytecode instruction, stepping into proc calls.\nInclude the resulting instruction offset and text."
-	)]
+	#[arg(long, help = "Step one bytecode instruction, into proc calls,\nand report the next instruction.")]
 	pub instruction: bool,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the step deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS for the step.\n[default: unlimited]")]
 	pub timeout: Option<Duration>,
 	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = hold_max_help(HOLD_MAX))]
 	pub hold_max: Option<Duration>,
@@ -391,7 +393,7 @@ pub struct StepIn {
 
 #[derive(Args)]
 pub struct StepOut {
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the step deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS for the step.\n[default: unlimited]")]
 	pub timeout: Option<Duration>,
 	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = hold_max_help(HOLD_MAX))]
 	pub hold_max: Option<Duration>,
@@ -436,8 +438,8 @@ pub struct WaitPause {
 	#[arg(
 		long = "if",
 		value_name = "CONDITION",
-		help = "Apply a DM condition to watches, if present;\notherwise apply it to breakpoints.\nFor watches, old and value contain the previous \
-		        and new values."
+		help = "Pause only when CONDITION evaluates to truthy.\nApplies to --change if given, else --break.\nFor --change, old and value hold \
+		        old/new values.\nRequires --break or --change."
 	)]
 	pub condition: Option<String>,
 	#[arg(long, help = "Pause on uncaught runtime errors and exceptions.")]
@@ -447,19 +449,19 @@ pub struct WaitPause {
 	#[arg(
 		long,
 		value_name = "FILTER",
-		help = "Pause only on runtime errors whose messages match FILTER:\ncomma-separated substrings, any of which matches;\n! excludes one. \
-		        Case-insensitive. Implies --runtimes."
+		help = "Pause only on runtime errors matching FILTER\n(comma-separated, case-insensitive substrings).\nPrefix with ! to exclude. Implies \
+		        --runtimes."
 	)]
 	pub runtime_filter: Option<String>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS. [default: unlimited]")]
 	pub timeout: Option<Duration>,
-	#[arg(long, help = "Do not retain the pause after this command disconnects.")]
+	#[arg(long, help = "Do not keep the world paused on exit.\nCannot be used with --hold-max.")]
 	pub no_hold: bool,
 	#[arg(
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = hold_max_help("Limit the retained pause when no debugger is connected.")
+		help = hold_max_help(HOLD_MAX)
 	)]
 	pub hold_max: Option<Duration>,
 	#[arg(long, help = "Emit one JSON object with pause details.")]
@@ -475,7 +477,7 @@ pub struct WaitReload {
 		help = "Match the first reload after journal entry N.\n[default: wait for a new event]"
 	)]
 	pub since: Option<u64>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS. [default: unlimited]")]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -490,7 +492,7 @@ pub struct WaitReboot {
 		help = "Match the first world load after journal entry N.\n[default: wait for a new event]"
 	)]
 	pub since: Option<u64>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS. [default: unlimited]")]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -503,14 +505,18 @@ pub struct Trace {
 	#[arg(
 		long,
 		value_name = "MESSAGE",
-		help = "Format each hit using MESSAGE with {DM expression} values.\n{{ and }} are literal braces."
+		help = "Print MESSAGE on each hit. {EXPR} interpolates DM\nexpressions, and {{ / }} produce literal braces.\nCannot be used with --by."
 	)]
 	pub log: Option<String>,
 	#[arg(long = "if", value_name = "CONDITION", help = "Record only hits where CONDITION is truthy.")]
 	pub condition: Option<String>,
-	#[arg(long, value_name = "EXPR", help = "Group hits by expression value and print counts at exit.")]
+	#[arg(
+		long,
+		value_name = "EXPR",
+		help = "Count hits by EXPR and print counts on exit.\nCannot be used with --log."
+	)]
 	pub by: Option<String>,
-	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after the specified duration. [default: unlimited]")]
+	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after SECONDS. [default: unlimited]")]
 	pub duration: Option<Duration>,
 	#[arg(long, value_name = "N", value_parser = positive, help = "Stop after N recorded hits (positive integer).")]
 	pub count: Option<u64>,
@@ -522,7 +528,7 @@ pub struct Trace {
 pub struct Profile {
 	#[arg(value_name = "/PATH[#N]")]
 	pub procs: Vec<String>,
-	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after the specified duration. [default: unlimited]")]
+	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after SECONDS. [default: unlimited]")]
 	pub duration: Option<Duration>,
 	#[arg(
 		long,
@@ -543,7 +549,7 @@ pub struct Profile {
 pub struct Check {
 	#[arg(value_name = "DME")]
 	pub dme: Option<PathBuf>,
-	#[arg(short = 'D', value_name = "NAME[=VALUE]", help = "Set a build define (repeatable). Match the DMB build.")]
+	#[arg(short = 'D', value_name = "NAME[=VALUE]", help = "Define a build preprocessor macro. Repeatable.")]
 	pub defines: Vec<String>,
 	#[arg(long, value_name = "VERSION", value_parser = byond_version, help = byond_version_help())]
 	pub byond_version: Option<(u32, u32)>,
@@ -729,7 +735,7 @@ mod tests {
 		);
 		assert_eq!(
 			refused(&["wait", "--break", "a.dm:3"]),
-			"unexpected argument '--break' before a wait command: specify pause, reload, or reboot. Run 'auxtools wait --help' for usage."
+			"unexpected argument '--break' before a wait command. Specify pause, reload, or reboot first. Run 'auxtools wait --help' for usage."
 		);
 		assert_eq!(
 			refused(&["status", "--sideways"]),
@@ -939,6 +945,6 @@ mod tests {
 		assert!(shown(&["stop", "--help"]).starts_with("Request graceful shutdown and wait for the world process to exit.\n"));
 		assert_eq!(shown(&["stop", "-h"]), shown(&["stop", "--help"]));
 		assert!(shown(&["wait", "pause", "--help"]).starts_with("Wait for execution to pause and report the location and reason.\n"));
-		assert!(shown(&["wait", "--help"]).starts_with("Wait for a debugger or world lifecycle event.\n"));
+		assert!(shown(&["wait", "--help"]).starts_with("Wait for a pause, hot reload, or reboot.\n"));
 	}
 }
