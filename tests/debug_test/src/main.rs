@@ -968,6 +968,29 @@ fn watches_at_the_end() {
 	client.resume();
 	expect_returned(&mut client, dot);
 	println!("ok: a frame watch stops for a change right before its proc returns");
+	let first_change = InstructionRef {
+		offset: paused_at(&mut client).1,
+		..start_of("/watched_steps")
+	};
+
+	let response = client.request(Request::BreakpointUnset {
+		instruction: end.clone(),
+		exact: true
+	});
+	assert!(matches!(response, Response::BreakpointUnset { success: true, .. }), "{:?}", response);
+	break_exactly(&mut client, &first_change, Some("logged"));
+	let steps = watch_steps(&mut client, "steps");
+	let logged = client.recv();
+	assert!(
+		matches!(&logged, Response::Log { message, .. } if message == "logged"),
+		"expected the logpoint's message, got {:?}",
+		logged
+	);
+	assert_eq!(client.expect_pause(), changed(steps, "steps", "null", "1"));
+	assert_eq!(client.expect_pause(), changed(steps, "steps", "1", "2"));
+	client.resume();
+	expect_returned(&mut client, steps);
+	println!("ok: a logpoint where a watch stops logs once, with one stop");
 }
 
 fn false_condition_on_a_caught_throw() {
