@@ -24,6 +24,9 @@ var/datum/held/held = new
 	sleep(1)
 	return fail_deeper(5)
 
+/world
+	fps = 100
+
 /world/New()
 	..()
 	spawn(1)
@@ -58,18 +61,19 @@ var/datum/held/held = new
 		tally()
 		rounds++
 		said++
-		if (fexists("fail"))
-			fdel("fail")
-			spawn(0)
-				fail()
-		if (fexists("reboot"))
-			fdel("reboot")
-			world.Reboot()
-		if (fexists("call"))
-			fdel("call")
-			spawn(0)
-				fail_in(1)
-		sleep(5)
+		if (rounds % 5 == 0)
+			if (fexists("fail"))
+				fdel("fail")
+				spawn(0)
+					fail()
+			if (fexists("reboot"))
+				fdel("reboot")
+				world.Reboot()
+			if (fexists("call"))
+				fdel("call")
+				spawn(0)
+					fail_in(1)
+		sleep(1)
 	world.log << "attach test: done"
 	del(world)
 
