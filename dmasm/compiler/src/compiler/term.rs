@@ -368,6 +368,7 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
                     if zero[last] {
                         if let Some(live) = zero.iter().rposition(|z| !z) {
                             compiler.warn_bug(
+                                crate::diagnostic::Id::ByondZeroWeightPick,
                                 "`pick()` ends with a zero-weight entry, for which DreamMaker generates a jump out of the proc",
                                 ", whereas dmasm selects the last entry without a constant zero weight",
                             );
