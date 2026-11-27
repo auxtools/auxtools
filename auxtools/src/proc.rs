@@ -115,14 +115,14 @@ impl Proc {
 
 	pub fn parameter_names(&self) -> Vec<StringRef> {
 		unsafe {
-			let (data, count) = raw_types::misc::get_parameters(*(*self.entry()).metadata.parameters());
+			let (data, count) = raw_types::misc::get_parameters((*self.entry()).metadata.parameters);
 			(0..count).map(|i| StringRef::from_variable_id((*data.add(i)).name)).collect()
 		}
 	}
 
 	pub fn local_names(&self) -> Vec<StringRef> {
 		unsafe {
-			let (names, count) = raw_types::misc::get_locals(*(*self.entry()).metadata.locals());
+			let (names, count) = raw_types::misc::get_locals((*self.entry()).metadata.locals);
 			(0..count).map(|i| StringRef::from_variable_id(*names.add(i))).collect()
 		}
 	}
@@ -147,7 +147,7 @@ impl Proc {
 	}
 
 	pub fn locals_count(&self) -> usize {
-		unsafe { raw_types::misc::get_locals(*(*self.entry()).metadata.locals()).1 }
+		unsafe { raw_types::misc::get_locals((*self.entry()).metadata.locals).1 }
 	}
 
 	/// Returns a mutable pointer to this proc's current bytecode buffer and its
@@ -161,7 +161,7 @@ impl Proc {
 	/// pointer remains valid only until the proc's bytecode is replaced or the
 	/// world shuts down.
 	pub unsafe fn bytecode_mut_ptr(&self) -> (*mut u32, u16) {
-		raw_types::misc::get_bytecode(*(*self.entry()).metadata.bytecode())
+		raw_types::misc::get_bytecode((*self.entry()).metadata.bytecode)
 	}
 
 	/// Returns this proc's current bytecode as a slice of at most 65,535 words.

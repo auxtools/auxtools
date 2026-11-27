@@ -61,10 +61,6 @@ extern "C" {
 
 	fn execute_instruction_hook();
 
-	// The 514 version of the instruction hook.
-	#[cfg(windows)]
-	fn execute_instruction_hook_514();
-
 	#[cfg(unix)]
 	fn execute_instruction_hook_edi();
 }
@@ -504,11 +500,7 @@ fn detour() -> Result<(), String> {
 	}
 
 	#[cfg(windows)]
-	let versioned_hook = if crate::version::get().0 == 514 {
-		execute_instruction_hook_514 as *const ()
-	} else {
-		execute_instruction_hook as *const ()
-	};
+	let versioned_hook = execute_instruction_hook as *const ();
 	#[cfg(unix)]
 	let versioned_hook = if crate::version::get().1 < 1644 {
 		execute_instruction_hook_edi as *const ()
