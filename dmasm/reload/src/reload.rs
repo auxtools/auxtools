@@ -1287,7 +1287,7 @@ impl Snapshot {
             location,
             Statement::Return(Some(expression.clone())),
         )]);
-        self.compile_synthetic(ty, "(in list)", block, location, true, None, &[])
+        self.compile_synthetic(ty, "(in list)", block, location, true, None, &[], None)
     }
 
     pub(crate) fn compile_value(
@@ -1330,6 +1330,7 @@ impl Snapshot {
             false,
             proc_path,
             statics,
+            Some(declared),
         )
     }
 
@@ -1361,7 +1362,16 @@ impl Snapshot {
                 )
             })
             .collect();
-        self.compile_synthetic(ty, "(init)", block, ty.get().location, false, None, &[])
+        self.compile_synthetic(
+            ty,
+            "(init)",
+            block,
+            ty.get().location,
+            false,
+            None,
+            &[],
+            None,
+        )
     }
 
     fn compile_synthetic(
@@ -1373,6 +1383,7 @@ impl Snapshot {
         debug_info: bool,
         proc_path: Option<&str>,
         statics: &[(String, u32, String)],
+        value_type: Option<&str>,
     ) -> Result<ProcReload, Diagnostic> {
         let value = ProcValue {
             location,
@@ -1399,7 +1410,7 @@ impl Snapshot {
         };
         let path = format!("{}/{}", ty.get().path, name);
         let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::compiler::compile_proc_as(&source, proc_path, statics)
+            crate::compiler::compile_proc_as(&source, proc_path, statics, value_type)
         })) {
             Ok(Ok(compiled)) => compiled,
             Ok(Err(e)) => return Err(e.diagnostic()),
@@ -2494,7 +2505,7 @@ fn implicit_type_changes(
     value: &ProcValue,
     reads: impl Fn(&dreammaker::ast::Term, &[dreammaker::ast::Spanned<dreammaker::ast::Follow>]) -> bool,
 ) -> bool {
-    use dreammaker::ast::{BinaryOp, Expression, Term};
+    use dreammaker::ast::{AssignOp, BinaryOp, Expression, Statement, Term, VarStatement};
     fn takes_type(expr: &Expression) -> bool {
         match expr {
             Expression::Base { term, follow } if follow.is_empty() => match &term.elem {
@@ -2509,9 +2520,54 @@ fn implicit_type_changes(
                 lhs,
                 rhs,
             } => takes_type(lhs) || takes_type(rhs),
+            Expression::TernaryOp { if_, else_, .. } => takes_type(if_) || takes_type(else_),
             _ => false,
         }
     }
+    fn destination_casts(expr: &Expression, casts: &mut HashSet<usize>) {
+        match expr {
+            Expression::Base { term, follow } if follow.is_empty() => match &term.elem {
+                Term::Call(name, args) if name.as_str() == "astype" && args.len() == 1 => {
+                    casts.insert(&term.elem as *const Term as usize);
+                }
+                Term::Expr(inner) => destination_casts(inner, casts),
+                _ => {}
+            },
+            Expression::BinaryOp {
+                op: BinaryOp::And | BinaryOp::Or,
+                lhs,
+                rhs,
+            } => {
+                destination_casts(lhs, casts);
+                destination_casts(rhs, casts);
+            }
+            Expression::TernaryOp { if_, else_, .. } => {
+                destination_casts(if_, casts);
+                destination_casts(else_, casts);
+            }
+            _ => {}
+        }
+    }
+    fn declared_casts(vars: &[VarStatement], casts: &mut HashSet<usize>) {
+        for var in vars.iter().filter(|var| !var.var_type.type_path.is_empty()) {
+            if let Some(value) = &var.value {
+                destination_casts(value, casts);
+            }
+        }
+    }
+    let mut casts = HashSet::new();
+    syntax::walk_proc(value, &mut |node| match node {
+        syntax::Node::Expression(Expression::AssignOp {
+            op: AssignOp::Assign | AssignOp::AndAssign | AssignOp::OrAssign,
+            rhs,
+            ..
+        }) => destination_casts(rhs, &mut casts),
+        syntax::Node::Statement(Statement::Var(var)) => {
+            declared_casts(std::slice::from_ref(var), &mut casts)
+        }
+        syntax::Node::Statement(Statement::Vars(vars)) => declared_casts(vars, &mut casts),
+        _ => {}
+    });
     let local_types = retargeted::local_read_types(value);
     let mut found = false;
     syntax::walk_proc(value, &mut |node| {
@@ -2519,8 +2575,10 @@ fn implicit_type_changes(
             syntax::Node::Expression(Expression::AssignOp { lhs, rhs, .. }) if takes_type(rhs) => {
                 (&**lhs, true)
             }
-            syntax::Node::Term(Term::Call(name, args))
-                if matches!(name.as_str(), "astype" | "istype") && args.len() == 1 =>
+            syntax::Node::Term(term @ Term::Call(name, args))
+                if matches!(name.as_str(), "astype" | "istype")
+                    && args.len() == 1
+                    && !casts.contains(&(term as *const Term as usize)) =>
             {
                 (&args[0], false)
             }

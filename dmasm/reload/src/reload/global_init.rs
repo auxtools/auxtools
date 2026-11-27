@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use dreammaker::ast::{Expression, Follow, Spanned, Statement, Term, VarStatement};
+use dreammaker::ast::{
+    Expression, Follow, PropertyAccessKind, Spanned, Statement, Term, VarStatement,
+};
 use dreammaker::objtree::TypeRef;
 use std::path::{Path, PathBuf};
 
@@ -409,18 +411,6 @@ fn retargeted(
             if !r.expression_might_name(expression, &init.ty.get().path) {
                 return false;
             }
-            let compiled = |s: &Snapshot, init: &Initializer<'_>| {
-                let expression = init.expression?;
-                s.compile_value(
-                    init.ty,
-                    expression,
-                    &init.declared,
-                    value_location(expression, init.location),
-                    init.proc_path.as_deref(),
-                    &init.visible,
-                )
-                .ok()
-            };
             match (compiled(old, was), compiled(new, init)) {
                 (Some(before), Some(after)) => !r.same_code(&before, &after),
                 (None, None) => false,
@@ -429,6 +419,19 @@ fn retargeted(
         }
         _ => false,
     }
+}
+
+fn compiled(s: &Snapshot, init: &Initializer<'_>) -> Option<ProcReload> {
+    let expression = init.expression?;
+    s.compile_value(
+        init.ty,
+        expression,
+        &init.declared,
+        value_location(expression, init.location),
+        init.proc_path.as_deref(),
+        &init.visible,
+    )
+    .ok()
 }
 
 #[allow(clippy::type_complexity)]
@@ -528,8 +531,26 @@ fn renumber_old_statics(
     }
 }
 
-fn changed(new: &Snapshot, before: &[Initializer<'_>], after: &[Initializer<'_>]) -> Vec<Refusal> {
+fn changed(
+    (old, before): (&Snapshot, &[Initializer<'_>]),
+    (new, after): (&Snapshot, &[Initializer<'_>]),
+    r: &Retargeted,
+) -> Vec<Refusal> {
     let was: HashMap<_, _> = before.iter().map(|i| (i.key(), i)).collect();
+    let rebound = |was: &Initializer<'_>, init: &Initializer<'_>| {
+        let (before, after) = (was.bound(), init.bound());
+        let same_slots = before.len() == after.len()
+            && before
+                .iter()
+                .zip(&after)
+                .all(|(b, a)| (b.0, b.1) == (a.0, a.1));
+        before != after
+            && (!same_slots
+                || match (compiled(old, was), compiled(new, init)) {
+                    (Some(before), Some(after)) => !r.same_code(&before, &after),
+                    _ => true,
+                })
+    };
     after
         .iter()
         .filter(|init| {
@@ -537,7 +558,7 @@ fn changed(new: &Snapshot, before: &[Initializer<'_>], after: &[Initializer<'_>]
                 was.constant != init.constant
                     || was.expression != init.expression
                     || was.constructed() != init.constructed()
-                    || was.bound() != init.bound()
+                    || rebound(was, init)
             })
         })
         .map(|init| {
@@ -1071,12 +1092,56 @@ impl<'a> Walk<'a> {
         true
     }
 
+    fn static_set(&self, scope: StaticScope, name: &str, finishing: bool) -> bool {
+        let key = (scope, name.to_owned());
+        (finishing || self.passed.contains(&key))
+            && (!self.computed.contains(&key) || self.set.contains(&key))
+    }
+
+    fn chain_statics_set<'f>(
+        &self,
+        snapshot: &Snapshot,
+        init: &Initializer,
+        name: &str,
+        fields: impl IntoIterator<Item = (PropertyAccessKind, &'f str)>,
+        finishing: bool,
+    ) -> bool {
+        let mut path = declared_type(snapshot, init, name);
+        for (kind, field) in fields {
+            if !matches!(kind, PropertyAccessKind::Dot | PropertyAccessKind::SafeDot) {
+                return true;
+            }
+            let Some(ty) = path
+                .and_then(|path| {
+                    snapshot
+                        .tree
+                        .find(&format!("/{}", path.trim_start_matches('/')))
+                })
+                .filter(|ty| !ty.is_root())
+            else {
+                return true;
+            };
+            let Some(declaration) = ty.get_var_declaration(field) else {
+                return true;
+            };
+            let flags = declaration.get().var_type.flags;
+            if flags.is_static()
+                && !flags.is_const()
+                && !self.static_set(
+                    StaticScope::Type(declaration.ty().get().path.clone()),
+                    field,
+                    finishing,
+                )
+            {
+                return false;
+            }
+            path = Some(declaration.get().var_type.type_path.to_string());
+        }
+        true
+    }
+
     fn value_set(&self, init: &Initializer, name: &str, global: bool, finishing: bool) -> bool {
-        let set = |scope: StaticScope| {
-            let key = (scope, name.to_owned());
-            (finishing || self.passed.contains(&key))
-                && (!self.computed.contains(&key) || self.set.contains(&key))
-        };
+        let set = |scope: StaticScope| self.static_set(scope, name, finishing);
         let t = init.ty;
         if !global {
             if let Some(proc_path) = &init.proc_path {
@@ -1280,17 +1345,13 @@ impl<'a> Walk<'a> {
                     return;
                 }
                 Seen::StaticFieldOf(_) => return,
-                Seen::MemberOf(name, proc) => {
-                    let declared = |ty: TypeRef| {
-                        ty.get_var_declaration(name)
-                            .map(|d| d.get().var_type.type_path.to_string())
-                    };
-                    let param = init.params.iter().find(|(param, _)| param == name);
-                    let path = match param
-                        .map(|(_, path)| path.clone())
-                        .or_else(|| declared(t))
-                        .or_else(|| declared(root))
-                    {
+                Seen::MemberOf(name, proc, follow) => {
+                    let fields = follow.iter().map_while(|f| match &f.elem {
+                        Follow::Field(kind, field) => Some((*kind, field.as_str())),
+                        _ => None,
+                    });
+                    ready &= self.chain_statics_set(snapshot, init, name, fields, finishing);
+                    let path = match declared_type(snapshot, init, name) {
                         Some(path) => path,
                         None if name == "world" => "world".to_owned(),
                         None => String::new(),
@@ -1315,6 +1376,16 @@ impl<'a> Walk<'a> {
                 Term::__TYPE__ => self.types.contains(&t.index().index()),
                 Term::Ident(name) => self.value_set(init, name, false, finishing),
                 Term::GlobalIdent(name) => self.value_set(init, name, true, finishing),
+                Term::NewMiniExpr { expr, .. } => {
+                    self.value_set(init, &expr.ident, false, finishing)
+                        && self.chain_statics_set(
+                            snapshot,
+                            init,
+                            &expr.ident,
+                            expr.fields.iter().map(|f| (f.kind, f.ident.as_str())),
+                            finishing,
+                        )
+                }
                 Term::Call(name, _) => call(name, false),
                 Term::GlobalCall(name, _) => call(name, true),
                 Term::Prefab(prefab) | Term::NewPrefab { prefab, .. } => {
@@ -1439,12 +1510,30 @@ fn literal(expression: &Expression) -> bool {
     }
 }
 
+fn declared_type(snapshot: &Snapshot, init: &Initializer, name: &str) -> Option<String> {
+    let declared = |ty: TypeRef, name: &str| {
+        ty.get_var_declaration(name)
+            .map(|d| d.get().var_type.type_path.to_string())
+    };
+    init.visible
+        .iter()
+        .rev()
+        .find(|(n, ..)| n == name)
+        .map(|(.., ty)| ty.clone())
+        .or_else(|| {
+            let param = init.params.iter().find(|(param, _)| param == name);
+            param.map(|(_, ty)| ty.clone())
+        })
+        .or_else(|| declared(init.ty, name))
+        .or_else(|| declared(snapshot.tree.root(), name))
+}
+
 enum Seen<'e> {
     Term(&'e Term),
     GlobalCall(&'e str),
     GlobalVar(&'e str),
     StaticFieldOf(&'e Term),
-    MemberOf(&'e str, Option<&'e str>),
+    MemberOf(&'e str, Option<&'e str>, &'e [Spanned<Follow>]),
 }
 
 fn terms<'e>(expression: &'e Expression, each: &mut dyn FnMut(Seen<'e>)) {
@@ -1470,9 +1559,9 @@ fn terms<'e>(expression: &'e Expression, each: &mut dyn FnMut(Seen<'e>)) {
                 each(Seen::StaticFieldOf(&term.elem));
             }
             match (name, first) {
-                (Some(name), Some(Follow::Field(..))) => each(Seen::MemberOf(name, None)),
+                (Some(name), Some(Follow::Field(..))) => each(Seen::MemberOf(name, None, follow)),
                 (Some(name), Some(Follow::Call(_, proc, _))) => {
-                    each(Seen::MemberOf(name, Some(proc.as_str())))
+                    each(Seen::MemberOf(name, Some(proc.as_str()), follow))
                 }
                 _ => {}
             }
@@ -1760,7 +1849,7 @@ pub(super) fn compare(
     let Some(table) = differences((old, &before), (new, &after), r) else {
         return;
     };
-    let deferred = changed(new, &before, &after);
+    let deferred = changed((old, &before), (new, &after), r);
     let table_vars = table.len();
     let without = |why: String| {
         Diagnostic::warning(

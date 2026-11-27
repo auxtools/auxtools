@@ -2548,6 +2548,46 @@ fn a_changed_implicit_type_refuses_the_callers_dmasm_cant_compile() {
 }
 
 #[test]
+fn a_cast_to_its_destinations_type_ignores_the_values_type() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let code = format!(
+        "/datum/base\n\n/datum/base/sub\n\n/datum/other\n\n/datum/other/sub\n\n\
+         /proc/declared(datum/holder/h, x)\n{uncompiled}\tvar/datum/base/result = astype(h.source)\n\treturn result\n\n\
+         /proc/or_declared(datum/holder/h, x)\n{uncompiled}\tvar/datum/base/result = x || astype(h.source)\n\treturn result\n\n\
+         /proc/ternary(datum/holder/h, x)\n{uncompiled}\tvar/datum/base/result = x ? astype(h.source) : null\n\treturn result\n\n\
+         /proc/assigned(datum/holder/h, x)\n{uncompiled}\tvar/datum/base/result\n\tresult = astype(h.source)\n\treturn result\n\n\
+         /proc/field(datum/holder/h, x)\n{uncompiled}\th.target = astype(h.source)\n\n\
+         /proc/field_ternary(datum/holder/h, x)\n{uncompiled}\th.target = x ? astype(h.source) : null\n\n\
+         /proc/value(datum/holder/h, x)\n{uncompiled}\treturn astype(h.source)\n\n"
+    );
+    let before = "/datum/holder\n\tvar/datum/other/source\n\tvar/datum/base/target\n";
+    for (name, after, refused_paths) in [
+        (
+            "cast-value-retyped",
+            before.replace("other/source", "other/sub/source"),
+            vec!["/value"],
+        ),
+        (
+            "cast-destination-retyped",
+            before.replace("base/target", "base/sub/target"),
+            vec!["/field", "/field_ternary"],
+        ),
+    ] {
+        let changes = types_changes(name, &code, before, &after);
+        let refused: Vec<&str> = changes.refused.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(refused, refused_paths, "{}: {:?}", name, changes.refused);
+        assert!(
+            changes.refused[0]
+                .why
+                .starts_with("infers the type of `new`"),
+            "{}: {}",
+            name,
+            changes.refused[0]
+        );
+    }
+}
+
+#[test]
 fn a_retyped_global_refuses_the_callers_dmasm_cant_compile_that_make_it_by_global_name() {
     let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
     let code = format!(
@@ -5422,6 +5462,18 @@ fn a_retyped_static_changes_what_a_later_initializer_reads_through_it() {
 }
 
 #[test]
+fn a_retyped_static_that_a_later_initializer_only_reads_changes_nothing() {
+    let before = "/datum/a\n/datum/b\n\n\
+                  /proc/entries()\n\tvar/static/datum/a/config\n\
+                  \tvar/static/list/entries = list(config)\n\treturn entries\n";
+    let after = before.replace("static/datum/a/config", "static/datum/b/config");
+    let changes = changes("static-retyped-plain-read", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert_eq!(reloaded(&changes), [key("/entries", 0)]);
+}
+
+#[test]
 fn a_static_moved_into_a_block_changes_the_type_a_later_initializer_makes() {
     let before = "var/kind = /datum/b\n\n/datum/a\n/datum/b\n\n\
                   /proc/made(x)\n\tvar/static/kind = /datum/a\n\tif (x)\n\t\tkind = null\n\
@@ -5455,6 +5507,31 @@ fn a_static_moved_into_a_block_changes_the_type_a_later_initializer_makes() {
 }
 
 #[test]
+fn an_initializer_that_makes_a_computed_kind_waits_for_it() {
+    let before = "var/global_kind = choose_kind()\nvar/global_item = new global_kind()\n\n\
+                  /proc/made()\n\tvar/static/kind = choose_kind()\n\
+                  \tvar/static/item = new kind()\n\treturn item\n\n\
+                  /proc/choose_kind()\n\treturn /datum/a\n\n/datum/a\n";
+    let after = before
+        .replace("item = new kind()", "item = new kind(1)")
+        .replace("item = new global_kind()", "item = new global_kind(1)");
+    let changes = changes("computed-kind", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let sets = global_init_sets(&changes);
+    let at = |name: &str| {
+        sets.iter()
+            .position(|set| set.contains(&format!(":{name} @")))
+            .unwrap_or_else(|| panic!("{name} isn't set: {sets:?}"))
+    };
+    assert!(at("kind") < at("item"), "item before its kind: {:?}", sets);
+    assert!(
+        at("global_kind") < at("global_item"),
+        "global_item before its kind: {:?}",
+        sets
+    );
+}
+
+#[test]
 fn a_global_init_names_the_override_whose_static_each_initializer_sets() {
     let before = "var/rolled = rand(1, 2)\n\n\
                   /datum/t/proc/f()\n\treturn 0\n\n\
@@ -5478,4 +5555,115 @@ fn a_global_init_names_the_override_whose_static_each_initializer_sets() {
     );
     let first = init.without(|var| var.name.0 == b"rolled");
     assert_eq!(first.owners, init.owners[1..]);
+}
+
+fn cast_types(nodes: &[Node]) -> Vec<String> {
+    nodes
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [Node::Instruction(Instruction::PushVal(dmasm_bytecode::Value::Path(path)), ()), Node::Instruction(Instruction::AsType, ())] => {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_cast_in_an_initializer_takes_the_vars_declared_type() {
+    let before = "/datum/item\n/datum/other\n\nvar/datum/source = new /datum/other\n\n\
+                  /proc/f()\n\treturn 1\n";
+    let after = "/datum/item\n/datum/other\n\nvar/datum/source = new /datum/other\n\
+                 var/datum/item/selected = astype(source)\n\n\
+                 /proc/f()\n\tvar/static/datum/item/held = astype(source)\n\treturn held\n";
+    let changes = changes("initializer-cast", before, after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let selected = changes
+        .plan
+        .new_vars
+        .iter()
+        .find(|var| var.var == "selected")
+        .and_then(|var| var.init.as_ref())
+        .expect("no initializer for selected");
+    assert_eq!(
+        cast_types(&selected.nodes),
+        ["/datum/item"],
+        "the new global"
+    );
+    let held = changes.plan.reloads[0].statics[0]
+        .init
+        .as_ref()
+        .expect("no initializer for held");
+    assert_eq!(cast_types(&held.nodes), ["/datum/item"], "the new static");
+    let reboot = &changes.global_init.as_ref().expect("no global init").code;
+    assert_eq!(
+        cast_types(&reboot.nodes),
+        ["/datum/item", "/datum/item"],
+        "the reboot's initializers"
+    );
+}
+
+#[test]
+fn an_initializer_that_reads_a_computed_static_through_a_var_waits_for_it() {
+    let kinds = "/datum/config\n\tvar/static/item_type = choose_kind()\n\n\
+                 /proc/choose_kind()\n\treturn /datum/a\n\n/datum/a\n";
+    let made = format!(
+        "var/datum/config/config\n\n\
+         var/global_item = new config.item_type()\n\n\
+         /proc/made()\n\tvar/static/item = new config.item_type()\n\treturn item\n\n{kinds}"
+    );
+    let read = format!("var/datum/config/config\n\nvar/global_kind = config.item_type\n\n{kinds}");
+    for (name, before, after, readers) in [
+        (
+            "computed-static-made",
+            &made,
+            made.replace("new config.item_type()", "new config.item_type(1)"),
+            &[":global_item", "/proc/made#0:item"][..],
+        ),
+        (
+            "computed-static-read",
+            &read,
+            read.replace("= config.item_type\n", "= config.item_type || 1\n"),
+            &[":global_kind"][..],
+        ),
+    ] {
+        let changes = changes(name, before, &after);
+        assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+        let sets = global_init_sets(&changes);
+        let at = |var: &str| {
+            sets.iter()
+                .position(|set| set.starts_with(&format!("{} @", var)))
+                .unwrap_or_else(|| panic!("{} isn't set: {:?}", var, sets))
+        };
+        for reader in readers {
+            assert!(
+                at("/datum/config:item_type") < at(reader),
+                "{} before the static it reads: {:?}",
+                reader,
+                sets
+            );
+        }
+    }
+}
+
+#[test]
+fn a_read_through_a_static_takes_the_statics_type() {
+    let before = "var/datum/holder/items\n\n\
+                  /proc/f()\n\tvar/static/list/items = list(1, 2)\n\
+                  \tvar/static/count = items.len\n\treturn count\n\n\
+                  var/later = f()\n\n/datum/holder\n";
+    let after = before.replace("var/later = f()", "var/later = f() || 0");
+    let changes = changes("read-through-static", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let sets = global_init_sets(&changes);
+    let at = |var: &str| {
+        sets.iter()
+            .position(|set| set.starts_with(&format!("{} @", var)))
+            .unwrap_or_else(|| panic!("{} isn't set: {:?}", var, sets))
+    };
+    assert!(
+        at("/proc/f#0:count") < at(":later"),
+        "later, which calls the proc, before the proc's static: {:?}",
+        sets
+    );
 }
