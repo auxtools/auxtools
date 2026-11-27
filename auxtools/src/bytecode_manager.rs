@@ -129,12 +129,44 @@ unsafe fn references(entry: u32) -> Result<u32, String> {
 	Ok(*((misc_entry(entry)? as *const u8).add(4) as *const u32))
 }
 
+/// Records a copy of `bytecode` under the address `ptr` so [`bytecode_at`] can
+/// return the original words after the buffer is modified in place.
+///
+/// Call on BYOND's thread while the library is initialized. The first record
+/// for a given `ptr` is kept until shutdown, and subsequent calls for the same
+/// address leave the stored copy unchanged while still advancing
+/// [`bytecode_changes`]. `ptr` is used only as a lookup key and is never
+/// dereferenced.
+///
+/// # Panics
+///
+/// Panics if called before the library is initialized or after shutdown.
+#[track_caller]
 pub fn remember_bytecode(ptr: *const u32, bytecode: &[u32]) {
+	crate::expect_live("remember_bytecode");
 	changed();
-	unsafe { state() }.retired_by_address.entry(ptr as usize).or_insert_with(|| bytecode.to_vec());
+	unsafe { state() }
+		.retired_by_address
+		.entry(ptr as usize)
+		.or_insert_with(|| bytecode.to_vec());
 }
 
+/// Returns a copy of the bytecode at `ptr` if this library replaced or recorded
+/// it.
+///
+/// Call on BYOND's thread while the library is initialized, passing the exact
+/// start address of a bytecode buffer. Checks recorded copies from
+/// [`remember_bytecode`] or moved procs first, then original buffers replaced
+/// by `Proc::set_bytecode`, and finally buffers allocated by
+/// `Proc::set_bytecode`. Returns `None` for bytecode this library has not
+/// modified or recorded.
+///
+/// # Panics
+///
+/// Panics if called before the library is initialized or after shutdown.
+#[track_caller]
 pub fn bytecode_at(ptr: *const u32) -> Option<Vec<u32>> {
+	crate::expect_live("bytecode_at");
 	let state = unsafe { state() };
 
 	if let Some(bytecode) = state.retired_by_address.get(&(ptr as usize)) {
