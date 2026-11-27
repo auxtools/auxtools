@@ -619,17 +619,13 @@ unsafe fn add_mob_type(mob: MobType) -> Result<u32, String> {
 }
 
 pub unsafe fn set_mob_type(type_id: u32, set: impl FnOnce(&mut MobType)) -> Result<(), String> {
-	let mut mob = *mob_slot(type_id)?;
-	set(&mut mob);
-	*mob_slot(type_id)? = mob;
-	Ok(())
-}
-
-unsafe fn mob_slot(type_id: u32) -> Result<*mut MobType, String> {
 	let functions = functions()?;
-	let mobs = std::slice::from_raw_parts_mut(*functions.mobs, *functions.mob_count as usize);
-	let mob = mobs.iter_mut().find(|m| m.type_id == type_id).ok_or("it isn't a mob type")?;
-	Ok(mob)
+	unsafe {
+		let mobs = std::slice::from_raw_parts_mut(*functions.mobs, *functions.mob_count as usize);
+		let mob = mobs.iter_mut().find(|m| m.type_id == type_id).ok_or("type is not a mob type")?;
+		set(mob);
+	}
+	Ok(())
 }
 
 pub unsafe fn instances() -> Result<Vec<Instance>, String> {
