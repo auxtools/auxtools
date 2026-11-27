@@ -2096,7 +2096,7 @@ impl Adapter {
 			prefix: prefix.to_owned()
 		})? {
 			AuxResponse::Complete(names) => {
-				let member = place.base.is_some();
+				let member = place.base.is_some_and(|base| base != "global");
 				let targets: Vec<Value> = names
 					.iter()
 					.map(|name| {
@@ -2331,6 +2331,20 @@ fn completion_place(text: &str) -> Option<CompletionPlace<'_>> {
 	let mut base_end = None;
 	loop {
 		let before = &text[..at];
+		if before
+			.strip_suffix("::")
+			.is_some_and(|head| !head.ends_with(|c: char| name_char(c) || matches!(c, ']' | ')' | '"')))
+		{
+			if base_end.is_none() {
+				return Some(CompletionPlace {
+					start,
+					base: Some("global"),
+					command: false
+				});
+			}
+			at -= 2;
+			break;
+		}
 		let Some(joined) = ["?.", "?:", ".", ":"].into_iter().find(|by| before.ends_with(by)) else {
 			break;
 		};
@@ -2560,6 +2574,9 @@ mod tests {
 		assert_eq!(place("items[2].na"), Some(("na", Some("items[2]"), false)));
 		assert_eq!(place("f(x) + items[\"k\"][i + 1].na"), Some(("na", Some("items[\"k\"][i + 1]"), false)));
 		assert_eq!(place("items?[1].na"), Some(("na", Some("items?[1]"), false)));
+		assert_eq!(place("::registry[k].na"), Some(("na", Some("::registry[k]"), false)));
+		assert_eq!(place("::reg"), Some(("reg", Some("global"), false)));
+		assert_eq!(place("x + ::count."), Some(("", Some("::count"), false)));
 		assert_eq!(place("items[\"slot (left)\"].na"), Some(("na", Some("items[\"slot (left)\"]"), false)));
 		assert_eq!(place("items[\"\\\"]\"].na"), Some(("na", Some("items[\"\\\"]\"]"), false)));
 		assert_eq!(place("items[f()].na"), Some(("na", Some("items[f()]"), false)));

@@ -313,6 +313,27 @@ pub(super) fn each_proc(mut each: impl FnMut(&str, &str)) {
 	}
 }
 
+fn root_procs(found: &mut BTreeMap<String, bool>) {
+	each_proc(|owner, name| {
+		if owner.is_empty() {
+			found.entry(name.to_owned()).or_insert(true);
+		}
+	});
+}
+
+fn global_names(found: &mut BTreeMap<String, bool>) {
+	if let Ok(names) = List::from_value(&unsafe { Value::new(ValueTag::GlobalVars, ValueData { id: 0 }) }) {
+		for i in 1..=names.len() {
+			if let Ok(name) = names.get(i).and_then(|name| name.as_string()) {
+				found.entry(name).or_insert(false);
+			}
+		}
+	}
+	for name in hot_reload::added_globals() {
+		found.entry(name).or_insert(false);
+	}
+}
+
 pub(super) fn entry_number(name: &str) -> Option<u32> {
 	name.strip_prefix('[')?.strip_suffix(']')?.parse().ok().filter(|&n| n > 0)
 }
@@ -355,7 +376,12 @@ impl Server {
 				let Ok(value) = self.read_expr(frame_id, base) else {
 					return vec![];
 				};
-				members_of(&value, &mut found);
+				if value == Value::GLOBAL {
+					global_names(&mut found);
+					root_procs(&mut found);
+				} else {
+					members_of(&value, &mut found);
+				}
 			}
 
 			None => {
@@ -381,21 +407,8 @@ impl Server {
 				for name in ["world", "global"] {
 					found.entry(name.to_owned()).or_insert(false);
 				}
-				if let Ok(names) = List::from_value(&unsafe { Value::new(ValueTag::GlobalVars, ValueData { id: 0 }) }) {
-					for i in 1..=names.len() {
-						if let Ok(name) = names.get(i).and_then(|name| name.as_string()) {
-							found.entry(name).or_insert(false);
-						}
-					}
-				}
-				for name in hot_reload::added_globals() {
-					found.entry(name).or_insert(false);
-				}
-				each_proc(|owner, name| {
-					if owner.is_empty() {
-						found.entry(name.to_owned()).or_insert(true);
-					}
-				});
+				global_names(&mut found);
+				root_procs(&mut found);
 			}
 		}
 
