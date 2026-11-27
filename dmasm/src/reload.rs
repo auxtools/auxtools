@@ -7,6 +7,7 @@ use dreammaker::preprocessor::DefineHistory;
 use dreammaker::{Context, FileId, Severity};
 
 use crate::compiler::{compile_proc, CompiledProc, ProcSource};
+use crate::syntax;
 
 #[path = "reload_moved.rs"]
 mod moved;
@@ -1634,6 +1635,19 @@ fn old_key(realigned: &Realigned, key: &ProcKey) -> Option<ProcKey> {
     }
 }
 
+fn names_any(value: &ProcValue, names: &HashSet<&str>, defaults: &HashSet<&str>) -> bool {
+    use dreammaker::ast::Follow;
+    let mut found = false;
+    syntax::walk_proc(value, &mut |node| {
+        found |= match node {
+            syntax::Node::Name(name) => names.contains(name),
+            syntax::Node::Follow(Follow::StaticField(name)) => defaults.contains(name.as_str()),
+            _ => false,
+        }
+    });
+    found
+}
+
 fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &mut Changes) {
     if changes.consts.is_empty()
         && changes.retyped.is_empty()
@@ -1642,17 +1656,17 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
     {
         return;
     }
-    let names: Vec<String> = changes
+    let names: HashSet<&str> = changes
         .consts
         .iter()
         .chain(&changes.retyped)
-        .map(|c| format!("{c:?}"))
+        .map(String::as_str)
         .collect();
-    let moved: Vec<String> = changes
+    let moved: HashSet<&str> = changes
         .defaults_changed
         .iter()
         .chain(&changes.defaults_moved)
-        .map(|c| format!("StaticField({c:?})"))
+        .map(String::as_str)
         .collect();
     let reloaded: HashSet<ProcKey> = changes.reloads.iter().map(|r| r.proc.clone()).collect();
     for key in new.procs.keys() {
@@ -1665,10 +1679,7 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         let (Some(_), Some((_, new_value))) = (old.find(&old_key), new.find(key)) else {
             continue;
         };
-        let text = format!("{:?}{:?}", new_value.code, new_value.parameters);
-        if !names.iter().any(|name| text.contains(name.as_str()))
-            && !moved.iter().any(|name| text.contains(name.as_str()))
-        {
+        if !names_any(new_value, &names, &moved) {
             continue;
         }
         let (Ok(before), Ok(after)) = (old.compile(&old_key), new.compile(key)) else {
@@ -3454,4 +3465,52 @@ fn names_after_scope(text: &str) -> Vec<(String, u32)> {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_strings_text_is_not_a_use_of_a_name() {
+        let code = "/proc/named()
+	return LIMIT + 1
+/proc/as_a_field(datum/d)
+	return d.LIMIT
+/proc/scoped()
+	return /datum/thing::size
+/proc/size()
+	return 1
+/proc/in_a_string()
+	return \"LIMIT\"
+/proc/in_a_strings_parts(x)
+	return \"LIMIT[x]LIMIT\"
+/proc/after_a_quote()
+	return \"is \\\"LIMIT\"
+/proc/in_a_resource()
+	return 'LIMIT'
+/proc/in_a_strings_code()
+	return \"is [LIMIT]\"
+";
+        let ctx = Context::default();
+        let pp = dreammaker::Preprocessor::from_buffer(&ctx, "code.dm".into(), code);
+        let mut parser = dreammaker::Parser::new(&ctx, pp);
+        parser.enable_procs();
+        let tree = parser.parse_object_tree_without_builtins();
+        let names: HashSet<&str> = vec!["LIMIT"].into_iter().collect();
+        let defaults: HashSet<&str> = vec!["size"].into_iter().collect();
+        let mut users: Vec<&str> = tree
+            .root()
+            .get()
+            .procs
+            .iter()
+            .filter(|(_, proc)| names_any(&proc.value[0], &names, &defaults))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        users.sort();
+        assert_eq!(
+            users,
+            ["as_a_field", "in_a_strings_code", "named", "scoped"]
+        );
+    }
 }
