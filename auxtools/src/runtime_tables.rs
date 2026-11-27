@@ -153,7 +153,8 @@ unsafe fn path_cache(build: u32, register: Option<usize>) -> Option<*const *mut 
 /// outside `1641`–`1689`.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. `value` must be the path's tag
+/// and data.
 pub unsafe fn recache_path(path: u32, value: [u32; 2]) {
 	const TEXT: u8 = 0x06;
 	const VALUE: usize = 0x08;
@@ -424,7 +425,8 @@ pub unsafe fn set_proc_entry(id: ProcId, words: &ProcEntryWords) {
 /// symbols are unavailable.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. The entry's IDs must be valid,
+/// as for [`set_proc_entry_word`].
 pub unsafe fn add_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 	let id = (functions()?.procdef_add)(entry);
 	if id == NONE {
@@ -447,7 +449,8 @@ pub unsafe fn add_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 /// symbols are unavailable.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. The entry's IDs must be valid,
+/// as for [`set_proc_entry_word`].
 pub unsafe fn append_proc(entry: &ProcEntryWords) -> Result<ProcId, String> {
 	let path = entry.0[ProcEntryWords::PATH];
 	let hidden: Vec<ProcId> = (0..proc_count())
@@ -685,7 +688,7 @@ pub unsafe fn in_list_procs() -> Result<Vec<u32>, String> {
 /// table symbols are unavailable.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. `proc` must be a proc ID.
 pub unsafe fn add_in_list(proc: ProcId) -> Result<u32, String> {
 	let functions = functions()?;
 	unsafe {
@@ -786,7 +789,7 @@ unsafe fn named_procs_in(map: *mut ProcNameMap, key: u32) -> Result<Vec<u32>, St
 /// required runtime table symbols are unavailable.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. `procs` must be proc IDs.
 pub unsafe fn set_named_procs(type_id: u32, key: u32, procs: &[u32]) -> Result<(), String> {
 	let map = name_map(type_id)?;
 	if unsafe { (*map).built } == 0 {
@@ -893,7 +896,8 @@ pub unsafe fn set_global_value(var_id: u32, value: crate::Value) -> Result<(), S
 /// symbols are unavailable.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. The caller must own a
+/// reference to the value, and this takes it over.
 pub unsafe fn set_global_words(var_id: u32, tag: u8, data: u32) -> Result<(), String> {
 	let functions = functions()?;
 	unsafe {
@@ -979,7 +983,8 @@ pub unsafe fn variable_name(var_id: u32) -> Option<u32> {
 /// fails, or if required runtime table symbols are unavailable.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. The caller must own a
+/// reference to the value, and the slot takes it over.
 pub unsafe fn add_variable(name: u32, tag: u8, data: u32) -> Result<u32, String> {
 	let functions = functions()?;
 	unsafe {
@@ -1028,7 +1033,8 @@ pub unsafe fn add_variable(name: u32, tag: u8, data: u32) -> Result<u32, String>
 /// build 1641 and later (see [`types_available`]).
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live.
+/// Call on BYOND's thread while a world is live. `path` must be a string ID
+/// that holds a reference.
 pub unsafe fn add_type(parent: u32, path: u32) -> Result<u32, String> {
 	use type_fields::*;
 	let functions = functions()?;

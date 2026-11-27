@@ -14,8 +14,16 @@ use std::{ffi::CString, fmt, marker::PhantomData};
 /// DM's `==`. Modifying the public `raw` field directly breaks reference
 /// counting. Methods taking a variable name (such as `get` and `set`) require a
 /// `StringRef` or `byond_string!`, not `&str`.
+///
+/// Dropping it releases its reference, so its raw value can only be read, with
+/// [`Value::raw`].
+///
+/// ```compile_fail
+/// let mut value = auxtools::Value::NULL;
+/// value.raw.tag = auxtools::raw_types::values::ValueTag::String;
+/// ```
 pub struct Value {
-	pub raw: raw_types::values::Value,
+	pub(crate) raw: raw_types::values::Value,
 	phantom: PhantomData<*mut ()>
 }
 
@@ -390,6 +398,10 @@ impl Value {
 	/// The caller must own one BYOND reference to `v` to transfer (for example,
 	/// a return value from a BYOND call). Calling this on a borrowed raw value
 	/// releases a reference still relied on elsewhere.
+	pub const fn raw(&self) -> raw_types::values::Value {
+		self.raw
+	}
+
 	pub const unsafe fn from_raw_owned(v: raw_types::values::Value) -> Value {
 		Value {
 			raw: v,
