@@ -7,9 +7,15 @@ fn get_next_id() -> f32 {
 	id as f32
 }
 
-/// A weak reference to a datum. You can store it globally or send it to other
-/// threads. Upgrade it only on the main thread. Every datum needs a
-/// `__auxtools_weakref_id` var.
+/// A non-owning weak reference to a DM datum.
+///
+/// `Copy`, `Send`, and `Sync`, so it can be stored in statics or sent across
+/// threads without keeping the datum alive. Create one with `Value::as_weak`
+/// and call [`WeakValue::upgrade`] only on BYOND's thread.
+///
+/// Target datum types must declare `var/__auxtools_weakref_id` in DM so
+/// auxtools can tag instances with a unique text ID (reused across multiple
+/// auxtools libraries in the same world).
 #[derive(Copy, Clone)]
 pub struct WeakValue {
 	inner: raw_types::values::Value,
@@ -28,7 +34,9 @@ impl WeakValue {
 	}
 
 	/// Returns `None` if the datum was deleted. Panics on any thread other than
+	/// BYOND's.
 	pub fn upgrade(&self) -> Option<Value> {
+		assert!(crate::on_byond_thread(), "WeakValue::upgrade must run on BYOND's thread");
 		let real_val = unsafe { Value::from_raw(self.inner) };
 		let id = real_val.get_number(byond_string!("__auxtools_weakref_id")).ok()?;
 
