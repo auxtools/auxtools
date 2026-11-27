@@ -45,7 +45,9 @@ impl Proc {
 	/// [`Proc::set_apart`].
 	pub const APART: u32 = u32::MAX;
 
+	#[track_caller]
 	pub fn overrides<S: Into<String>>(path: S) -> Vec<Self> {
+		crate::expect_live("Proc::overrides");
 		let path = strip_path(path.into());
 		PROCS_BY_NAME.with(|h| h.borrow().get(&path).cloned().unwrap_or_default())
 	}
@@ -80,7 +82,9 @@ impl Proc {
 	/// [`Proc::find_override`] to look up subsequent definitions. Returns
 	/// `None` if no matching proc exists, or if called before initialization,
 	/// after shutdown, or off BYOND's thread.
+	#[track_caller]
 	pub fn find<S: Into<String>>(path: S) -> Option<Self> {
+		crate::expect_live("Proc::find");
 		get_proc(path)
 	}
 
@@ -88,11 +92,15 @@ impl Proc {
 	///
 	/// Override ID `0` matches [`Proc::find`]. Passing [`Proc::APART`] returns
 	/// the proc most recently set apart for `path`.
+	#[track_caller]
 	pub fn find_override<S: Into<String>>(path: S, override_id: u32) -> Option<Self> {
+		crate::expect_live("Proc::find_override");
 		get_proc_override(path, override_id)
 	}
 
+	#[track_caller]
 	pub fn from_id(id: raw_types::procs::ProcId) -> Option<Self> {
+		crate::expect_live("Proc::from_id");
 		let proc_entry = entry_by_id(id);
 		if proc_entry.is_null() {
 			return None;
@@ -174,7 +182,9 @@ impl Proc {
 	/// `runtime_tables::add_proc`. Each proc is appended to its path's override
 	/// list, so registering the same ID more than once duplicates the entry and
 	/// shifts subsequent override IDs.
+	#[track_caller]
 	pub fn add_to_table(first: raw_types::procs::ProcId) {
+		crate::expect_live("Proc::add_to_table");
 		let mut id = first.0;
 		while let Some(proc) = Proc::from_id(raw_types::procs::ProcId(id)) {
 			register_proc(proc);

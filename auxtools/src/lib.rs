@@ -1,3 +1,25 @@
+//! Native Rust library for hooking DM procs and inspecting or modifying a
+//! running BYOND world.
+//!
+//! # Threads and worlds
+//!
+//! BYOND's data may be touched only on BYOND's thread while a world is live. A
+//! world is live from `auxtools_init`, or the load that [`init_on_world_load`]
+//! waits for, until `auxtools_shutdown` or [`shut_down_with_world`].
+//!
+//! The safe API keeps to this. [`Value`], [`Proc`], [`StringRef`] and [`List`]
+//! are neither `Send` nor `Sync`, so they stay on the thread that made them.
+//! Each safe function that makes one, or that reaches BYOND without one, first
+//! checks [`world_is_live`]. It returns an error if it returns a `Result`, and
+//! panics otherwise. Null and numbers hold no reference, so any thread can make
+//! them, and no method passes them to BYOND.
+//!
+//! A handle belongs to the world it was made in. Don't keep one after the hook
+//! or call that made it returns. Keep a [`WeakValue`] instead.
+//!
+//! The `unsafe` functions don't check. Their `# Safety` sections say what they
+//! need.
+
 #[doc(hidden)]
 pub mod appearance_tables;
 pub mod byond_ffi;
@@ -23,6 +45,7 @@ mod weak_value;
 
 use std::{
 	any::Any,
+	cell::Cell,
 	sync::{
 		atomic::{AtomicBool, AtomicU32, Ordering},
 		Mutex, OnceLock
@@ -58,6 +81,21 @@ extern crate winapi;
 /// `FreeLibrary` when this flag is `false`. Has no effect on Linux.
 ///
 /// Configure this flag with `pin_dll!` rather than storing to it directly.
+#[cfg(doctest)]
+pub struct ValueIsNotSend;
+
+#[cfg(doctest)]
+pub struct ValueIsNotSync;
+
+#[cfg(doctest)]
+pub struct StringRefIsNotSend;
+
+#[cfg(doctest)]
+pub struct ListIsNotSend;
+
+#[cfg(doctest)]
+pub struct ProcIsNotSync;
+
 pub static PIN_DLL: AtomicBool = AtomicBool::new(true);
 
 pub const BYONDCORE: &str = byond_scan::MODULE_NAME;
@@ -101,10 +139,60 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> String {
 	message.unwrap_or("no message").to_owned()
 }
 
-static BYOND_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThreadRole {
+	Other,
+	ByondAfterShutdown,
+	Live
+}
+
+thread_local!(static ROLE: Cell<ThreadRole> = const { Cell::new(ThreadRole::Other) });
+
+#[inline]
+pub fn world_is_live() -> bool {
+	ROLE.get() == ThreadRole::Live
+}
 
 pub(crate) fn on_byond_thread() -> bool {
-	BYOND_THREAD.get() == Some(&std::thread::current().id())
+	ROLE.get() != ThreadRole::Other
+}
+
+fn set_live(live: bool) {
+	ROLE.set(if live { ThreadRole::Live } else { ThreadRole::ByondAfterShutdown });
+}
+
+fn not_live_message(operation: &str) -> String {
+	match ROLE.get() {
+		ThreadRole::ByondAfterShutdown => format!("{} needs a live world, but auxtools has shut down", operation),
+		_ => format!(
+			"{} needs BYOND's thread while a world is live, but this is another thread or auxtools hasn't initialised",
+			operation
+		)
+	}
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn not_live(operation: &str) -> ! {
+	panic!("{}", not_live_message(operation))
+}
+
+#[inline]
+#[track_caller]
+pub(crate) fn expect_live(operation: &str) {
+	if !world_is_live() {
+		not_live(operation)
+	}
+}
+
+#[inline]
+pub(crate) fn check_live(operation: &str) -> Result<(), Runtime> {
+	if world_is_live() {
+		Ok(())
+	} else {
+		Err(Runtime::new(not_live_message(operation)))
+	}
 }
 
 static WORLD_GENERATION: AtomicU32 = AtomicU32::new(0);
@@ -135,7 +223,11 @@ fn try_init() -> Result<(), String> {
 }
 
 fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), String> {
-	guard(|| init_with(prepare)).unwrap_or_else(|panic| Err(format!("panicked: {}", panic_message(&*panic))))
+	let result = guard(|| init_with(prepare)).unwrap_or_else(|panic| Err(format!("panicked: {}", panic_message(&*panic))));
+	if result.is_err() && world_is_live() {
+		set_live(false);
+	}
+	result
 }
 
 fn init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), String> {
@@ -153,7 +245,7 @@ fn init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), String> 
 
 	if get_init_level() == InitLevel::Partial {
 		did_partial = true;
-		BYOND_THREAD.get_or_init(|| std::thread::current().id());
+		set_live(true);
 
 		symbols::resolve_partial()?;
 
@@ -236,7 +328,10 @@ static ENDING_WORLD: Mutex<Option<(raw_types::procs::ProcId, runtime_tables::Pro
 /// Returns an error if `init_on_world_load` has already been called (even if
 /// the first call failed), if the BYOND build is unsupported, or if a required
 /// BYOND function cannot be found.
-pub fn init_on_world_load(on_load: &'static WorldLoad) -> Result<(), String> {
+///
+/// # Safety
+/// Call it before the world loads, while no other thread uses auxtools.
+pub unsafe fn init_on_world_load(on_load: &'static WorldLoad) -> Result<(), String> {
 	if WORLD_LOAD.set(on_load).is_err() {
 		return Err("already waiting for the world to load".to_owned());
 	}
@@ -251,6 +346,10 @@ pub fn init_on_world_load(on_load: &'static WorldLoad) -> Result<(), String> {
 	Ok(())
 }
 
+/// Shuts down, and initialises again when the next world loads. Does nothing
+/// after a shutdown, or without [`init_on_world_load`]. Panics on a thread
+/// other than BYOND's.
+///
 /// Intended for worlds that reboot in place. Runs the same shutdown sequence as
 /// `auxtools_shutdown` (`#[shutdown]` callbacks, hook removal, and clearing the
 /// proc lookup and [`at_proc_calls`] queue), then waits for a subsequent proc
@@ -263,6 +362,10 @@ pub fn init_on_world_load(on_load: &'static WorldLoad) -> Result<(), String> {
 /// until that proc's entry is absent or changed at its ID in BYOND's proc
 /// table.
 pub fn init_on_next_world_load(added: Option<&Proc>) {
+	if !world_is_live() {
+		assert!(on_byond_thread(), "{}", not_live_message("init_on_next_world_load"));
+		return;
+	}
 	if WORLD_LOAD.get().is_none() || get_init_level() != InitLevel::None {
 		return;
 	}
@@ -271,7 +374,13 @@ pub fn init_on_next_world_load(added: Option<&Proc>) {
 	WORLD_LOAD_PENDING.store(true, Ordering::Relaxed);
 }
 
+/// Does nothing after a shutdown, or without [`init_on_world_load`]. Panics on
+/// a thread other than BYOND's.
 pub fn shut_down_with_world() {
+	if !world_is_live() {
+		assert!(on_byond_thread(), "{}", not_live_message("shut_down_with_world"));
+		return;
+	}
 	if WORLD_LOAD.get().is_none() || get_init_level() != InitLevel::None {
 		return;
 	}
@@ -411,6 +520,7 @@ fn shutdown_partial() {
 
 	WORLD_GENERATION.fetch_add(1, Ordering::Relaxed);
 	set_init_level(InitLevel::Partial);
+	set_live(false);
 }
 
 byond_ffi_fn! { auxtools_full_shutdown(_input) {
