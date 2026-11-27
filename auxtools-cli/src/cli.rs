@@ -467,6 +467,7 @@ impl World {
 
 	fn leave(&mut self) {
 		let _ = self.client.leave();
+		self.client.close();
 	}
 
 	fn lost(&self, lost: Lost) -> Failure {
