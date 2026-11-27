@@ -1,6 +1,6 @@
 [package]
 name = "auxtools"
-description = "library for interfacing with low-level BYOND internals"
+description = "Rust library for building native BYOND extensions with DM proc hooks, BYOND values, and bytecode replacement"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
