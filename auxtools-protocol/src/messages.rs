@@ -786,7 +786,17 @@ pub struct HotReloadRequest {
 pub struct LocalReads {
 	pub proc: dmasm::reload::ProcKey,
 	pub name: String,
-	pub reads: Vec<Option<u32>>
+	pub reads: Vec<Option<u32>>,
+	#[serde(default)]
+	pub parsed: Option<ParsedReads>,
+	#[serde(default)]
+	pub kept: Vec<(u32, u32)>
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParsedReads {
+	Only(u32),
+	Unknown
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

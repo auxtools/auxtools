@@ -62,3 +62,42 @@ var/const/ST_BOTH = 5
 /proc/st_both()
 	var/static/ST_BOTH = 7
 	return list(ST_BOTH, global.ST_BOTH)
+
+var/st_registered = 0
+
+/proc/st_register()
+	st_registered++
+	return st_registered
+
+var/st_state = 1
+
+/proc/st_stateful()
+	var/static/st_state = st_register()
+	return global.st_state + 1
+
+var/ST_UNKNOWN = 1
+
+/proc/st_unknown()
+	var/const/ST_UNKNOWN = 5
+	if (/datum/st_twice::f())
+		return global.ST_UNKNOWN
+
+/proc/st_unknown_global()
+	return ST_UNKNOWN
+
+/proc/st_branch(which)
+	if (which == 1)
+		var/static/st_branch_count = 0
+		st_branch_count++
+		return st_branch_count
+	return 0
+
+var/const/ST_RENAMED = 5
+
+/proc/st_renamed_root()
+	return ST_RENAMED
+
+/proc/st_renamed()
+	var/static/ST_RENAMED = 7
+	ST_RENAMED++
+	return ST_RENAMED

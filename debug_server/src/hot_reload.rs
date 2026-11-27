@@ -10,7 +10,7 @@ use auxtools::{
 	runtime_tables::{self, type_fields, ProcEntryWords, NONE},
 	shutdown, Proc, StringRef
 };
-use auxtools_protocol::{HotReloadRequest, Reloaded, ShadowingProc};
+use auxtools_protocol::{HotReloadRequest, LocalReads, ParsedReads, Reloaded, ShadowingProc};
 use dmasm::{
 	assembler::AssembleEnv as _,
 	reload::{
@@ -52,7 +52,8 @@ pub struct Prepared {
 	builtin_inherits: Vec<(u32, String)>,
 	reparent: reparent::PreparedReparents,
 	new_types: Vec<String>,
-	table_strings: Vec<StringRef>
+	table_strings: Vec<StringRef>,
+	proc_locals: Vec<u32>
 }
 
 struct PreparedNewVar {
@@ -71,7 +72,8 @@ struct AddedVars {
 	in_lists: Vec<(u32, ProcEntryWords)>,
 	instances: StagedInstances,
 	statics: HashMap<(StaticScope, Vec<u8>), u32>,
-	const_values: Vec<(u32, (u32, u32), Option<StringRef>)>
+	const_values: Vec<(u32, (u32, u32), Option<StringRef>)>,
+	proc_locals: Vec<u32>
 }
 
 #[derive(Default)]
@@ -476,11 +478,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	let mut world_globals = WorldGlobals::default();
 	for reads in local_reads {
 		if let Ok(proc) = find(&reads.proc) {
-			world_globals
-				.local_reads
-				.entry(proc.id.0)
-				.or_default()
-				.push((reads.name.as_bytes().to_vec(), reads.reads.clone()));
+			world_globals.local_reads.entry(proc.id.0).or_default().push(reads.clone());
 		}
 	}
 
@@ -513,7 +511,8 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		in_lists: vec![],
 		instances: StagedInstances::default(),
 		statics: HashMap::new(),
-		const_values: vec![]
+		const_values: vec![],
+		proc_locals: vec![]
 	};
 	for new in new_vars {
 		if let Err(e) = prepare_new_var(new, &mut added, &mut type_vars, &mut pending, warnings) {
@@ -696,6 +695,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	}
 
 	prepared.global_values.append(&mut added.const_values);
+	prepared.proc_locals = std::mem::take(&mut added.proc_locals);
 	prepared.new_vars = added.vars;
 	prepared.new_globals = pending
 		.globals
@@ -772,6 +772,9 @@ fn assemble_with(
 
 	let uses = original.map(|proc| world_globals.of(proc)).unwrap_or_default();
 	let proc_globals = original.map(|proc| world_globals.globals_of(proc)).unwrap_or_default();
+	added
+		.proc_locals
+		.extend(proc_globals.locals.values().flat_map(|own| own.values().copied()));
 	let new_statics = new_statics(code, &proc_globals, pending, added).map_err(|e| format!("{}: {}", name, e))?;
 	let mut env = ReloadEnv {
 		proc_globals,
@@ -965,7 +968,8 @@ pub fn early_global_init(init: &dmasm::reload::GlobalInit, rest: &HotReloadReque
 		in_lists: vec![],
 		instances: StagedInstances::default(),
 		statics: HashMap::new(),
-		const_values: vec![]
+		const_values: vec![],
+		proc_locals: vec![]
 	};
 	let code = value_code(init.code.clone());
 	let known = global_slots(&code, &init.proc_statics, &Pending::default(), &added, &mut WorldGlobals::default());
@@ -1801,6 +1805,9 @@ fn new_statics(
 		if let (None, Some(init)) = (&local.value, &local.init) {
 			added.run_once.push((id, format!("static local {}", local.name), (**init).clone()));
 		}
+		if matches!(local.scope, StaticScope::Proc { .. }) {
+			added.proc_locals.push(id);
+		}
 		added.statics.insert((local.scope.clone(), name.clone()), id);
 		out.insert((local.scope.clone(), name), id);
 	}
@@ -2468,6 +2475,9 @@ fn prepare_redeclared(
 				let declared = type_vars.declared_now(type_id).map_err(fail)?;
 				ids.retain(|id| !declared.chunks(2).any(|pair| pair[0] == *id));
 			}
+			let proc_locals = PROC_LOCALS.lock().unwrap();
+			ids.retain(|id| !proc_locals.contains(id));
+			drop(proc_locals);
 			let mut global_reads = vec![];
 			for shadowing in shadowing {
 				let Ok(proc) = find(&shadowing.proc) else {
@@ -2478,6 +2488,7 @@ fn prepare_redeclared(
 					ids.retain(|id| !read.contains(id));
 				} else if let Some((own, globals)) = ProcGlobals::told_apart(&read, &shadowing.reads) {
 					ids.retain(|id| !own.values().any(|own| own == id));
+					added.proc_locals.extend(own.values());
 					global_reads.extend(globals);
 				}
 			}
@@ -2743,6 +2754,7 @@ pub fn apply<K: Claimant, T>(
 	}
 	drop(unsettled);
 	reparent::apply_tree(&mut prepared.reparent);
+	PROC_LOCALS.lock().unwrap().extend(&prepared.proc_locals);
 	ADDED_GLOBALS
 		.lock()
 		.unwrap()
@@ -3261,6 +3273,8 @@ pub fn code_generation() -> u32 {
 
 static ADDED_GLOBALS: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
 
+static PROC_LOCALS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
 pub fn added_global(name: &str) -> Option<u32> {
 	ADDED_GLOBALS.lock().unwrap().get(name).copied()
 }
@@ -3417,6 +3431,7 @@ fn world_has_debug_info() -> bool {
 #[shutdown]
 fn forget_world() {
 	ADDED_GLOBALS.lock().unwrap().clear();
+	PROC_LOCALS.lock().unwrap().clear();
 	TYPE_STRINGS.lock().unwrap().clear();
 	PROC_STRINGS.lock().unwrap().clear();
 	TABLE_STRINGS.lock().unwrap().clear();
@@ -3692,27 +3707,48 @@ impl GlobalUses {
 #[derive(Default)]
 struct ProcGlobals {
 	by_name: HashMap<Vec<u8>, Vec<u32>>,
-	locals: HashMap<Vec<u8>, HashMap<u32, u32>>
+	locals: HashMap<Vec<u8>, HashMap<u32, u32>>,
+	kept: HashMap<Vec<u8>, HashMap<u32, u32>>
 }
 
 impl ProcGlobals {
-	fn new(uses: &GlobalUses, local_reads: &[(Vec<u8>, Vec<Option<u32>>)]) -> Self {
+	fn new(uses: &GlobalUses, local_reads: &[LocalReads]) -> Self {
 		let mut by_name = uses.by_name();
 		let mut locals = HashMap::new();
-		for (name, reads) in local_reads {
-			match Self::told_apart(&uses.ids_of(name), reads) {
+		let mut kept = HashMap::new();
+		for reads in local_reads {
+			let name = reads.name.as_bytes().to_vec();
+			kept.insert(name.clone(), reads.kept.iter().copied().collect());
+			let ids = uses.ids_of(&name);
+			let told = match reads.parsed {
+				Some(ParsedReads::Only(nth)) => Self::only_local(&ids, nth),
+				Some(ParsedReads::Unknown) => None,
+				None => Self::told_apart(&ids, &reads.reads).or_else(|| {
+					let [Some(nth), ..] = reads.reads[..] else {
+						return None;
+					};
+					reads.reads.iter().all(|read| *read == Some(nth)).then(|| Self::only_local(&ids, nth))?
+				})
+			};
+			match told {
 				Some((own, globals)) => {
 					by_name.insert(name.clone(), globals);
-					locals.insert(name.clone(), own);
+					locals.insert(name, own);
 				}
-				None if reads.contains(&None) => {
-					by_name.remove(name);
-					locals.insert(name.clone(), HashMap::new());
+				None => {
+					by_name.remove(&name);
+					locals.insert(name, HashMap::new());
 				}
-				None => {}
 			}
 		}
-		Self { by_name, locals }
+		Self { by_name, locals, kept }
+	}
+
+	fn only_local(ids: &[u32], nth: u32) -> Option<(HashMap<u32, u32>, Vec<u32>)> {
+		let [id, ..] = ids[..] else {
+			return None;
+		};
+		ids.iter().all(|other| *other == id).then(|| (HashMap::from([(nth, id)]), vec![]))
 	}
 
 	fn told_apart(ids: &[u32], reads: &[Option<u32>]) -> Option<(HashMap<u32, u32>, Vec<u32>)> {
@@ -3739,16 +3775,14 @@ impl ProcGlobals {
 	}
 
 	fn local(&self, name: &[u8], nth: u32) -> Option<u32> {
-		match self.locals.get(name) {
-			Some(own) => own.get(&nth).copied(),
-			None => self.by_name.get(name).and_then(|ids| ids.get(nth as usize)).copied()
-		}
+		let old = self.kept.get(name)?.get(&nth)?;
+		self.locals.get(name)?.get(old).copied()
 	}
 }
 
 #[derive(Default)]
 struct WorldGlobals {
-	local_reads: HashMap<u32, Vec<(Vec<u8>, Vec<Option<u32>>)>>,
+	local_reads: HashMap<u32, Vec<LocalReads>>,
 	users: Option<HashMap<Vec<u8>, Vec<(u32, String)>>>,
 	initialized: Option<Vec<(Vec<u8>, Vec<u8>, u32, u32)>>,
 	procs: HashMap<u32, (usize, u16, Rc<GlobalUses>)>

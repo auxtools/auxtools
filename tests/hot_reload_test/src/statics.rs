@@ -49,6 +49,54 @@ pub fn statics(built: Built) {
 	reload(&mut watcher, &changes);
 	assert_eq!(eval(&mut client, both), "\"10 7 10\"");
 	println!("ok: a global const changes beside a proc that reads both it and a static of its name");
+
+	assert_eq!(eval(&mut client, "\"[st_stateful()] [st_registered]\""), "\"2 1\"");
+	let changes = source.edit("statics.dm", "global.st_state + 1", "global.st_state + 2");
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "\"[st_stateful()] [st_registered]\""),
+		"\"3 1\"",
+		"the proc's result and the runs of the initializer of a static that neither code reads"
+	);
+	println!("ok: an edit leaves alone a static that neither the old nor the new code reads");
+
+	assert_eq!(eval(&mut client, "st_unknown()"), "1");
+	let changes = source.edit(
+		"statics.dm",
+		"\tif (/datum/st_twice::f())\n\t\treturn global.ST_UNKNOWN",
+		"\treturn ST_UNKNOWN"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "\"[st_unknown()] [st_unknown_global()]\""), "\"5 1\"");
+	println!("ok: a local const leaves the global of its name as it was when its proc's old code doesn't compile");
+
+	assert_eq!(eval(&mut client, "\"[st_branch(1)] [st_branch(1)]\""), "\"1 2\"");
+	let changes = source.edit(
+		"statics.dm",
+		"\tif (which == 1)\n\t\tvar/static/st_branch_count = 0",
+		"\tif (which == 2)\n\t\tvar/static/st_branch_count = 10\n\t\tst_branch_count++\n\t\treturn st_branch_count\n\tif (which == \
+		 1)\n\t\tvar/static/st_branch_count = 0"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "\"[st_branch(1)] [st_branch(2)]\""),
+		"\"3 11\"",
+		"the counts of the old branch's static and of the added branch's"
+	);
+	println!("ok: a branch added above another with a static of the same name leaves the other's value with it");
+
+	let renamed = "\"[st_renamed_root()] [st_renamed()]\"";
+	assert_eq!(eval(&mut client, renamed), "\"5 8\"");
+	let changes = source.edit(
+		"statics.dm",
+		"\tvar/static/ST_RENAMED = 7\n\tST_RENAMED++\n\treturn ST_RENAMED",
+		"\tvar/static/st_renamed_count = 7\n\tst_renamed_count++\n\treturn st_renamed_count"
+	);
+	reload(&mut watcher, &changes);
+	let changes = source.edit("statics.dm", "ST_RENAMED = 5", "ST_RENAMED = 10");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, renamed), "\"10 8\"");
+	println!("ok: a global const changes after a static of its name was renamed");
 }
 
 fn declared_references(client: &mut Client, path: &str) -> (u32, u32) {
