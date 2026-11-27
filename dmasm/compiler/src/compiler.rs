@@ -360,6 +360,8 @@ pub struct CompiledBody {
     pub warnings: Vec<Diagnostic>,
 }
 
+const ARGS_FROM_LIST: u32 = 65535;
+
 const BODY_PROC: &str = "dmasm_body";
 const BODY_FILE: &str = "<dmasm expression>";
 
@@ -848,9 +850,9 @@ impl<'a> Compiler<'a> {
             args::ArgsResult::Normal => count,
             args::ArgsResult::Assoc => {
                 self.emit_ins(Instruction::NewAssocList(count));
-                65535
+                ARGS_FROM_LIST
             }
-            args::ArgsResult::ArgList => 65535,
+            args::ArgsResult::ArgList => ARGS_FROM_LIST,
         })
     }
 
