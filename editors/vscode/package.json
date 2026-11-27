@@ -76,6 +76,11 @@
 				"category": "auxtools"
 			},
 			{
+				"command": "auxtools.joinAs",
+				"title": "Join with DreamSeeker as a New Guest",
+				"category": "auxtools"
+			},
+			{
 				"command": "auxtools.reboot",
 				"title": "Reboot World",
 				"category": "auxtools"
@@ -103,6 +108,10 @@
 				},
 				{
 					"command": "auxtools.join",
+					"when": "debugType == auxtools"
+				},
+				{
+					"command": "auxtools.joinAs",
 					"when": "debugType == auxtools"
 				},
 				{

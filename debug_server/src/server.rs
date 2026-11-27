@@ -173,6 +173,7 @@ impl Server {
 			Request::Skin(request) => self.handle_skin(request),
 			Request::Script(request) => self.handle_script(request),
 			Request::Reconnect => {
+				crate::guest_key::give_keys_again();
 				let reconnected = self.evaluating(crate::skin::reconnect);
 				self.answer(Response::Reconnect(reconnected));
 			}
@@ -184,6 +185,8 @@ impl Server {
 				let reply = self.coverage();
 				self.answer(Response::Coverage(reply));
 			}
+
+			Request::GuestKey { key } => self.answer(Response::GuestKey(crate::guest_key::give_next_guest(&key))),
 
 			Request::Status => {
 				let paused = self.stop_for(self.sessions.requester());

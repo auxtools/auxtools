@@ -49,6 +49,39 @@ and stepping while keeping hot reload active.
 If the debug library fails to initialize (for example, on an unsupported BYOND build), a launched
 world keeps running without debugging or hot reload. Stop the session to terminate it.
 
+### Connecting multiple clients
+
+BYOND allows only one client per key. When a second client logs in with a key that is already
+connected, the server closes the first connection and the second client takes over its mob. Because
+a client not signed in to BYOND joins as a guest named `Guest-NUMBER` (derived from its
+`computer_id`), multiple guest clients on the same computer receive the same key and disconnect each
+other.
+
+To test a local world with several clients, join with DreamSeeker as usual (or let auto-join open
+the first client), then run **auxtools: Join with DreamSeeker as a New Guest** (also available in
+the status bar World Actions menu) once for each additional client. Without prompting for a key or
+displaying one in VS Code, the command generates a key in BYOND's guest form (`Guest-` followed by a
+random number, such as `Guest-2328261779`), queues it for the next guest login, and opens
+DreamSeeker on the world (Windows) or offers its `byond://` address to copy (Linux). Because the key
+keeps BYOND's guest form, the world treats the client like any other guest, and `client.key`,
+`client.ckey`, and `mob.key` show the assigned key.
+
+- **Guest logins only:** Each queued key goes to one guest login. When several keys are waiting, the
+  most recently requested one is given first, and a guest who logs in when none are waiting gets
+  BYOND's `Guest-NUMBER`. A DreamSeeker client signed in to BYOND joins with its own key and leaves
+  any waiting key for the next guest.
+- **Reboots and reconnects:** When the world reboots or clients reconnect (**auxtools: Reconnect
+  Clients** or `auxtools reconnect`), the world reissues every key it has given since the process
+  started, in the order they were first requested, so returning guests stay connected with distinct
+  keys. Which client receives which key depends on login order, and keys whose original clients have
+  since closed are still reissued to the next guests who connect.
+
+This replaces auxtools 3's Windows-only `#guest_override` Debug Console command and works on both
+Windows and Linux. It is available only through the debug adapter, with no `auxtools` CLI command.
+Other DAP clients can pass an optional `ckey` argument (up to 30 printable ASCII characters with at
+least one letter or digit, excluding `<`, `>`, `"`, `\`, and `|`) to the custom `auxtoolsJoin`
+request to assign a specific key, from which BYOND derives `client.ckey` in its usual way.
+
 ## Launch configurations
 
 Add a configuration to `.vscode/launch.json` to customize how a world starts. **Add
@@ -460,6 +493,7 @@ in DreamSeeker). Scripts stored in resource files or included `.dms` files requi
 | **auxtools: Debug in DreamDaemon** | Always | Launch a compiled `.dmb` in console DreamDaemon. |
 | **auxtools: Attach to Running World** | Always | Attach to a local world started with the auxtools launcher. |
 | **auxtools: Join with DreamSeeker** | Active session | Open DreamSeeker on the world (Windows) or copy its `byond://` address (Linux). |
+| **auxtools: Join with DreamSeeker as a New Guest** | Active session | Assign a random key to the next guest login, then open DreamSeeker on the world (Windows) or copy its `byond://` address (Linux). |
 | **auxtools: Reconnect Clients** | Active session | Ask connected clients to reconnect (or reboot a DreamSeeker-hosted world). |
 | **auxtools: Reboot World** | Active session | Reboot the world in place with `world.Reboot()` without running `preLaunchTask`. |
 | **auxtools: Profile Instructions** | Active session | Start or stop instruction profiling and open the report. |

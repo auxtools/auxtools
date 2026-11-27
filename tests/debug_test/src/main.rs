@@ -587,6 +587,20 @@ fn record_coverage(client: &mut Client) -> Result<(), String> {
 	}
 }
 
+fn guest_keys(mut client: Client) -> Client {
+	for key in ["Ada Lovelace", "ada"] {
+		let given = client.request(Request::GuestKey { key: key.to_owned() });
+		assert!(matches!(given, Response::GuestKey(Ok(()))), "for {:?}: {:?}", key, given);
+	}
+	let refused = client.request(Request::GuestKey { key: "a<b".to_owned() });
+	let Response::GuestKey(Err(why)) = refused else {
+		panic!("a key with < in it was taken: {:?}", refused);
+	};
+	assert_eq!(why, "a key cannot contain '<'");
+	println!("ok: keys for the next guests are taken, and a key BYOND refuses is not");
+	client
+}
+
 fn coverage(world: &World, mut client: Client) -> Client {
 	let busy = Err("another coverage recording is already running".to_owned());
 	let mut first = world.connect();
@@ -1443,6 +1457,7 @@ fn main() {
 
 	let client = protocol(&world, client);
 	let client = profile(&world, client);
+	let client = guest_keys(client);
 	let mut client = coverage(&world, client);
 
 	client.send(Request::CatchRuntimes {

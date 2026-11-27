@@ -4,6 +4,7 @@ mod code_index;
 mod connection;
 mod console;
 mod coverage;
+mod guest_key;
 mod hot_reload;
 mod instruction_hooking;
 mod journal;
