@@ -49,7 +49,8 @@ pub struct Prepared {
 	in_lists: Vec<(u32, ProcEntryWords)>,
 	instances: Vec<(u32, runtime_tables::Instance, ProcEntryWords)>,
 	builtin_inherits: Vec<(u32, String)>,
-	reparent: reparent::PreparedReparents
+	reparent: reparent::PreparedReparents,
+	new_types: Vec<String>
 }
 
 struct PreparedNewVar {
@@ -343,7 +344,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		global_init
 	} = request;
 	let Plan {
-		new_types: _,
+		new_types,
 		reloads,
 		settings,
 		new_procs,
@@ -374,7 +375,10 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		});
 	}
 
-	let mut prepared = Prepared::default();
+	let mut prepared = Prepared {
+		new_types: new_types.iter().map(|new| new.path.clone()).collect(),
+		..Default::default()
+	};
 	let mut errors = vec![];
 	let mut world_globals = WorldGlobals::default();
 
@@ -1566,30 +1570,111 @@ pub fn add_types(new_types: &[NewType]) -> Result<usize, Vec<String>> {
 	runtime_tables::types_available().map_err(|e| vec![format!("adding types is not supported on this BYOND build: {}", e)])?;
 	code_changed();
 
+	let refused: Vec<String> = {
+		let unsettled = UNSETTLED_TYPES.lock().unwrap();
+		new_types
+			.iter()
+			.filter_map(|new| {
+				let (added, inherited) = unsettled.get(&new.path)?;
+				if added != new {
+					Some(format!(
+						"{}: an earlier failed reload already added this type with a different parent or built-in values. Revert those changes, or \
+						 rebuild the .dmb and restart the world",
+						new.path
+					))
+				} else if !inherits_as_added(new, inherited) {
+					Some(format!(
+						"{}: an earlier failed reload already added this type, and its inherited values have changed since. Revert those changes, \
+						 or rebuild the .dmb and restart the world",
+						new.path
+					))
+				} else {
+					None
+				}
+			})
+			.collect()
+	};
+	if !refused.is_empty() {
+		return Err(refused);
+	}
+
 	let mut added = 0;
 	for new in new_types {
 		if find_type(&new.path).is_ok() {
 			continue;
 		}
-		add_type(new).map_err(|e| vec![format!("{}: {}", new.path, e)])?;
+		let inherited = add_type(new).map_err(|e| vec![format!("{}: {}", new.path, e)])?;
+		UNSETTLED_TYPES.lock().unwrap().insert(new.path.clone(), (new.clone(), inherited));
 		added += 1;
 	}
 	Ok(added)
 }
 
-fn add_type(new: &NewType) -> Result<(), String> {
+static UNSETTLED_TYPES: Mutex<BTreeMap<String, (NewType, Inherited)>> = Mutex::new(BTreeMap::new());
+
+#[derive(PartialEq)]
+struct Inherited {
+	record: Vec<u32>,
+	builtins: Vec<u32>,
+	mob: Option<(u32, u32, u8, u8)>
+}
+
+fn inherited(parent: u32) -> Result<Inherited, String> {
+	use type_fields::*;
+	let words = [
+		NAME,
+		DESC,
+		ICON,
+		ICON_STATE,
+		TEXT,
+		MAPTEXT,
+		MAPTEXT_X,
+		MAPTEXT_WIDTH,
+		FLAGS,
+		FLAGS_HIGH,
+		DIR & !3
+	]
+	.into_iter()
+	.chain((0x40..0x54).step_by(4))
+	.chain([SUFFIX, LAYER]);
+	let mut mob = None;
+	let _ = runtime_tables::set_mob_type(parent, |m| mob = Some((m.key, m.sight, m.see_in_dark, m.see_invisible)));
+	Ok(Inherited {
+		record: words.map(|offset| runtime_tables::type_field(parent, offset)).collect::<Result<_, _>>()?,
+		builtins: runtime_tables::misc_words(runtime_tables::type_field(parent, BUILTIN_VALUES)?).unwrap_or_default(),
+		mob
+	})
+}
+
+fn inherits_as_added(new: &NewType, inherited_then: &Inherited) -> bool {
+	let (Ok(parent), Ok(type_id)) = (find_type(&new.parent), find_type(&new.path)) else {
+		return false;
+	};
+	let shared = |field: usize| {
+		let words = |t: u32| runtime_tables::type_field(t, field).ok().and_then(runtime_tables::misc_words);
+		words(type_id).is_some() && words(type_id) == words(parent)
+	};
+	inherited(parent).is_ok_and(|now| now == *inherited_then)
+		&& shared(type_fields::VAR_TABLE)
+		&& shared(type_fields::DECLARED_VARS)
+		&& runtime_tables::type_field(type_id, type_fields::INIT_PROC) == runtime_tables::type_field(parent, type_fields::INIT_PROC)
+}
+
+fn add_type(new: &NewType) -> Result<Inherited, String> {
 	let parent = find_type(&new.parent)?;
 	let mut writes = vec![];
 	for (field, value) in &new.fields {
 		writes.extend(builtin_writes(field, value).map_err(|e| format!("{}: {}", field, e))?);
 	}
+	let inherited = inherited(parent)?;
 	let id = runtime_tables::add_type(parent, leaked_string(&new.path)?)?;
 	for place in TEXT_PLACES {
 		if let Ok(TypeString::Made(text)) = type_string(parent, place) {
 			set_type_string(id, place, TypeString::Made(text))?;
 		}
 	}
-	write_builtins(id, writes)
+	write_builtins(id, writes)?;
+	Ok(inherited)
 }
 
 static TYPE_STRINGS: Mutex<BTreeMap<(u32, usize), u32>> = Mutex::new(BTreeMap::new());
@@ -2224,6 +2309,11 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 		added: _
 	} = appended;
 	code_changed();
+	let mut unsettled = UNSETTLED_TYPES.lock().unwrap();
+	for path in &prepared.new_types {
+		unsettled.remove(path);
+	}
+	drop(unsettled);
 	reparent::apply_tree(&mut prepared.reparent);
 	ADDED_GLOBALS
 		.lock()
@@ -2739,6 +2829,7 @@ fn world_has_debug_info() -> bool {
 fn forget_world() {
 	ADDED_GLOBALS.lock().unwrap().clear();
 	TYPE_STRINGS.lock().unwrap().clear();
+	UNSETTLED_TYPES.lock().unwrap().clear();
 	RELOADED.lock().unwrap().clear();
 	*WORLD_HAS_DEBUG_INFO.lock().unwrap() = None;
 	WAITING_WORLD_EDITS.lock().unwrap().clear();

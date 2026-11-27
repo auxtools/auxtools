@@ -1672,6 +1672,60 @@ fn types(built: Built) {
 	);
 	println!("ok: a failed reload holds no reference to the strings it didn't write");
 
+	assert_eq!(eval(&mut client, "#fail-reload append"), "the next reload fails at Append");
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/first_def()\n",
+		"/obj/crate/retried\n\tdesc = \"first try\"\n\n/proc/retried_maker()\n\treturn new /obj/crate/retried\n\n/proc/first_def()\n"
+	);
+	let result = expect_reload_result(watcher.request(reload_request(&changes)));
+	assert!(!result.applied, "a reload whose proc wasn't added was applied: {:?}", result);
+	source.snapshot = Some(changes.before);
+	let changes = source.edit("reload.dm", "\"first try\"", "\"second try\"");
+	assert_eq!(changes.plan.new_types.len(), 1, "{:?}", changes.plan);
+	let result = expect_reload_result(watcher.request(reload_request(&changes)));
+	assert!(!result.applied, "a reload that kept a failed reload's desc was applied: {:?}", result);
+	assert_eq!(result.errors, ["/obj/crate/retried: an earlier failed reload already added this type \
+	                            with a different parent or built-in values. Revert those changes, or \
+	                            rebuild the .dmb and restart the world"]);
+	source.snapshot = Some(changes.before);
+	let changes = source.edit("reload.dm", "\"second try\"", "\"first try\"");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "retried_maker().desc"), "\"first try\"");
+	println!("ok: a retried reload refuses other values for a type that a failed reload added");
+
+	let orphan = "/obj/crate/orphan\n\n/proc/orphan_maker()\n\treturn new /obj/crate/orphan\n\n";
+	assert_eq!(eval(&mut client, "#fail-reload append"), "the next reload fails at Append");
+	let changes = source.edit("reload.dm", "/proc/first_def()\n", &format!("{}/proc/first_def()\n", orphan));
+	let result = expect_reload_result(watcher.request(reload_request(&changes)));
+	assert!(!result.applied, "a reload whose proc wasn't added was applied: {:?}", result);
+	source.snapshot = Some(changes.before);
+	let crate_desc = (
+		"/obj/crate\n\tname = \"crate\"\n",
+		"/obj/crate\n\tname = \"crate\"\n\tdesc = \"parent_desc\"\n"
+	);
+	let changes = source.edit_many("reload.dm", &[(orphan, ""), crate_desc]);
+	assert!(changes.plan.new_types.is_empty(), "{:?}", changes.plan);
+	reload(&mut watcher, &changes);
+	let changes = source.edit("reload.dm", "/proc/first_def()\n", &format!("{}/proc/first_def()\n", orphan));
+	assert_eq!(changes.plan.new_types.len(), 1, "{:?}", changes.plan);
+	let result = expect_reload_result(watcher.request(reload_request(&changes)));
+	assert!(
+		!result.applied,
+		"a reload that kept a desc the type inherited before its parent's changed was applied: {:?}",
+		result
+	);
+	assert_eq!(result.errors, ["/obj/crate/orphan: an earlier failed reload already added this type, \
+	                            and its inherited values have changed since. Revert those changes, or \
+	                            rebuild the .dmb and restart the world"]);
+	source.snapshot = Some(changes.before);
+	let changes = source.edit_many("reload.dm", &[(orphan, ""), (crate_desc.1, crate_desc.0)]);
+	reload(&mut watcher, &changes);
+	let changes = source.edit("reload.dm", "/proc/first_def()\n", &format!("{}/proc/first_def()\n", orphan));
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "orphan_maker().desc"), "null");
+	println!("ok: a retried reload refuses a type whose parent changed after a failed reload added it");
+
 	let changes = source.edit(
 		"reload.dm",
 		"/proc/first_def()\n\treturn \"first\"\n",
