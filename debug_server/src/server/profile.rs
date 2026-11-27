@@ -86,11 +86,12 @@ const NO_PROFILE: &str = "no profile has been started";
 fn start_of(bytecode: usize, proc: &Proc) -> (Option<String>, Option<u32>) {
 	let (dbg_file, dbg_line) = (dmasm::Opcode::DbgFile.word(), dmasm::Opcode::DbgLine.word());
 	let (current, len) = unsafe { proc.bytecode_mut_ptr() };
-	let words = if current as usize == bytecode {
+	let hooked = if current as usize == bytecode {
 		unsafe { std::slice::from_raw_parts(current, len as usize) }.to_vec()
 	} else {
 		auxtools::bytecode_at(bytecode as *const u32).unwrap_or_default()
 	};
+	let words = crate::instruction_hooking::original_words(bytecode as *const u32, hooked);
 	match words.as_slice() {
 		[file_op, file, rest @ ..] if *file_op == dbg_file => {
 			let name = unsafe { StringRef::from_id(raw_types::strings::StringId(*file)) };

@@ -720,6 +720,50 @@ fn profile(world: &World, mut client: Client) -> Client {
 	assert_eq!(profiled(&totals, "/profiled_loop").total.calls, 1);
 	println!("ok: proc filters");
 
+	let starts = [0, 2].map(|offset| InstructionRef {
+		proc: proc("/profiled_loop"),
+		offset
+	});
+	for start in &starts {
+		let response = client.request(Request::BreakpointSet {
+			id: breakpoint_id(start, true),
+			instruction: start.clone(),
+			condition: None,
+			hit: None,
+			log: None,
+			exact: true
+		});
+		assert!(
+			matches!(response, Response::BreakpointSet {
+				result: BreakpointSetResult::Success { .. }
+			}),
+			"a breakpoint at word {} of /profiled_loop got {:?}",
+			start.offset,
+			response
+		);
+	}
+	let only = ProfileRequest::Start {
+		procs: vec![proc("/profiled_loop")]
+	};
+	assert_eq!(profile_request(&mut client, only), Ok(ProfileReply::Started));
+	assert_eq!(eval(&mut client, None, "profiled_call()"), "500500");
+	let totals = profile_totals(&mut client, ProfileRequest::Stop);
+	let under_breakpoints = profiled(&totals, "/profiled_loop");
+	assert!(looped.line.is_some(), "{:?}", looped);
+	assert_eq!(
+		(&under_breakpoints.file, under_breakpoints.line),
+		(&looped.file, looped.line),
+		"{:?}",
+		under_breakpoints
+	);
+	for start in &starts {
+		let response = client.request(Request::BreakpointUnset {
+			id: breakpoint_id(start, true)
+		});
+		assert!(matches!(response, Response::BreakpointUnset { success: true, .. }), "{:?}", response);
+	}
+	println!("ok: a profiled proc's file and line under breakpoints at its start");
+
 	for order in ["profiled_twin_b(10) + profiled_twin_a(100)", "profiled_twin_a(100) + profiled_twin_b(10)"] {
 		let only = ProfileRequest::Start {
 			procs: vec![proc("/profiled_twin_a")]

@@ -745,7 +745,18 @@ pub fn hooked_offsets(proc: &Proc) -> Vec<u32> {
 pub fn original_code(proc: &Proc) -> Cow<'_, [u32]> {
 	let mut code = Cow::Borrowed(unsafe { proc.bytecode() });
 	let start = code.as_ptr() as usize;
-	let words = start..start + std::mem::size_of_val::<[u32]>(&code);
+	unhook_copy(start, &mut code);
+	code
+}
+
+pub(crate) fn original_words(start: *const u32, hooked: Vec<u32>) -> Vec<u32> {
+	let mut code = Cow::Owned(hooked);
+	unhook_copy(start as usize, &mut code);
+	code.into_owned()
+}
+
+fn unhook_copy(start: usize, code: &mut Cow<'_, [u32]>) {
+	let words = start..start + std::mem::size_of_val::<[u32]>(code);
 	for (opcode_ptr, original) in ORIGINAL_BYTECODE.lock().unwrap().iter() {
 		if !words.contains(&opcode_ptr.0) {
 			continue;
@@ -755,7 +766,6 @@ pub fn original_code(proc: &Proc) -> Cow<'_, [u32]> {
 			hooked.copy_from_slice(original);
 		}
 	}
-	code
 }
 
 pub fn hooked_at(proc: &Proc, offset: usize) -> bool {
