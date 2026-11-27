@@ -129,6 +129,16 @@ var/const/ST_GONE = 5
 	ST_GONE++
 	return ST_GONE
 
+var/const/ST_OVER_STEP = 1
+
+/datum/st_over/proc/tick()
+	return 0
+
+/datum/st_over/tick()
+	var/static/st_over_count = 0
+	st_over_count += ST_OVER_STEP + 1
+	return st_over_count
+
 var/st_arm = 20
 
 /proc/st_armed(x)

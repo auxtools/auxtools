@@ -135,6 +135,20 @@ pub fn statics(built: Built) {
 	assert_eq!(eval(&mut client, "st_gone_root()"), "10");
 	println!("ok: a global const changes after a proc with a static of its name was removed");
 
+	let tick = "(new /datum/st_over).tick()";
+	assert_eq!(eval(&mut client, &format!("\"[{tick}] [{tick}]\"")), "\"2 4\"");
+	let changes = source.edit_many("statics.dm", &[
+		("ST_OVER_STEP = 1", "ST_OVER_STEP = 2"),
+		(
+			"\n/datum/st_over/tick()\n",
+			"\n/datum/st_over/tick()\n\treturn ..()\n\n/datum/st_over/tick()\n"
+		)
+	]);
+	assert!(changes.deferred.is_empty(), "the edit waits for a reboot: {:?}", changes.deferred);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, tick), "7");
+	println!("ok: an override added above another that a changed const recompiles keeps the other's static");
+
 	assert_eq!(eval(&mut client, "st_armed(1)"), "2");
 	let changes = source.edit(
 		"statics.dm",
