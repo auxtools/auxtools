@@ -769,7 +769,11 @@ pub(super) fn emit_statement_builtin(
             compiler.emit_ins(Instruction::NullAnimate);
             compiler.emit_ins(Instruction::Pop);
         }
-        "animate" if n == 1 && !matches!(args[0], Expression::AssignOp { .. }) => {
+        "animate"
+            if n == 1
+                && !matches!(args[0], Expression::AssignOp { .. })
+                && arglist_inner(&args[0]).is_none() =>
+        {
             push_args(compiler, args)?;
             compiler.emit_ins(Instruction::NullAnimate);
             compiler.emit_ins(Instruction::Pop);

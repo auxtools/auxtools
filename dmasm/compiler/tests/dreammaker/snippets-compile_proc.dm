@@ -777,6 +777,10 @@ var/gx = 1
 /proc/f(a, b, c)
 	animate(a, b, c)
 	return a
+// Guards: animate_takes_its_arguments_from_a_list (compile_proc.rs)
+/proc/f(list/L)
+	animate(arglist(L))
+	return animate(arglist(L))
 // Guards: or_assign_saves_the_cache_for_some_values (compile_proc.rs)
 var/gx = 1
 /datum/t

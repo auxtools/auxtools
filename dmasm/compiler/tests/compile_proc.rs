@@ -1186,6 +1186,26 @@ fn savefile_input_statement() {
 }
 
 #[test]
+fn animate_takes_its_arguments_from_a_list() {
+    let code = compile(
+        "/proc/f(list/L)\n\tanimate(arglist(L))\n\treturn animate(arglist(L))\n",
+        "",
+        "f",
+    );
+    assert_has(
+        &code,
+        &[
+            "GetVar arg(0)",
+            "Animate",
+            "Pop",
+            "GetVar arg(0)",
+            "Animate",
+            "Ret",
+        ],
+    );
+}
+
+#[test]
 fn a_savefile_is_read_into_a_parenthesised_place() {
     let plain = compile(
         "/datum/t/var/list/l\n/proc/f(savefile/S, x, datum/t/o)\n\tS >> x\n\tS[\"k\"] >> x\n\tS >> o.l\n\tS >> o.l[1]\n",
