@@ -9,9 +9,9 @@ use dmasm::{
 	DMString, GlobalVar, Instruction, Label, Node, StaticScope, Value, Variable
 };
 
-use crate::{HotReloadRequest, HotReloadResource, PROTOCOL_VERSION};
+use crate::{HotReloadRequest, HotReloadResource, LocalReads, ShadowingProc, PROTOCOL_VERSION};
 
-const RECORDED: (u32, u64) = (15, 0x3266_2E27_70C9_3EA4);
+const RECORDED: (u32, u64) = (15, 0x386D_726E_9E57_0529);
 
 fn key(path: &str, override_id: u32) -> ProcKey {
 	ProcKey {
@@ -102,7 +102,8 @@ fn code(path: &str) -> ProcReload {
 					nth: 0
 				},
 				value: Some(ConstValue::Number(2.0)),
-				init: None
+				init: None,
+				constant: true
 			},
 			StaticVar {
 				name: "seen".to_owned(),
@@ -111,7 +112,8 @@ fn code(path: &str) -> ProcReload {
 					nth: 1
 				},
 				value: None,
-				init: Some(Box::new(value("(static)")))
+				init: Some(Box::new(value("(static)"))),
+				constant: false
 			},
 		],
 		warnings: vec![Diagnostic::warning(Id::Text, "a warning")]
@@ -213,7 +215,17 @@ fn sample() -> HotReloadRequest {
 			code: code("(global init)"),
 			table: 1,
 			proc_statics: BTreeMap::from([("/datum/a/proc/f".to_owned(), BTreeMap::from([("seen".to_owned(), 2)]))])
-		})
+		}),
+		shadowing_procs: vec![ShadowingProc {
+			global: "total".to_owned(),
+			proc: key("/datum/a/f", 1),
+			reads: vec![None, Some(0)]
+		}],
+		local_reads: vec![LocalReads {
+			proc: key("/datum/a/f", 1),
+			name: "seen".to_owned(),
+			reads: vec![Some(1), None]
+		}]
 	}
 }
 

@@ -81,6 +81,8 @@ pub struct StaticVar {
     pub scope: StaticScope,
     pub value: Option<ConstValue>,
     pub init: Option<Box<ProcReload>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub constant: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1150,6 +1152,10 @@ impl Snapshot {
         Some(self.file_name(value.location.file))
     }
 
+    pub fn proc_code(&self, key: &ProcKey) -> Option<&Block> {
+        self.find(key)?.1.code.as_ref()
+    }
+
     pub fn compile_reload(&self, key: &ProcKey) -> Result<ProcReload, Diagnostic> {
         let mut reload = self.compile_code(key)?;
         reload.settings = Some(
@@ -1184,6 +1190,7 @@ impl Snapshot {
                 value: constant,
                 scope: s.scope,
                 init,
+                constant: s.constant,
             });
         }
         Ok(ProcReload {
@@ -1829,6 +1836,7 @@ pub fn diff(old: &Snapshot, new: &Snapshot, changed_files: Option<&HashSet<PathB
     reparent::reparented_users(old, new, &realigned, &mut changes);
     moved::moved_users(old, new, &realigned, &mut changes);
     retargeted::path_users(&retargeted, &mut changes);
+    local_const_users(old, new, &realigned, &mut changes);
     global_init::compare(old, new, &retargeted, &mut changes);
     changes.collect_warnings();
     changes
@@ -1969,6 +1977,179 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
     }
 }
 
+fn local_consts<'a>(
+    s: &Snapshot,
+    ty: TypeRef,
+    value: &'a ProcValue,
+) -> Vec<(&'a str, usize, Option<crate::compiler::Folded>)> {
+    let mut found = vec![];
+    if let Some(code) = &value.code {
+        global_init::static_statements(code, None, &mut found);
+    }
+    let mut seen: Vec<(&str, Option<crate::compiler::Folded>)> = vec![];
+    let mut out = vec![];
+    for (_, var) in found {
+        let name = var.name.as_str();
+        let number = seen.iter().filter(|(n, _)| *n == name).count();
+        let mut folded = None;
+        if var.var_type.flags.is_const() {
+            folded = var.value.as_ref().and_then(|value| {
+                crate::compiler::fold_after_statics(&s.tree, ty, value, &[], &seen, s.byond)
+            });
+            out.push((name, number, folded.clone()));
+        }
+        seen.push((name, folded));
+    }
+    out
+}
+
+fn local_const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &mut Changes) {
+    if changes.consts.is_empty() && changes.defaults_changed.is_empty() {
+        return;
+    }
+    let reloaded: HashSet<ProcKey> = changes
+        .plan
+        .reloads
+        .iter()
+        .map(|r| r.proc.clone())
+        .collect();
+    for key in new.procs.keys() {
+        let Some(old_key) = old_key(realigned, key) else {
+            continue;
+        };
+        if reloaded.contains(&old_key) {
+            continue;
+        }
+        let (Some((old_ty, old_value)), Some((new_ty, new_value))) =
+            (old.find(&old_key), new.find(key))
+        else {
+            continue;
+        };
+        let now = local_consts(new, new_ty, new_value);
+        if now.is_empty() || local_consts(old, old_ty, old_value) == now {
+            continue;
+        }
+        let reload = new.compile_code(key).and_then(|mut reload| {
+            new.compile_in_lists(key, &mut reload, |_, _| false)?;
+            Ok(reload)
+        });
+        changes.plan.line_moves.retain(|m| m.proc != old_key);
+        match reload {
+            Ok(reload) => changes.plan.reloads.push(ProcReload {
+                proc: old_key,
+                ..reload
+            }),
+            Err(e) => {
+                let refusal = new.uncompiled(key, &e);
+                changes.refused.push(Refusal {
+                    why: format!(
+                        "has a local `const` variable whose value changed, so it must be recompiled, but it {}",
+                        refusal.why
+                    ),
+                    ..refusal
+                });
+            }
+        }
+    }
+}
+
+fn read_alone(s: &Snapshot, value: &ProcValue) -> HashSet<usize> {
+    use dreammaker::ast::{BinaryOp, Expression, Follow, Statement, Term};
+    let mut alone: HashSet<usize> = HashSet::new();
+    let mark = |alone: &mut HashSet<usize>, e: &Expression| {
+        alone.insert(e as *const Expression as usize);
+    };
+    let local_value = |alone: &mut HashSet<usize>, var: &dreammaker::ast::VarStatement| {
+        let flags = var.var_type.flags;
+        if let Some(e) = var.value.as_ref() {
+            if !flags.is_static() && !flags.is_const() {
+                alone.insert(e as *const Expression as usize);
+            }
+        }
+    };
+    let builtin = |name: &str| {
+        s.tree
+            .root()
+            .get_proc(name)
+            .is_some_and(|p| p.location.file == FileId::BUILTINS)
+    };
+    syntax::walk_proc(value, &mut |node| match node {
+        syntax::Node::Parameter(p) => {
+            if let Some(default) = &p.default {
+                mark(&mut alone, default);
+            }
+        }
+        syntax::Node::Statement(statement) => match statement {
+            Statement::Return(Some(e)) => mark(&mut alone, e),
+            Statement::Spawn { delay: Some(e), .. } => mark(&mut alone, e),
+            Statement::Expr(Expression::BinaryOp {
+                op: BinaryOp::LShift,
+                lhs,
+                rhs,
+            }) => {
+                mark(&mut alone, lhs);
+                mark(&mut alone, rhs);
+            }
+            Statement::Expr(Expression::BinaryOp {
+                op: BinaryOp::RShift,
+                lhs,
+                ..
+            }) => mark(&mut alone, lhs),
+            Statement::Var(var) => local_value(&mut alone, var),
+            Statement::Vars(vars) => vars.iter().for_each(|var| local_value(&mut alone, var)),
+            _ => {}
+        },
+        syntax::Node::Expression(expression) => match expression {
+            Expression::AssignOp { rhs, .. } => mark(&mut alone, rhs),
+            Expression::TernaryOp { if_, else_, .. }
+                if alone.contains(&(expression as *const Expression as usize)) =>
+            {
+                mark(&mut alone, if_);
+                mark(&mut alone, else_);
+            }
+            Expression::Base { term, follow } => {
+                if follow.is_empty() && alone.contains(&(expression as *const Expression as usize))
+                {
+                    alone.insert(&term.elem as *const Term as usize);
+                    if let Term::Expr(inner) = &term.elem {
+                        mark(&mut alone, inner);
+                    }
+                }
+                let args: &[Expression] = match &term.elem {
+                    Term::Call(name, args) if !builtin(name.as_str()) => args,
+                    Term::List(args) | Term::Alist(args) => args,
+                    Term::NewImplicit { args: Some(args) }
+                    | Term::NewPrefab {
+                        args: Some(args), ..
+                    }
+                    | Term::NewMiniExpr {
+                        args: Some(args), ..
+                    } => args,
+                    _ => &[],
+                };
+                for arg in args {
+                    mark(&mut alone, arg);
+                }
+                if let Term::InterpString(_, parts) = &term.elem {
+                    for part in parts.iter().filter_map(|(part, _)| part.as_ref()) {
+                        mark(&mut alone, part);
+                    }
+                }
+                for f in follow.iter() {
+                    match &f.elem {
+                        Follow::Call(_, _, args) => args.iter().for_each(|a| mark(&mut alone, a)),
+                        Follow::Index(_, index) => mark(&mut alone, index),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    });
+    alone
+}
+
 fn folds_changed(
     old: &Snapshot,
     new: &Snapshot,
@@ -1976,7 +2157,7 @@ fn folds_changed(
     value: &ProcValue,
     consts: &HashSet<&str>,
 ) -> bool {
-    use dreammaker::ast::{Expression, Follow, Term};
+    use dreammaker::ast::{Expression, Follow, PropertyAccessKind, Spanned, Term};
     let bound_value = |s: &Snapshot, name: &str| {
         let at = s.find_type(ty)?;
         let (at, declaration) = match at.get_var_declaration(name) {
@@ -1997,7 +2178,41 @@ fn folds_changed(
     };
     let global_changed =
         |name: &str| consts.contains(name) && global_value(old, name) != global_value(new, name);
-    let locals = retargeted::local_reads(value);
+    let local_types = retargeted::local_read_types(value);
+    let chain_changed = |term: &Spanned<Term>, chain: &[Spanned<Follow>]| {
+        let Some(Follow::Field(_, name) | Follow::StaticField(name)) =
+            chain.last().map(|f| &f.elem)
+        else {
+            return false;
+        };
+        if !consts.contains(name.as_str()) {
+            return false;
+        }
+        let expression = Expression::Base {
+            term: Box::new(term.clone()),
+            follow: chain.to_vec().into_boxed_slice(),
+        };
+        let head = match &term.elem {
+            Term::Ident(head) => {
+                local_types.get(&(&term.elem as *const Term as usize, head.to_string()))
+            }
+            _ => None,
+        };
+        let locals: Vec<(&str, &str)> = match (&term.elem, head) {
+            (Term::Ident(name), Some(path)) => vec![(name.as_str(), path.as_str())],
+            _ => vec![],
+        };
+        let folded = |s: &Snapshot| {
+            crate::compiler::fold_in_proc(&s.tree, s.find_type(ty)?, &expression, &locals, s.byond)
+        };
+        folded(old) != folded(new)
+    };
+    let locals: HashSet<(usize, String)> = local_types.keys().cloned().collect();
+    let alone = read_alone(new, value);
+    let read_alone = |e: &Expression, chain: usize| {
+        matches!(e, Expression::Base { follow, .. } if follow.len() == chain)
+            && alone.contains(&(e as *const Expression as usize))
+    };
     let mut found = false;
     syntax::walk_proc(value, &mut |node| {
         found = found
@@ -2005,15 +2220,25 @@ fn folds_changed(
                 syntax::Node::Term(term @ Term::Ident(name)) => {
                     consts.contains(name.as_str())
                         && !locals.contains(&(term as *const Term as usize, name.to_string()))
+                        && !alone.contains(&(term as *const Term as usize))
                         && bound_value(old, name) != bound_value(new, name)
                 }
-                syntax::Node::Term(Term::GlobalIdent(name)) => global_changed(name),
-                syntax::Node::Expression(Expression::Base { term, follow }) => {
+                syntax::Node::Term(term @ Term::GlobalIdent(name)) => {
+                    !alone.contains(&(term as *const Term as usize)) && global_changed(name)
+                }
+                syntax::Node::Expression(expression @ Expression::Base { term, follow }) => {
+                    let field = |f: &Spanned<Follow>| {
+                        matches!(
+                            f.elem,
+                            Follow::Field(PropertyAccessKind::Dot | PropertyAccessKind::Colon, _)
+                        )
+                    };
+                    let fields = follow.iter().take_while(|f| field(f)).count();
                     match (&term.elem, follow.first().map(|f| &f.elem)) {
                         (Term::Ident(global), Some(Follow::Field(_, name)))
-                            if global.as_str() == "global" =>
+                            if global.as_str() == "global" && fields < 2 =>
                         {
-                            global_changed(name)
+                            !read_alone(expression, 1) && global_changed(name)
                         }
                         (Term::Prefab(prefab), Some(Follow::StaticField(name)))
                             if prefab.vars.is_empty() =>
@@ -2024,9 +2249,22 @@ fn folds_changed(
                                     .and_then(|t| t.get_value(name.as_str()))
                                     .map(|v| v.constant.clone())
                             };
-                            default(old) != default(new)
+                            let is_const = |s: &Snapshot| {
+                                s.find_type(&path)
+                                    .and_then(|t| t.get_var_declaration(name.as_str()))
+                                    .is_some_and(|d| d.get().var_type.flags.is_const())
+                            };
+                            !(read_alone(expression, 1) && is_const(new))
+                                && default(old) != default(new)
                         }
-                        _ => false,
+                        _ => {
+                            let statics = follow
+                                .iter()
+                                .take_while(|f| matches!(f.elem, Follow::StaticField(_)))
+                                .count();
+                            let chain = fields.max(statics);
+                            !read_alone(expression, chain) && chain_changed(term, &follow[..chain])
+                        }
                     }
                 }
                 _ => false,

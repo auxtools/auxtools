@@ -74,6 +74,35 @@ fn const_alone_is_its_global_but_folds_in_expressions() {
 }
 
 #[test]
+fn colon_reads_the_last_type_that_declares_its_var() {
+    let src = "/datum/q\n/datum/p/a\n\tvar/const/LIMIT = 5\n/datum/p/b\n\tvar/const/LIMIT = 9\n/datum/p/b/c\n\
+               /datum/q\n\tvar/const/LIMIT = 20\n\tvar/static/S = 4\n\
+               /proc/f(x, datum/q/y, list/z)\n\treturn list(x:LIMIT + 1, y:LIMIT + 1, z:LIMIT + 1, x:LIMIT, -y:LIMIT, x:S, x?:S)\n";
+    let code = compile(src, "", "f");
+    assert_has(
+        &code,
+        &[
+            "PushInt 10",
+            "PushInt 21",
+            "PushInt 10",
+            "GetVar global(\"LIMIT\")",
+            "PushVal -20",
+            "GetVar global(\"S\")",
+        ],
+    );
+    assert_eq!(code.matches("GetVar global(\"S\")").count(), 2, "{}", code);
+}
+
+#[test]
+fn colon_chain_reads_the_type_of_each_var_it_goes_through() {
+    let src = "/datum/config\n\tvar/const/LIMIT = 5\n/datum/holder\n\tvar/datum/config/config\n\
+               /datum/other\n\tvar/const/LIMIT = 9\n\
+               /proc/f(x)\n\treturn list(x:config:LIMIT + 1, x:config.LIMIT + 2)\n";
+    let code = compile(src, "", "f");
+    assert_has(&code, &["PushInt 6", "PushInt 7", "NewList 2"]);
+}
+
+#[test]
 fn static_after_double_colon_chain() {
     let src = "/datum/a\n\tvar/datum/b/b\n/datum/b\n\tvar/const/C = 3\nvar/datum/a/A\n/proc/f()\n\treturn A::b::C\n";
     let code = compile(src, "", "f");
@@ -188,6 +217,14 @@ fn savefile_input_statement() {
             "SetVar arg(1)",
         ],
     );
+}
+
+#[test]
+fn a_block_local_const_is_folded_only_in_its_block() {
+    let src = "var/const/LIMIT = 10\n/proc/f(x)\n\tif(x)\n\t\tvar/const/LIMIT = 2\n\t\tx = LIMIT + 1\n\treturn LIMIT + 1\n";
+    let code = compile(src, "", "f");
+    assert_has(&code, &["PushInt 3", "SetVar arg(0)"]);
+    assert_has(&code, &["PushInt 11", "Ret"]);
 }
 
 #[test]

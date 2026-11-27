@@ -4305,6 +4305,83 @@ fn a_static_folding_a_changed_const_is_given_to_a_reboot() {
 }
 
 #[test]
+fn a_static_reading_a_changed_default_is_given_to_a_reboot() {
+    let before = "/datum/config\n\tvar/limit = 5\n\n\
+                  /proc/limits()\n\tvar/static/list/limits = list(/datum/config::limit)\n\treturn limits\n";
+    let after = before.replace("limit = 5", "limit = 10");
+    let changes = changes("static-reading-default", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert_eq!(global_init_sets(&changes), ["/proc/limits#0:limits @5"]);
+    let code = dmasm_bytecode::format(&changes.global_init.as_ref().unwrap().code.nodes);
+    assert!(code.contains("PushInt 10"), "{}", code);
+}
+
+fn sent_statics(changes: &Changes, path: &str) -> Vec<String> {
+    let reload = changes.plan.reloads.iter().find(|r| r.proc.path == path);
+    let reload =
+        reload.unwrap_or_else(|| panic!("{path} isn't compiled again: {:?}", changes.plan));
+    reload
+        .statics
+        .iter()
+        .map(|s| format!("{} {:?} {}", s.name, s.value, s.constant))
+        .collect()
+}
+
+#[test]
+fn a_changed_local_const_is_sent_with_its_value() {
+    let before = "var/const/BASE = 5\n\n\
+                  /proc/limit()\n\tvar/const/LIMIT = 5\n\treturn \"[LIMIT] [LIMIT + 1]\"\n\n\
+                  /proc/based()\n\tvar/const/LIMIT = BASE + 1\n\treturn LIMIT\n\n\
+                  /proc/other()\n\tvar/static/count = 0\n\tvar/const/LIMIT = 5\n\treturn LIMIT\n";
+    let sent = sent_statics;
+    let after = before.replacen("LIMIT = 5\n\treturn \"", "LIMIT = 10\n\treturn \"", 1);
+    let edited = changes("local-const", before, &after);
+    assert_eq!(reloaded(&edited), [key("/limit", 0)]);
+    assert_eq!(sent(&edited, "/limit"), ["LIMIT Some(Number(10.0)) true"]);
+
+    let after = before.replace("BASE = 5", "BASE = 10");
+    let based = changes("local-const-based", before, &after);
+    assert_eq!(reloaded(&based), [key("/based", 0)]);
+    assert_eq!(sent(&based, "/based"), ["LIMIT Some(Number(11.0)) true"]);
+
+    let after = before.replace("\treturn LIMIT\n", "\treturn LIMIT + count\n");
+    let other = changes("local-const-other", before, &after);
+    assert_eq!(
+        sent(&other, "/other"),
+        [
+            "count Some(Number(0.0)) false",
+            "LIMIT Some(Number(5.0)) true"
+        ]
+    );
+}
+
+#[test]
+fn a_local_const_follows_the_local_consts_and_defaults_it_reads() {
+    let before = "var/const/BASE = 5\n\n\
+                  /datum/config\n\tvar/limit = 5\n\n\
+                  /proc/offset()\n\tvar/const/OFFSET = 1\n\tvar/const/LIMIT = BASE + OFFSET\n\treturn LIMIT\n\n\
+                  /proc/configured()\n\tvar/const/LIMIT = /datum/config::limit\n\treturn LIMIT\n";
+    let after = before.replace("BASE = 5", "BASE = 10");
+    let based = changes("local-const-offset", before, &after);
+    assert_eq!(reloaded(&based), [key("/offset", 0)]);
+    assert_eq!(
+        sent_statics(&based, "/offset"),
+        [
+            "OFFSET Some(Number(1.0)) true",
+            "LIMIT Some(Number(11.0)) true"
+        ]
+    );
+
+    let after = before.replace("limit = 5", "limit = 10");
+    let configured = changes("local-const-default", before, &after);
+    assert_eq!(reloaded(&configured), [key("/configured", 0)]);
+    assert_eq!(
+        sent_statics(&configured, "/configured"),
+        ["LIMIT Some(Number(10.0)) true"]
+    );
+}
+
+#[test]
 fn uncompiled_code_folding_a_changed_const_is_refused() {
     let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
     let before = format!(
@@ -4321,7 +4398,7 @@ fn uncompiled_code_folding_a_changed_const_is_refused() {
          /proc/dotted(x)\n{uncompiled}\treturn global.LIMIT + 1\n\n\
          /datum/c\n\tvar/const/CAP = 3\n\n\
          /datum/c/proc/capped(x)\n{uncompiled}\treturn CAP * 2\n\n\
-         /proc/scoped(x)\n{uncompiled}\treturn /datum/c::CAP\n\n\
+         /proc/scoped(x)\n{uncompiled}\treturn /datum/c::CAP * 2\n\n\
          /proc/compiled()\n\treturn LIMIT + CAP\n"
     );
     for (name, after, refused) in [
@@ -4353,6 +4430,104 @@ fn uncompiled_code_folding_a_changed_const_is_refused() {
             name,
             changes.refused[0]
         );
+    }
+}
+
+#[test]
+fn uncompiled_code_folding_a_changed_member_const_through_a_var_is_refused() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let before = format!(
+        "/datum/other\n\tvar/const/LIMIT = 2\n\n\
+         /datum/config\n\tvar/const/LIMIT = 5\n\n\
+         /datum/holder\n\tvar/datum/config/config\n\n\
+         /proc/parameter(datum/config/config, x)\n{uncompiled}\treturn config.LIMIT + 1\n\n\
+         /proc/scoped(datum/config/config, x)\n{uncompiled}\treturn config::LIMIT + 1\n\n\
+         /proc/local(x)\n\tvar/datum/config/c = new\n{uncompiled}\treturn c.LIMIT + 1\n\n\
+         /datum/holder/proc/member(x)\n{uncompiled}\treturn config.LIMIT + 1\n\n\
+         /datum/holder/proc/chained(x)\n{uncompiled}\treturn src.config.LIMIT + 1\n\n\
+         /proc/untyped(config, x)\n{uncompiled}\treturn config:LIMIT + 1\n\n\
+         /proc/untyped_local(x)\n\tvar/config = new /datum/config\n{uncompiled}\treturn config:LIMIT + 1\n\n\
+         /proc/other(datum/other/other, x)\n{uncompiled}\treturn other.LIMIT + 1\n\n\
+         var/datum/config/config\n\n\
+         /proc/global_chain(x)\n{uncompiled}\treturn global.config.LIMIT + 1\n\n\
+         /proc/global_chain_alone(x)\n{uncompiled}\treturn global.config.LIMIT\n"
+    );
+    let after = before.replace("LIMIT = 5", "LIMIT = 10");
+    let changes = changes_of("uncompiled-member-const", &before, &after);
+    let mut paths: Vec<&str> = changes.refused.iter().map(|r| r.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "/datum/holder/chained",
+            "/datum/holder/member",
+            "/global_chain",
+            "/local",
+            "/parameter",
+            "/scoped",
+            "/untyped",
+            "/untyped_local"
+        ],
+        "{:?}",
+        changes.refused
+    );
+}
+
+#[test]
+fn uncompiled_code_reading_a_changed_const_alone_is_not_refused() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let before = format!(
+        "var/const/LIMIT = 5\n\n\
+         /datum/c\n\tvar/const/CAP = 3\n\n\
+         /proc/f(a)\n\treturn a\n\n\
+         /proc/bare(x)\n{uncompiled}\treturn LIMIT\n\n\
+         /proc/qualified(x)\n{uncompiled}\treturn ::LIMIT\n\n\
+         /proc/dotted(x)\n{uncompiled}\treturn global.LIMIT\n\n\
+         /proc/parens(x)\n{uncompiled}\treturn (::LIMIT)\n\n\
+         /proc/assigned(x)\n{uncompiled}\tx = ::LIMIT\n\treturn x\n\n\
+         /proc/initialized(x)\n{uncompiled}\tvar/y = ::LIMIT\n\treturn y\n\n\
+         /proc/defaulted(x, y = ::LIMIT)\n{uncompiled}\treturn y\n\n\
+         /proc/argument(x)\n{uncompiled}\treturn f(::LIMIT)\n\n\
+         /proc/listed(x)\n{uncompiled}\treturn list(::LIMIT, \"a\" = ::LIMIT)\n\n\
+         /proc/indexed(x)\n{uncompiled}\treturn x[::LIMIT]\n\n\
+         /proc/text(x)\n{uncompiled}\treturn \"[::LIMIT]\"\n\n\
+         /proc/branch(x)\n{uncompiled}\treturn x ? ::LIMIT : 2\n\n\
+         /proc/either(x)\n{uncompiled}\treturn ::LIMIT || x\n\n\
+         /proc/sum(x)\n{uncompiled}\treturn ::LIMIT + 1\n\n\
+         /proc/negated(x)\n{uncompiled}\treturn -::LIMIT\n\n\
+         /proc/chosen(x)\n{uncompiled}\treturn ::LIMIT ? 1 : 2\n\n\
+         /proc/summed_argument(x)\n{uncompiled}\treturn f(::LIMIT + 1)\n\n\
+         /proc/scoped(x)\n{uncompiled}\treturn /datum/c::CAP\n\n\
+         /proc/typed(datum/c/c, x)\n{uncompiled}\treturn c.CAP\n\n\
+         /proc/typed_scoped(datum/c/c, x)\n{uncompiled}\treturn c::CAP\n\n\
+         /proc/scoped_sum(x)\n{uncompiled}\treturn /datum/c::CAP + 1\n\n\
+         /proc/typed_negated(datum/c/c, x)\n{uncompiled}\treturn -c.CAP\n\n\
+         /proc/output(x)\n{uncompiled}\tworld << LIMIT\n\tLIMIT << x\n\tLIMIT >> x\n\n\
+         /proc/output_sum(x)\n{uncompiled}\tworld << LIMIT + 1\n"
+    );
+    for (name, after, refused) in [
+        (
+            "alone-const-limit",
+            before.replace("LIMIT = 5", "LIMIT = 10"),
+            &[
+                "/chosen",
+                "/either",
+                "/negated",
+                "/output_sum",
+                "/sum",
+                "/summed_argument",
+            ][..],
+        ),
+        (
+            "alone-const-cap",
+            before.replace("CAP = 3", "CAP = 4"),
+            &["/scoped_sum", "/typed_negated"][..],
+        ),
+    ] {
+        let changes = changes_of(name, &before, &after);
+        let mut paths: Vec<&str> = changes.refused.iter().map(|r| r.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, refused, "{}: {:?}", name, changes.refused);
     }
 }
 

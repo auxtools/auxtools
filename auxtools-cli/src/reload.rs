@@ -1,17 +1,21 @@
 use std::path::PathBuf;
 
-use auxtools_protocol::HotReloadRequest;
+use auxtools_protocol::{HotReloadRequest, LocalReads, ShadowingProc};
 use dmasm::{
 	diagnostic::Id,
-	reload::{Changes, Plan, Refusal, Snapshot}
+	reload::{Changes, Plan, ProcKey, Refusal, Snapshot},
+	Node, StaticScope
 };
+use dreammaker::ast::{Spanned, Statement, VarStatement};
 
 pub const RESTART: &str = "Rebuild the .dmb, then restart the world to load all of the new code.";
 
 pub fn request(changes: &Changes, before: &Snapshot, restarted: bool) -> HotReloadRequest {
 	let mut plan = changes.plan.clone();
-	without_existing_statics(&mut plan, before);
+	let local_reads = without_existing_statics(&mut plan, before);
 	HotReloadRequest {
+		shadowing_procs: shadowing_procs(&plan, before),
+		local_reads,
 		plan,
 		resources: vec![],
 		resource_dirs: vec![],
@@ -19,17 +23,197 @@ pub fn request(changes: &Changes, before: &Snapshot, restarted: bool) -> HotRelo
 	}
 }
 
-fn without_existing_statics(plan: &mut Plan, before: &Snapshot) {
+fn shadowing_procs(plan: &Plan, before: &Snapshot) -> Vec<ShadowingProc> {
+	let globals: Vec<&str> = plan
+		.redeclared
+		.iter()
+		.filter(|var| var.type_path.is_empty())
+		.map(|var| var.var.as_str())
+		.collect();
+	if globals.is_empty() {
+		return vec![];
+	}
+	let mut found = vec![];
+	for key in before.procs() {
+		let Some(code) = before.proc_code(key) else {
+			continue;
+		};
+		let mut declared = vec![];
+		static_locals(code, &mut declared);
+		let shadowed: Vec<&str> = globals
+			.iter()
+			.copied()
+			.filter(|global| declared.iter().any(|name| name == global))
+			.collect();
+		if shadowed.is_empty() {
+			continue;
+		}
+		let Ok(compiled) = before.compile(key) else {
+			continue;
+		};
+		let reads = local_reads(&compiled.nodes);
+		for global in shadowed {
+			found.push(ShadowingProc {
+				global: global.to_owned(),
+				proc: key.clone(),
+				reads: reads
+					.iter()
+					.find(|(name, _)| name == global)
+					.map(|(_, reads)| reads.clone())
+					.unwrap_or_default()
+			});
+		}
+	}
+	found
+}
+
+fn static_locals(block: &[Spanned<Statement>], out: &mut Vec<String>) {
+	for statement in block {
+		statement_static_locals(&statement.elem, out);
+	}
+}
+
+fn statement_static_locals(statement: &Statement, out: &mut Vec<String>) {
+	let mut var = |var: &VarStatement| {
+		if var.var_type.flags.is_static() || var.var_type.flags.is_const() {
+			out.push(var.name.to_string());
+		}
+	};
+	match statement {
+		Statement::Var(one) => var(one),
+		Statement::Vars(all) => all.iter().for_each(var),
+		Statement::While { block, .. }
+		| Statement::DoWhile { block, .. }
+		| Statement::ForInfinite { block }
+		| Statement::Spawn { block, .. }
+		| Statement::Label { block, .. } => static_locals(block, out),
+		Statement::ForList(each) => static_locals(&each.block, out),
+		Statement::ForKeyValue(each) => static_locals(&each.block, out),
+		Statement::ForRange(each) => static_locals(&each.block, out),
+		Statement::ForLoop { init, inc, block, .. } => {
+			for part in init.iter().chain(inc) {
+				statement_static_locals(part, out);
+			}
+			static_locals(block, out);
+		}
+		Statement::If { arms, else_arm } => {
+			for (_, block) in arms {
+				static_locals(block, out);
+			}
+			if let Some(block) = else_arm {
+				static_locals(block, out);
+			}
+		}
+		Statement::Switch { cases, default, .. } => {
+			for (_, block) in cases.iter() {
+				static_locals(block, out);
+			}
+			if let Some(block) = default {
+				static_locals(block, out);
+			}
+		}
+		Statement::TryCatch { try_block, catch_block, .. } => {
+			static_locals(try_block, out);
+			static_locals(catch_block, out);
+		}
+		_ => {}
+	}
+}
+
+fn without_existing_statics(plan: &mut Plan, before: &Snapshot) -> Vec<LocalReads> {
+	let mut found = vec![];
 	for code in &mut plan.reloads {
 		if code.statics.is_empty() {
 			continue;
 		}
-		let Ok(old) = before.compile(&code.proc) else {
+		let (old_locals, reads) = match before.compile(&code.proc) {
+			Ok(old) => (
+				old.statics.iter().map(|had| (had.name.clone(), local_number(&had.scope))).collect(),
+				local_reads(&old.nodes)
+			),
+			Err(_) => (declared_locals(before, &code.proc), vec![])
+		};
+		let nodes = &code.nodes;
+		code.statics.retain_mut(|local| {
+			let declared = old_locals.contains(&(local.name.clone(), local_number(&local.scope)));
+			let unread = reads
+				.iter()
+				.find(|(name, _)| *name == local.name)
+				.is_some_and(|(_, reads)| !reads.contains(&Some(local_number(&local.scope))));
+			let existing = declared && !unread;
+			if !existing {
+				local.constant = false;
+			}
+			!existing || local.constant && reads_static(nodes, &local.name, &local.scope)
+		});
+		found.extend(
+			reads
+				.into_iter()
+				.filter(|(name, _)| old_locals.iter().any(|(had, _)| had == name))
+				.map(|(name, reads)| LocalReads {
+					proc: code.proc.clone(),
+					name,
+					reads
+				})
+		);
+	}
+	found
+}
+
+fn declared_locals(snapshot: &Snapshot, proc: &ProcKey) -> Vec<(String, u32)> {
+	let mut names = vec![];
+	if let Some(code) = snapshot.proc_code(proc) {
+		static_locals(code, &mut names);
+	}
+	let mut out: Vec<(String, u32)> = vec![];
+	for name in names {
+		let number = out.iter().filter(|(had, _)| *had == name).count() as u32;
+		out.push((name, number));
+	}
+	out
+}
+
+const fn local_number(scope: &StaticScope) -> u32 {
+	match scope {
+		StaticScope::Proc { nth, .. } => *nth,
+		_ => 0
+	}
+}
+
+fn local_reads(nodes: &[Node]) -> Vec<(String, Vec<Option<u32>>)> {
+	let mut out: Vec<(String, Vec<Option<u32>>)> = vec![];
+	for node in nodes {
+		let Node::Instruction(ins, _) = node else {
 			continue;
 		};
-		code.statics
-			.retain(|local| !old.statics.iter().any(|had| had.name == local.name && had.scope == local.scope));
+		for var in ins.variables() {
+			for global in var.globals() {
+				let name = String::from_utf8_lossy(&global.name.0);
+				let read = match &global.scope {
+					Some(StaticScope::Proc { nth, .. }) => Some(*nth),
+					_ => None
+				};
+				match out.iter_mut().find(|(had, _)| *had == name) {
+					Some((_, reads)) => reads.push(read),
+					None => out.push((name.into_owned(), vec![read]))
+				}
+			}
+		}
 	}
+	out
+}
+
+fn reads_static(nodes: &[Node], name: &str, scope: &StaticScope) -> bool {
+	nodes.iter().any(|node| {
+		let Node::Instruction(ins, _) = node else {
+			return false;
+		};
+		ins.variables().iter().any(|var| {
+			var.globals()
+				.iter()
+				.any(|global| global.name.0 == name.as_bytes() && global.scope.as_ref() == Some(scope))
+		})
+	})
 }
 
 pub fn resource_names(request: &HotReloadRequest) -> Vec<String> {
@@ -228,6 +412,66 @@ mod tests {
 	}
 
 	#[test]
+	fn a_request_sends_the_local_consts_the_new_code_reads() {
+		let before = "var/LIMIT = 1\n/proc/f()\n\tvar/const/LIMIT = 5\n\tvar/const/UNREAD = 2\n\treturn LIMIT\n/proc/g()\n\treturn LIMIT\n";
+		let after = "var/LIMIT = 1\n/proc/f()\n\tvar/const/LIMIT = 10\n\tvar/const/UNREAD = 2\n\treturn LIMIT\n/proc/g()\n\tvar/const/LIMIT = \
+		             7\n\treturn LIMIT\n";
+		let (old, changes) = edited("consts", before, after);
+		let sent = request(&changes, &old, false);
+		let statics: Vec<String> = sent
+			.plan
+			.reloads
+			.iter()
+			.flat_map(|reload| {
+				reload
+					.statics
+					.iter()
+					.map(move |local| format!("{} {} {}", reload.proc, local.name, local.constant))
+			})
+			.collect();
+		assert_eq!(statics, ["/f LIMIT true", "/g LIMIT false"]);
+	}
+
+	#[test]
+	fn a_request_tells_a_procs_locals_from_globals_of_their_name() {
+		let before = "var/LIMIT = 1\n/proc/f()\n\tvar/const/LIMIT = 5\n\treturn global.LIMIT\n/proc/g()\n\tvar/static/LIMIT = \
+		              7\n\tLIMIT++\n\treturn list(LIMIT, global.LIMIT)\n";
+		let after = before.replace("return global.LIMIT", "return LIMIT").replace("LIMIT++", "LIMIT += 2");
+		let (old, changes) = edited("told-apart", before, &after);
+		let sent = request(&changes, &old, false);
+		let statics: Vec<String> = sent
+			.plan
+			.reloads
+			.iter()
+			.flat_map(|reload| {
+				reload
+					.statics
+					.iter()
+					.map(move |local| format!("{} {} {}", reload.proc, local.name, local.constant))
+			})
+			.collect();
+		assert_eq!(statics, ["/f LIMIT false"]);
+		let reads: Vec<String> = sent
+			.local_reads
+			.iter()
+			.map(|reads| format!("{} {} {:?}", reads.proc, reads.name, reads.reads))
+			.collect();
+		assert_eq!(reads, ["/f LIMIT [None]", "/g LIMIT [Some(0), Some(0), None]"]);
+	}
+
+	#[test]
+	fn a_request_leaves_out_the_statics_of_old_code_dmasm_cant_compile() {
+		let twice = "/datum/t/proc/f()\n\treturn 0\n/datum/t/f()\n\treturn 1\n/datum/t/f()\n\treturn 2\n";
+		let before = format!("{twice}/proc/f()\n\tvar/static/count = 0\n\tcount++\n\tif (/datum/t::f())\n\t\treturn count\n");
+		let after = before.replace("\tif (/datum/t::f())\n\t\treturn count", "\tvar/static/added = 1\n\treturn count + added");
+		let (old, changes) = edited("uncompiled-statics", &before, &after);
+		assert!(old.compile(&changes.plan.reloads[0].proc).is_err(), "dmasm compiles the old code");
+		let sent = request(&changes, &old, false);
+		let statics: Vec<&str> = sent.plan.reloads[0].statics.iter().map(|local| local.name.as_str()).collect();
+		assert_eq!(statics, ["added"]);
+	}
+
+	#[test]
 	fn a_request_is_the_plan_without_the_statics_the_world_has() {
 		let before = "/datum/a\n\tvar/old = 1\n/proc/f()\n\tvar/static/kept = 1\n\treturn kept\n/proc/g()\n\treturn 1\n";
 		let after = "/datum/a\n/proc/f()\n\tvar/static/kept = 1\n\tvar/static/added = 2\n\treturn kept + added\n/proc/g()\n\treturn 2\n";
@@ -246,6 +490,21 @@ mod tests {
 		assert_eq!(sent.plan.removed_vars.len(), 1);
 		assert_eq!(sent.plan.len(), changes.plan.len());
 		assert!(sent.resources.is_empty() && sent.resource_dirs.is_empty());
+	}
+
+	#[test]
+	fn a_request_names_the_procs_whose_locals_share_a_changed_globals_name() {
+		let before = "var/const/N = 5\n/proc/a()\n\treturn N\n/proc/b()\n\tvar/static/N = 7\n\treturn N\n/proc/c()\n\tif \
+		              (prob(50))\n\t\tvar/const/N = 8\n\t\treturn N\n/proc/d()\n\tvar/static/N = 9\n\treturn N + global.N\n";
+		let (old, changes) = edited("shadowing", before, &before.replace("N = 5", "N = 10"));
+		assert_eq!(changes.plan.redeclared.len(), 1, "{:?}", changes.plan);
+		let sent = request(&changes, &old, false);
+		let procs: Vec<String> = sent
+			.shadowing_procs
+			.iter()
+			.map(|p| format!("{} {} {:?}", p.global, p.proc.path, p.reads))
+			.collect();
+		assert_eq!(procs, ["N /b [Some(0)]", "N /c [Some(0)]", "N /d [Some(0), None]"]);
 	}
 
 	#[test]

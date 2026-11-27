@@ -43,6 +43,7 @@ pub struct StaticLocal {
     pub value: Option<dreammaker::constants::Constant>,
     pub expression: Option<dreammaker::ast::Expression>,
     pub type_path: String,
+    pub constant: bool,
 }
 
 const STATIC_LOCAL: u32 = 1 << 31;
@@ -71,7 +72,7 @@ pub(super) struct ProcCtx<'a> {
     pub label_iterators: std::collections::HashMap<String, u32>,
     pub bare_labels: std::collections::HashSet<String>,
     pub cleanups: Vec<Instruction>,
-    pub local_consts: std::collections::HashMap<String, dreammaker::constants::Constant>,
+    pub local_consts: std::collections::HashMap<(String, u32), dreammaker::constants::Constant>,
     pub proc_path: String,
     pub file: String,
     pub file_id: dreammaker::FileId,
@@ -116,6 +117,7 @@ impl ProcCtx<'_> {
         ty: String,
         value: Option<dreammaker::constants::Constant>,
         expression: Option<dreammaker::ast::Expression>,
+        constant: bool,
     ) {
         let number = self.static_locals.iter().filter(|s| *s == name).count() as u32;
         self.static_locals.push(name.to_owned());
@@ -128,12 +130,18 @@ impl ProcCtx<'_> {
             value,
             expression,
             type_path: ty.clone(),
+            constant,
         });
         self.static_local_types
             .insert((name.to_owned(), number), ty);
         if let Some(scope) = self.scopes.last_mut() {
             scope.push((name.to_owned(), number | STATIC_LOCAL));
         }
+    }
+
+    pub fn fold_last_static(&mut self, name: &str, value: dreammaker::constants::Constant) {
+        let number = self.static_locals.iter().filter(|s| *s == name).count() as u32 - 1;
+        self.local_consts.insert((name.to_owned(), number), value);
     }
 
     pub fn declare_typed_local(&mut self, name: &str, ty: String) -> u32 {
@@ -398,13 +406,29 @@ pub(super) fn member_var<'a>(
 }
 
 pub(super) fn colon_var<'a>(
+    compiler: &Compiler<'a>,
+    ty: Option<TypeRef<'a>>,
+    name: &str,
+) -> Option<dreammaker::objtree::VarDeclarationRef<'a>> {
+    if let Some(decl) = ty.and_then(|t| member_var(t, name)) {
+        return Some(decl);
+    }
+    ty.and_then(|t| declared_below(t, name))
+        .or_else(|| declared_below(compiler.proc.tree.root(), name))
+}
+
+fn declared_below<'a>(
     ty: TypeRef<'a>,
     name: &str,
 ) -> Option<dreammaker::objtree::VarDeclarationRef<'a>> {
-    if let Some(decl) = member_var(ty, name) {
-        return Some(decl);
-    }
-    ty.children().find_map(|child| colon_var(child, name))
+    let mut children: Vec<TypeRef<'a>> = ty.children().collect();
+    children.sort_by_key(|child| child.index());
+    children.into_iter().rev().find_map(|child| {
+        declared_below(child, name).or_else(|| {
+            child.get().vars.get(name)?.declaration.as_ref()?;
+            member_var(child, name)
+        })
+    })
 }
 
 static TREES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -544,7 +568,7 @@ pub(super) fn expr_type<'a>(
     compiler: &Compiler<'a>,
     expr: &dreammaker::ast::Expression,
 ) -> Option<TypeRef<'a>> {
-    use dreammaker::ast::{Expression, Follow, Term};
+    use dreammaker::ast::{Expression, Follow, PropertyAccessKind, Term};
     let Expression::Base { term, follow } = expr else {
         return None;
     };
@@ -564,20 +588,21 @@ pub(super) fn expr_type<'a>(
                 Follow::Field(_, name) => name.as_str(),
                 _ => unreachable!(),
             })?;
-        declared_type(compiler, &decl.get().var_type)?
+        declared_type(compiler, &decl.get().var_type)
     } else {
-        term_type(compiler, &term.elem)?
+        term_type(compiler, &term.elem)
     };
     for f in &follow[global as usize..] {
-        match &f.elem {
-            Follow::Field(_, name) => {
-                let decl = member_var(ty, name.as_str())?;
-                ty = declared_type(compiler, &decl.get().var_type)?;
+        let decl = match &f.elem {
+            Follow::Field(PropertyAccessKind::Colon | PropertyAccessKind::SafeColon, name) => {
+                colon_var(compiler, ty, name.as_str())?
             }
+            Follow::Field(_, name) => member_var(ty?, name.as_str())?,
             _ => return None,
-        }
+        };
+        ty = declared_type(compiler, &decl.get().var_type);
     }
-    Some(ty)
+    ty
 }
 
 pub(super) fn resolve_proc_path(compiler: &Compiler, path: &str) -> Option<String> {
@@ -780,6 +805,19 @@ pub fn labels_mut(ins: &mut Instruction) -> Vec<&mut crate::operands::Label> {
     }
 }
 
+pub(super) fn local_const_value(
+    folded: super::fold::Constant,
+) -> Option<dreammaker::constants::Constant> {
+    use dreammaker::constants::Constant as C;
+    match folded {
+        super::fold::Constant::Number(n) => Some(C::Float(n)),
+        super::fold::Constant::Text(t) if !t.iter().any(|b| matches!(b, 0xFF | b'\\' | b'[')) => {
+            String::from_utf8(t).ok().map(|t| C::String(t.into()))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn const_value(
     compiler: &Compiler,
     name: &str,
@@ -816,11 +854,9 @@ fn const_lookup(
     if compiler.debugger && name == "vars" {
         return None;
     }
-    if let Some(c) = ctx.local_consts.get(name) {
-        return Some((c.clone(), false));
-    }
-    if ctx.find_static(name).is_some() {
-        return None;
+    if let Some(number) = ctx.find_static(name) {
+        let folded = ctx.local_consts.get(&(name.to_owned(), number));
+        return folded.map(|c| (c.clone(), false));
     }
     let ty = if !ctx.ty.is_root() && member_var(ctx.ty, name).is_some() {
         ctx.ty

@@ -126,6 +126,72 @@ var/const/DEP_OWN = 5
 /proc/dep_own_global()
 	return DEP_OWN + 1
 
+/datum/dep_own/proc/own_alone()
+	return DEP_OWN
+
+/proc/dep_own_global_alone()
+	return DEP_OWN
+
 /datum/dep_own/proc/next()
 	var/last = /datum/dep_twice::f()
 	return last ? DEP_OWN + 1 : 0
+
+/datum/dep_member_config
+	var/const/DEP_MEMBER = 5
+
+/proc/dep_member_chain(datum/dep_member_config/config)
+	var/last = /datum/dep_twice::f()
+	return last ? config.DEP_MEMBER + 1 : 0
+
+var/const/DEP_ALONE = 5
+
+/proc/dep_alone_sum()
+	var/last = /datum/dep_twice::f()
+	return last ? ::DEP_ALONE + 1 : 0
+
+/proc/dep_alone()
+	var/last = /datum/dep_twice::f()
+	return last ? ::DEP_ALONE : 0
+
+/proc/dep_local_limit()
+	var/const/DEP_LOCAL = 5
+	return "[DEP_LOCAL] [DEP_LOCAL + 1]"
+
+var/const/DEP_LOCAL_BASE = 5
+
+/proc/dep_local_based()
+	var/const/DEP_LOCAL_SUM = DEP_LOCAL_BASE + 1
+	return DEP_LOCAL_SUM
+
+var/const/DEP_OUTPUT = 5
+
+/proc/dep_output()
+	var/last = /datum/dep_twice::f()
+	var/savefile/S = new
+	S["v"] << DEP_OUTPUT
+	var/v
+	S["v"] >> v
+	return last ? v : 0
+
+/datum/dep_global_config
+	var/const/DEP_GLOBAL_MEMBER = 5
+
+var/datum/dep_global_config/dep_global_config
+
+/proc/dep_global_chain()
+	var/last = /datum/dep_twice::f()
+	return last ? global.dep_global_config.DEP_GLOBAL_MEMBER + 1 : 0
+
+var/const/DEP_OFFSET_BASE = 5
+
+/proc/dep_local_offset()
+	var/const/DEP_OFFSET = 1
+	var/const/DEP_OFFSET_SUM = DEP_OFFSET_BASE + DEP_OFFSET
+	return DEP_OFFSET_SUM
+
+/datum/dep_local_config
+	var/dep_limit = 5
+
+/proc/dep_local_default()
+	var/const/DEP_DEFAULT_LIMIT = /datum/dep_local_config::dep_limit
+	return DEP_DEFAULT_LIMIT

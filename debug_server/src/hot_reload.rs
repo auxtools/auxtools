@@ -1,4 +1,5 @@
 use std::{
+	borrow::Cow,
 	collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
 	rc::Rc,
 	sync::Mutex
@@ -9,7 +10,7 @@ use auxtools::{
 	runtime_tables::{self, type_fields, ProcEntryWords, NONE},
 	shutdown, Proc, StringRef
 };
-use auxtools_protocol::{HotReloadRequest, Reloaded};
+use auxtools_protocol::{HotReloadRequest, Reloaded, ShadowingProc};
 use dmasm::{
 	assembler::AssembleEnv as _,
 	reload::{
@@ -69,7 +70,8 @@ struct AddedVars {
 	in_lists_before: u32,
 	in_lists: Vec<(u32, ProcEntryWords)>,
 	instances: StagedInstances,
-	statics: HashMap<(StaticScope, Vec<u8>), u32>
+	statics: HashMap<(StaticScope, Vec<u8>), u32>,
+	const_values: Vec<(u32, (u32, u32), Option<StringRef>)>
 }
 
 #[derive(Default)]
@@ -282,6 +284,15 @@ impl TypeVars {
 		Self::words(&mut self.declared, type_id, type_fields::DECLARED_VARS)
 	}
 
+	fn declared_now(&self, type_id: u32) -> Result<Cow<'_, [u32]>, String> {
+		if let Some(words) = self.declared.get(&type_id) {
+			return Ok(Cow::Borrowed(words));
+		}
+		let id = runtime_tables::type_field(type_id, type_fields::DECLARED_VARS)?;
+		let words = runtime_tables::misc_words(id).ok_or_else(|| format!("could not read variables of type {}", type_id))?;
+		Ok(Cow::Owned(words))
+	}
+
 	fn name_of(&self, var_id: u32) -> u32 {
 		self.new_names
 			.get(&var_id)
@@ -421,7 +432,9 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		plan,
 		resources: _,
 		resource_dirs: _,
-		global_init
+		global_init,
+		shadowing_procs,
+		local_reads
 	} = request;
 	let Plan {
 		new_types,
@@ -461,6 +474,15 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	};
 	let mut errors = vec![];
 	let mut world_globals = WorldGlobals::default();
+	for reads in local_reads {
+		if let Ok(proc) = find(&reads.proc) {
+			world_globals
+				.local_reads
+				.entry(proc.id.0)
+				.or_default()
+				.push((reads.name.as_bytes().to_vec(), reads.reads.clone()));
+		}
+	}
 
 	let mut pending = Pending::default();
 	let first_id = runtime_tables::proc_count();
@@ -490,7 +512,8 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		in_lists_before: runtime_tables::in_list_count().unwrap_or(0),
 		in_lists: vec![],
 		instances: StagedInstances::default(),
-		statics: HashMap::new()
+		statics: HashMap::new(),
+		const_values: vec![]
 	};
 	for new in new_vars {
 		if let Err(e) = prepare_new_var(new, &mut added, &mut type_vars, &mut pending, warnings) {
@@ -498,7 +521,16 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		}
 	}
 	for var in redeclared {
-		if let Err(e) = prepare_redeclared(var, &mut added, &mut type_vars, &mut pending, &mut prepared.global_values) {
+		let shadowing: Vec<&ShadowingProc> = shadowing_procs.iter().filter(|p| p.global == var.var).collect();
+		if let Err(e) = prepare_redeclared(
+			var,
+			&shadowing,
+			&mut added,
+			&mut type_vars,
+			&mut world_globals,
+			&mut pending,
+			&mut prepared.global_values
+		) {
 			errors.push(e);
 		}
 	}
@@ -663,6 +695,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		warnings.push("verb and built-in variable changes apply only to new instances. Existing instances keep their current values".to_owned());
 	}
 
+	prepared.global_values.append(&mut added.const_values);
 	prepared.new_vars = added.vars;
 	prepared.new_globals = pending
 		.globals
@@ -738,7 +771,7 @@ fn assemble_with(
 	let nodes = adapt_debug_info(&code.nodes, &original.map(original_code).unwrap_or_default());
 
 	let uses = original.map(|proc| world_globals.of(proc)).unwrap_or_default();
-	let proc_globals = uses.by_name();
+	let proc_globals = original.map(|proc| world_globals.globals_of(proc)).unwrap_or_default();
 	let new_statics = new_statics(code, &proc_globals, pending, added).map_err(|e| format!("{}: {}", name, e))?;
 	let mut env = ReloadEnv {
 		proc_globals,
@@ -931,7 +964,8 @@ pub fn early_global_init(init: &dmasm::reload::GlobalInit, rest: &HotReloadReque
 		in_lists_before: 0,
 		in_lists: vec![],
 		instances: StagedInstances::default(),
-		statics: HashMap::new()
+		statics: HashMap::new(),
+		const_values: vec![]
 	};
 	let code = value_code(init.code.clone());
 	let known = global_slots(&code, &init.proc_statics, &Pending::default(), &added, &mut WorldGlobals::default());
@@ -1738,23 +1772,24 @@ fn world_keys(entry: &ProcEntryWords) -> Vec<u32> {
 	keys
 }
 
-const fn static_number(scope: &StaticScope) -> usize {
-	match scope {
-		StaticScope::Proc { nth, .. } => *nth as usize,
-		_ => 0
-	}
-}
-
 fn new_statics(
 	code: &ProcReload,
-	proc_globals: &HashMap<Vec<u8>, Vec<u32>>,
+	proc_globals: &ProcGlobals,
 	pending: &Pending,
 	added: &mut AddedVars
 ) -> Result<HashMap<(StaticScope, Vec<u8>), u32>, String> {
 	let mut out = HashMap::new();
 	for local in &code.statics {
 		let name = local.name.as_bytes().to_vec();
-		if proc_globals.get(&name).is_some_and(|ids| ids.len() > static_number(&local.scope)) {
+		let nth = match &local.scope {
+			StaticScope::Proc { nth, .. } => *nth,
+			_ => 0
+		};
+		let existing = proc_globals.local(&name, nth);
+		if let (true, Some(id), Some(value)) = (local.constant, existing, &local.value) {
+			let (value, text) = owned_value(value, pending).map_err(|e| format!("local const {}: {}", local.name, e))?;
+			added.const_values.push((id, value, text));
+			out.insert((local.scope.clone(), name), id);
 			continue;
 		}
 		let value = match (&local.value, &local.init) {
@@ -2265,12 +2300,25 @@ pub fn locals_references(path: &str) -> Result<(u32, u16, u32), String> {
 	let id = runtime_tables::proc_entry(proc.id)
 		.ok_or_else(|| format!("could not read proc table entry for {}", path))?
 		.0[ProcEntryWords::LOCALS];
+	let (count, references) = misc_references(id).ok_or_else(|| format!("{} has no locals table", path))?;
+	Ok((id, count, references))
+}
+
+#[cfg(feature = "test-commands")]
+pub fn declared_references(path: &str) -> Result<(u32, u32), String> {
+	let id = runtime_tables::type_field(find_type(path)?, type_fields::DECLARED_VARS)?;
+	let (_, references) = misc_references(id).ok_or_else(|| format!("{} has no declared variables", path))?;
+	Ok((id, references))
+}
+
+#[cfg(feature = "test-commands")]
+fn misc_references(id: u32) -> Option<(u16, u32)> {
 	let mut entry = std::ptr::null_mut();
 	unsafe {
 		if raw_types::funcs::get_misc_by_id(&mut entry, raw_types::misc::MiscId::from_raw(id)) != 1 || entry.is_null() {
-			return Err(format!("{} has no locals table", path));
+			return None;
 		}
-		Ok((id, *(entry as *const u16), *((entry as *const u8).add(4) as *const u32)))
+		Some((*(entry as *const u16), *((entry as *const u8).add(4) as *const u32)))
 	}
 }
 
@@ -2403,8 +2451,10 @@ fn moved_var_warning(declaring: &str, var: &str, kept: &[u32]) -> Option<String>
 
 fn prepare_redeclared(
 	var: &Redeclared,
+	shadowing: &[&ShadowingProc],
 	added: &mut AddedVars,
 	type_vars: &mut TypeVars,
+	world_globals: &mut WorldGlobals,
 	pending: &mut Pending,
 	global_values: &mut Vec<(u32, (u32, u32), Option<StringRef>)>
 ) -> Result<(), String> {
@@ -2415,8 +2465,25 @@ fn prepare_redeclared(
 		let mut ids = variable_ids(var.var.as_bytes());
 		if ids.len() > 1 {
 			for type_id in 0..runtime_tables::type_count().map_err(fail)? {
-				let declared = type_vars.declared(type_id).map_err(fail)?;
+				let declared = type_vars.declared_now(type_id).map_err(fail)?;
 				ids.retain(|id| !declared.chunks(2).any(|pair| pair[0] == *id));
+			}
+			let mut global_reads = vec![];
+			for shadowing in shadowing {
+				let Ok(proc) = find(&shadowing.proc) else {
+					continue;
+				};
+				let read = world_globals.of(&proc).ids_of(var.var.as_bytes());
+				if shadowing.reads.iter().all(Option::is_some) {
+					ids.retain(|id| !read.contains(id));
+				} else if let Some((own, globals)) = ProcGlobals::told_apart(&read, &shadowing.reads) {
+					ids.retain(|id| !own.values().any(|own| own == id));
+					global_reads.extend(globals);
+				}
+			}
+			let read: Vec<u32> = ids.iter().copied().filter(|id| global_reads.contains(id)).collect();
+			if let [id] = read[..] {
+				ids = vec![id];
 			}
 		}
 		let [id] = ids[..] else {
@@ -3612,6 +3679,10 @@ impl GlobalUses {
 		out
 	}
 
+	fn ids_of(&self, name: &[u8]) -> Vec<u32> {
+		self.uses.iter().filter(|(_, used, ..)| used == name).map(|(.., id)| *id).collect()
+	}
+
 	fn place(&self) -> Option<(Vec<u8>, u32, u32)> {
 		let (first, last) = self.lines?;
 		Some((self.files.first()?.clone(), first, last))
@@ -3619,7 +3690,65 @@ impl GlobalUses {
 }
 
 #[derive(Default)]
+struct ProcGlobals {
+	by_name: HashMap<Vec<u8>, Vec<u32>>,
+	locals: HashMap<Vec<u8>, HashMap<u32, u32>>
+}
+
+impl ProcGlobals {
+	fn new(uses: &GlobalUses, local_reads: &[(Vec<u8>, Vec<Option<u32>>)]) -> Self {
+		let mut by_name = uses.by_name();
+		let mut locals = HashMap::new();
+		for (name, reads) in local_reads {
+			match Self::told_apart(&uses.ids_of(name), reads) {
+				Some((own, globals)) => {
+					by_name.insert(name.clone(), globals);
+					locals.insert(name.clone(), own);
+				}
+				None if reads.contains(&None) => {
+					by_name.remove(name);
+					locals.insert(name.clone(), HashMap::new());
+				}
+				None => {}
+			}
+		}
+		Self { by_name, locals }
+	}
+
+	fn told_apart(ids: &[u32], reads: &[Option<u32>]) -> Option<(HashMap<u32, u32>, Vec<u32>)> {
+		if ids.len() != reads.len() {
+			return None;
+		}
+		let mut own: HashMap<u32, u32> = HashMap::new();
+		let mut globals = vec![];
+		for (id, read) in ids.iter().zip(reads) {
+			match read {
+				Some(nth) => {
+					if *own.entry(*nth).or_insert(*id) != *id {
+						return None;
+					}
+				}
+				None => {
+					if let Err(at) = globals.binary_search(id) {
+						globals.insert(at, *id);
+					}
+				}
+			}
+		}
+		(!own.values().any(|id| globals.contains(id))).then_some((own, globals))
+	}
+
+	fn local(&self, name: &[u8], nth: u32) -> Option<u32> {
+		match self.locals.get(name) {
+			Some(own) => own.get(&nth).copied(),
+			None => self.by_name.get(name).and_then(|ids| ids.get(nth as usize)).copied()
+		}
+	}
+}
+
+#[derive(Default)]
 struct WorldGlobals {
+	local_reads: HashMap<u32, Vec<(Vec<u8>, Vec<Option<u32>>)>>,
 	users: Option<HashMap<Vec<u8>, Vec<(u32, String)>>>,
 	initialized: Option<Vec<(Vec<u8>, Vec<u8>, u32, u32)>>,
 	procs: HashMap<u32, (usize, u16, Rc<GlobalUses>)>
@@ -3635,6 +3764,11 @@ impl WorldGlobals {
 		let read = Rc::new(GlobalUses::read(&original_code(proc)));
 		self.procs.insert(proc.id.0, (at, len, read.clone()));
 		read
+	}
+
+	fn globals_of(&mut self, proc: &Proc) -> ProcGlobals {
+		let uses = self.of(proc);
+		ProcGlobals::new(&uses, self.local_reads.get(&proc.id.0).map_or(&[], Vec::as_slice))
 	}
 
 	fn initialized(&mut self) -> &[(Vec<u8>, Vec<u8>, u32, u32)] {
@@ -3668,7 +3802,7 @@ impl WorldGlobals {
 }
 
 struct ReloadEnv<'a> {
-	proc_globals: HashMap<Vec<u8>, Vec<u32>>,
+	proc_globals: ProcGlobals,
 	world_globals: &'a mut WorldGlobals,
 	pending: &'a Pending,
 	new_statics: HashMap<(StaticScope, Vec<u8>), u32>,
@@ -3738,8 +3872,8 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 		}
 
 		if let Some(StaticScope::Proc { nth, .. }) = scope {
-			let id = self.proc_globals.get(name).and_then(|ids| ids.get(*nth as usize)).copied();
-			let id = id.or_else(|| self.new_statics.get(&key).copied());
+			let id = self.new_statics.get(&key).copied();
+			let id = id.or_else(|| self.proc_globals.local(name, *nth));
 			let id = id.or_else(|| {
 				let (file, first, last) = self.place.as_ref()?;
 				let set: Vec<u32> = self
@@ -3798,7 +3932,7 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 			return Some(id);
 		}
 
-		if let Some([id]) = self.proc_globals.get(name).map(Vec::as_slice) {
+		if let Some([id]) = self.proc_globals.by_name.get(name).map(Vec::as_slice) {
 			return Some(*id);
 		}
 

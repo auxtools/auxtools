@@ -121,10 +121,78 @@ pub fn dependents(built: Built) {
 
 	let changes = source.edit("dependents.dm", "DEP_OWN = 5", "DEP_OWN = 10");
 	reload(&mut watcher, &changes);
-	assert_eq!(eval(&mut client, "\"[dep_own_global()] [(new /datum/dep_own).own()]\""), "\"11 3\"");
+	assert_eq!(
+		eval(
+			&mut client,
+			"\"[dep_own_global()] [(new /datum/dep_own).own()] [dep_own_global_alone()] [(new /datum/dep_own).own_alone()]\""
+		),
+		"\"11 3 10 2\""
+	);
 	println!("ok: a global const changes beside a member const of its name");
 	assert_eq!(eval(&mut client, "(new /datum/dep_own).next()"), "3");
 	println!("ok: a changed const leaves code dmasm can't compile that reads a member const of its name");
+
+	assert_eq!(eval(&mut client, "dep_member_chain(new /datum/dep_member_config)"), "6");
+	let refused = refused_edit(&mut source, "dependents.dm", "DEP_MEMBER = 5", "DEP_MEMBER = 10");
+	let paths: Vec<&str> = refused.iter().map(|r| r.path.as_str()).collect();
+	assert_eq!(
+		paths,
+		["/dep_member_chain"],
+		"a proc dmasm can't compile that folds a changed member const through a typed var isn't refused: {:?}",
+		refused
+	);
+	println!("ok: a reload is refused for a proc dmasm can't compile that folds a changed member const through a typed var");
+
+	assert_eq!(eval(&mut client, "\"[dep_alone()] [dep_alone_sum()]\""), "\"5 6\"");
+	let refused = refused_edit(&mut source, "dependents.dm", "DEP_ALONE = 5", "DEP_ALONE = 10");
+	let paths: Vec<&str> = refused.iter().map(|r| r.path.as_str()).collect();
+	assert_eq!(
+		paths,
+		["/dep_alone_sum"],
+		"a changed const read alone in code dmasm can't compile refuses the reload, or one it folds doesn't: {:?}",
+		refused
+	);
+	let changes = source.edit(
+		"dependents.dm",
+		"DEP_ALONE = 5\n\n/proc/dep_alone_sum()\n\tvar/last = /datum/dep_twice::f()\n\treturn last ? ::DEP_ALONE + 1 : 0",
+		"DEP_ALONE = 10\n\n/proc/dep_alone_sum()\n\treturn ::DEP_ALONE + 1"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "\"[dep_alone()] [dep_alone_sum()]\""), "\"10 11\"");
+	println!("ok: code dmasm can't compile that reads a changed const alone sees its new value");
+
+	assert_eq!(eval(&mut client, "\"[dep_local_limit()] [dep_local_based()]\""), "\"5 6 6\"");
+	let changes = source.edit("dependents.dm", "DEP_LOCAL = 5", "DEP_LOCAL = 10");
+	reload(&mut watcher, &changes);
+	let changes = source.edit("dependents.dm", "DEP_LOCAL_BASE = 5", "DEP_LOCAL_BASE = 10");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "\"[dep_local_limit()] [dep_local_based()]\""), "\"10 11 11\"");
+	println!("ok: a changed local const is read alone and folded with its new value");
+
+	assert_eq!(eval(&mut client, "dep_output()"), "5");
+	let changes = source.edit("dependents.dm", "DEP_OUTPUT = 5", "DEP_OUTPUT = 10");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "dep_output()"), "10");
+	println!("ok: code dmasm can't compile that outputs a changed const sees its new value");
+
+	assert_eq!(eval(&mut client, "dep_global_chain()"), "6");
+	let refused = refused_edit(&mut source, "dependents.dm", "DEP_GLOBAL_MEMBER = 5", "DEP_GLOBAL_MEMBER = 10");
+	let paths: Vec<&str> = refused.iter().map(|r| r.path.as_str()).collect();
+	assert_eq!(
+		paths,
+		["/dep_global_chain"],
+		"a proc dmasm can't compile that folds a changed member const through a typed global isn't refused: {:?}",
+		refused
+	);
+	println!("ok: a reload is refused for a proc dmasm can't compile that folds a changed member const through a typed global");
+
+	assert_eq!(eval(&mut client, "\"[dep_local_offset()] [dep_local_default()]\""), "\"6 5\"");
+	let changes = source.edit("dependents.dm", "DEP_OFFSET_BASE = 5", "DEP_OFFSET_BASE = 10");
+	reload(&mut watcher, &changes);
+	let changes = source.edit("dependents.dm", "dep_limit = 5", "dep_limit = 10");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "\"[dep_local_offset()] [dep_local_default()]\""), "\"11 10\"");
+	println!("ok: a local const read alone follows the local consts and defaults it reads");
 }
 
 fn refused_edit(source: &mut Source, file: &str, from: &str, to: &str) -> Vec<dmasm::reload::Refusal> {
