@@ -127,7 +127,7 @@ impl Value {
 		let max_x = world.get_number(crate::byond_string!("maxx"))? as u32;
 		let max_y = world.get_number(crate::byond_string!("maxy"))? as u32;
 		let max_z = world.get_number(crate::byond_string!("maxz"))? as u32;
-		if (0..max_x * max_y * max_z).contains(&(id - 1)) {
+		if id < max_x * max_y * max_z {
 			Ok(unsafe { Value::turf_by_id_unchecked(id) })
 		} else {
 			Err(runtime!("cannot get turf with invalid ID {}", id))
