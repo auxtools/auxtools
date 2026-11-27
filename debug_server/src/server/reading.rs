@@ -1,4 +1,4 @@
-use dreammaker::ast::{Expression, Follow, ListAccessKind, PropertyAccessKind, Term};
+use dreammaker::ast::{Expression, Follow, ListAccessKind, PathOp, PropertyAccessKind, Term};
 
 use super::*;
 
@@ -16,7 +16,11 @@ impl Server {
 			),
 			None => None
 		};
-		read(&parsed, frame)
+		let was_in_eval = std::mem::replace(&mut self.eval.in_eval, true);
+		auxtools::instruction_hook::hear_all();
+		let value = read(&parsed, frame);
+		self.eval.in_eval = was_in_eval;
+		value
 	}
 
 	pub(super) fn handle_read(&mut self, frame_id: Option<u32>, expression: &str) {
@@ -48,6 +52,11 @@ fn read(expression: &Expression, frame: Option<&debug::StackFrame>) -> Result<Va
 		Term::String(text) => {
 			let bytes = dmasm::compiler::text_bytes(text).ok_or_else(|| format!("invalid string literal: {}", text))?;
 			Value::from_string_raw(&bytes).map_err(runtime)?
+		}
+		Term::Prefab(prefab) if prefab.vars.is_empty() && prefab.path.iter().all(|(op, _)| *op == PathOp::Slash) => {
+			let path = prefab.path.to_string();
+			let (tag, id) = crate::assemble_env::AssembleEnv::type_value(&path).ok_or_else(|| format!("undefined type path: {}", path))?;
+			unsafe { Value::new(ValueTag(tag), ValueData { id }) }
 		}
 		Term::Expr(inner) => read(inner, frame)?,
 		Term::Ident(name) => named(name, frame)?,
