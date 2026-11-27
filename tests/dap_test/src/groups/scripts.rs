@@ -55,7 +55,9 @@ pub fn run() {
 	ok("client script text reload");
 
 	world.marks.edit("script.dm", "\"<style>second {}</style>\"", "'a.css'");
-	world.wait_output("client script: client/script references 'a.css'; resource-file scripts require a rebuild; the world keeps the script it has");
+	world.wait_output(
+		"client script not reloaded (keeping the current script): client/script references resource file 'a.css', which requires a rebuild"
+	);
 	assert_eq!(script(&mut world).2, full);
 	ok("resource-file script requires rebuild");
 

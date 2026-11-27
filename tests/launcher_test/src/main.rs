@@ -1600,7 +1600,7 @@ fn errored_baseline(server: &str) {
 		read()
 	);
 	std::fs::write(&code, &source).unwrap();
-	wait_for_text("launch", "fixed parse error", read);
+	wait_for_text("launch", "a resolved parse error", read);
 	let printed = read();
 	assert!(
 		printed.contains("Hot reload requires a rebuild") && !printed.contains("Hot reload: added"),
@@ -1696,7 +1696,7 @@ fn foreground(server: &str) {
 		printed
 	);
 	assert!(
-		!printed.contains("Debug server disconnected") && !printed.contains("waiting to reconnect"),
+		!printed.contains("Debug server disconnected") && !printed.contains("Waiting to reconnect"),
 		"launch took the world's end for a lost connection:\n{}",
 		printed
 	);
@@ -1965,7 +1965,7 @@ fn reboots(server: &str) {
 		said
 	);
 	assert!(
-		!said[before..].contains("waiting to reconnect"),
+		!said[before..].contains("Waiting to reconnect"),
 		"the launcher took the world's end for a lost connection:\n{}",
 		said
 	);
@@ -2079,7 +2079,7 @@ fn without_debug_info(server: &str) {
 	let (got, printed) = launcher_command(&["--pid", &pid_text, "wait", "pause", "--break", &place, "--timeout", "5"]);
 	assert_eq!(got, 1, "a line breakpoint without debug info gave {}: {}", got, printed);
 	assert!(
-		printed.contains("the world was compiled without debug information"),
+		printed.contains("the world has no line numbers because it was compiled without debug information"),
 		"a line breakpoint without debug info said {}",
 		printed
 	);

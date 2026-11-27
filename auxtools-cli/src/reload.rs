@@ -6,7 +6,7 @@ use dmasm::{
 	reload::{Changes, Plan, Refusal, Snapshot}
 };
 
-pub const RESTART: &str = "restart the world to be sure it runs the new code";
+pub const RESTART: &str = "Restart the world to run all of the new code.";
 
 pub fn request(changes: &Changes, before: &Snapshot, restarted: bool) -> HotReloadRequest {
 	let mut plan = changes.plan.clone();
@@ -168,10 +168,7 @@ pub fn refuse_hidden(old: &Snapshot, new: &Snapshot, changes: &mut Changes) {
 			..Refusal::new(
 				Id::FixedParseError,
 				"",
-				format!(
-					"fixed parse error may have hidden definitions: {}. Rebuild and reboot before reloading",
-					error.description
-				)
+				format!("a resolved parse error may have obscured some definitions: {}", error.description)
 			)
 		});
 	}
@@ -196,7 +193,7 @@ pub fn refuse_other_maps(built: &Snapshot, new: &Snapshot, changes: &mut Changes
 		changes.refused.push(Refusal::new(
 			Id::MapsChanged,
 			"",
-			format!("compiled maps changed ({})", changed.join("; "))
+			format!("compiled maps changed: {}", changed.join("; "))
 		));
 	}
 }
