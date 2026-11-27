@@ -31,7 +31,7 @@ fn changed() {
 
 struct State {
 	allocations: HashMap<(raw_types::procs::ProcId, Vec<u32>), Box<[u32]>>,
-	original: HashMap<raw_types::procs::ProcId, (*mut u32, u16)>,
+	original: HashMap<raw_types::misc::BytecodeId, (*mut u32, u16)>,
 	retired_by_address: HashMap<usize, Vec<u32>>
 }
 
@@ -74,11 +74,7 @@ pub fn shutdown() {
 	let state = unsafe { (*BYTECODE_ALLOCATIONS.get()).take().unwrap() };
 
 	for (id, (ptr, len)) in state.original {
-		let proc = Proc::from_id(id).unwrap();
-
-		unsafe {
-			raw_types::misc::set_bytecode((*proc.entry()).metadata.bytecode, ptr, len);
-		}
+		unsafe { raw_types::misc::set_bytecode(id, ptr, len) };
 	}
 
 	for mut buffer in state.allocations.into_values() {
@@ -93,7 +89,8 @@ fn state() -> &'static mut State {
 }
 
 fn remember_original(state: &mut State, proc: &Proc) {
-	state.original.entry(proc.id).or_insert_with(|| unsafe { proc.bytecode_mut_ptr() });
+	let id = unsafe { (*proc.entry()).metadata.bytecode };
+	state.original.entry(id).or_insert_with(|| unsafe { proc.bytecode_mut_ptr() });
 }
 
 pub fn remember_bytecode(ptr: *const u32, bytecode: &[u32]) {
@@ -165,7 +162,8 @@ pub fn unshare_code(proc: &Proc, code: &[u32]) -> Result<(), String> {
 
 pub fn set_bytecode(proc: &Proc, bytecode: Vec<u32>) {
 	let state = state();
-	if !state.original.contains_key(&proc.id) && !procs_sharing_code(proc).is_empty() {
+	let id = unsafe { (*proc.entry()).metadata.bytecode };
+	if !state.original.contains_key(&id) && !procs_sharing_code(proc).is_empty() {
 		let code = unsafe { proc.bytecode() }.to_vec();
 		let _ = give_new_code_entry(proc, &code);
 	}
