@@ -30,7 +30,6 @@ extern "C" {
 	static mut runtime_original: *const c_void;
 	fn runtime_hook(error: *const c_char);
 
-	// Set while a shim replaces BYOND's runtime errors with its own (hooks.h)
 	static runtime_intercepted: bool;
 
 	fn call_proc_by_id_hook_trampoline(
@@ -150,37 +149,20 @@ pub fn shutdown() {
 /// hooked proc from inside its own hook re-enters the hook.
 pub type ProcHook = fn(&Value, &Value, Vec<Value>) -> DMResult;
 
-/// Lets a `RefCell` live in a plain `static`.
-///
-/// Everything here is only touched from BYOND's game thread: its proc calls and
-/// init/shutdown, which it also drives. The table used to be a `thread_local!`,
-/// but in a dlopen'd .so every access goes through `__tls_get_addr`, and it is
-/// read on every single DM proc call.
 struct GameThreadOnly<T>(T);
 
-// SAFETY: only the game thread ever reaches these statics, see above
 unsafe impl<T> Sync for GameThreadOnly<T> {}
 
 static PROC_HOOKS: GameThreadOnly<RefCell<FxHashMap<raw_types::procs::ProcId, (ProcHook, String)>>> =
 	GameThreadOnly(RefCell::new(HashMap::with_hasher(BuildHasherDefault::new())));
 
-/// Hook counts by the low 16 bits of proc ID. Zero skips the `PROC_HOOKS`
-/// lookup; collisions use the full lookup.
 static mut HOOKED_LOW_WORDS: [u8; 0x10000] = [0; 0x10000];
 
-/// Stack offset of the proc ID after the return address, `usr` and proc
-/// type. Linux adds a return-value pointer; Windows returns in registers.
 #[cfg(unix)]
 const PROC_ID_ARGUMENT: usize = 0x14;
 #[cfg(windows)]
 const PROC_ID_ARGUMENT: usize = 0x10;
 
-/// Bypass the trampoline when no proc hook, pending work, world load or
-/// runtime interception needs it.
-///
-/// Linux BYOND may clobber EBX, ESI, EDI and EBP, crashing its caller. Save
-/// these registers around a call with twelve copied argument dwords, as
-/// `call_keeping_registers` in hooks.cpp does.
 #[cfg(unix)]
 #[unsafe(naked)]
 unsafe extern "C" fn call_proc_by_id_entry() {
@@ -191,25 +173,19 @@ unsafe extern "C" fn call_proc_by_id_entry() {
 		"jne 2f",
 		"cmp byte ptr [{intercepted}], 0",
 		"jne 2f",
-		// EAX is caller-saved.
 		"movzx eax, word ptr [esp + {proc_id}]",
 		"cmp byte ptr [{hooked} + eax], 0",
 		"jne 2f",
-		// Trampoline calls are counted by `on_proc_call`.
 		"inc dword ptr [{calls}]",
 		"push ebp",
 		"push ebx",
 		"push esi",
 		"push edi",
-		// Preserve 16-byte stack alignment at the call.
 		"sub esp, 12",
-		// Copy argument dwords in reverse order. Each push advances the
-		// source at the same offset from ESP.
 		".rept 12",
 		"push dword ptr [esp + 76]",
 		".endr",
 		"call dword ptr [{original}]",
-		// BYOND popped the return-value pointer and left it in EAX.
 		"add esp, 56",
 		"pop edi",
 		"pop esi",
@@ -229,8 +205,6 @@ unsafe extern "C" fn call_proc_by_id_entry() {
 	)
 }
 
-/// Windows BYOND preserves callee-saved registers, allowing a direct jump
-/// with the caller's arguments.
 #[cfg(windows)]
 #[unsafe(naked)]
 unsafe extern "C" fn call_proc_by_id_entry() {
@@ -241,11 +215,9 @@ unsafe extern "C" fn call_proc_by_id_entry() {
 		"jne 2f",
 		"cmp byte ptr [{intercepted}], 0",
 		"jne 2f",
-		// EAX is caller-saved.
 		"movzx eax, word ptr [esp + {proc_id}]",
 		"cmp byte ptr [{hooked} + eax], 0",
 		"jne 2f",
-		// Trampoline calls are counted by `on_proc_call`.
 		"inc dword ptr [{calls}]",
 		"jmp dword ptr [{original}]",
 		"2:",
@@ -343,7 +315,6 @@ pub fn calls_bypass_detour() -> bool {
 	cfg!(unix) && crate::version::get().1 < 1664
 }
 
-/// What a hooked frame runs instead of its code: `End`, which returns `.`
 static RETURN_DOT: [u32; 1] = [0x00];
 
 /// Runs per-call housekeeping and proc hook dispatch for a frame about to
@@ -368,8 +339,6 @@ pub unsafe fn proc_starting(ctx: *mut raw_types::procs::ExecutionContext) {
 		return;
 	}
 	let instance = *(*ctx).proc_instance();
-	// The startup call can run code replaced during WorldLoad::ready
-	// (see `start_runs_new_code`).
 	if crate::on_proc_call((*instance).proc, (*instance).src.tag) && *(*ctx).bytecode_offset() == 0 {
 		if let Some(proc) = Proc::from_id((*instance).proc) {
 			let (now, _) = proc.bytecode_mut_ptr();
@@ -384,7 +353,6 @@ pub unsafe fn proc_starting(ctx: *mut raw_types::procs::ExecutionContext) {
 	let Some(hook) = PROC_HOOKS.0.borrow().get(&proc_id).map(|(hook, _)| *hook) else {
 		return;
 	};
-	// The frame keeps its own references to these
 	let src = Value::from_raw((*instance).src);
 	let usr = Value::from_raw((*instance).usr);
 	let args = std::slice::from_raw_parts((*instance).args(), (*instance).args_count() as usize)
@@ -405,7 +373,6 @@ pub unsafe fn proc_starting(ctx: *mut raw_types::procs::ExecutionContext) {
 			Value::NULL.raw
 		}
 	};
-	// `.` is null at a proc's start; it takes our reference
 	*(*ctx).dot_mut() = result;
 	*(*ctx).bytecode_mut() = RETURN_DOT.as_ptr() as *mut u32;
 	*(*ctx).bytecode_offset_mut() = 0;
@@ -421,14 +388,11 @@ extern "C" fn call_proc_by_id_hook(
 	src_raw: raw_types::values::Value,
 	args_ptr: *mut raw_types::values::Value,
 	num_args: usize,
-	// the trampoline deals with these two once we return
 	_callback: u32,
 	_callback_value: u32
 ) -> u8 {
 	crate::on_proc_call(proc_id, src_raw.tag);
 
-	// copy the fn out so no borrow is held while the hook runs DM code, which
-	// can call back into here or register hooks
 	let Some(hook) = PROC_HOOKS.0.borrow().get(&proc_id).map(|(hook, _)| *hook) else {
 		return 0;
 	};
@@ -437,7 +401,6 @@ extern "C" fn call_proc_by_id_hook(
 		(
 			Value::from_raw(src_raw),
 			Value::from_raw(usr_raw),
-			// Taking ownership of args here
 			std::slice::from_raw_parts(args_ptr, num_args)
 				.iter()
 				.map(|v| Value::from_raw_owned(*v))
@@ -448,7 +411,6 @@ extern "C" fn call_proc_by_id_hook(
 	let result = match hook(&src, &usr, args) {
 		Ok(r) => {
 			let result_raw = r.raw;
-			// Stealing our reference out of the Value
 			std::mem::forget(r);
 			result_raw
 		}

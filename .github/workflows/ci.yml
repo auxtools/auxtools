@@ -1,14 +1,5 @@
 name: CI
 
-# Cross-compile Linux and Windows binaries on Linux, test the BYOND matrix
-# on Linux, Windows and Wine, and package both targets in the VS Code extension.
-#
-# Run automatically for repositories owned by willox or auxtools. Other forks
-# can start a run through Actions > CI > Run workflow.
-#
-# release.yml supplies release.bundle to build and test a release without
-# restoring the crate or Windows SDK caches.
-
 on:
   push:
     branches: [master]
@@ -30,10 +21,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Build each artifact from source without reusing prior build outputs.
   CARGO_INCREMENTAL: 0
   RUST_VERSION: 1.99.1
-  # Pin nightly rustfmt for the options in .rustfmt.toml.
   RUSTFMT_TOOLCHAIN: nightly-2026-10-24
 
 jobs:
@@ -54,8 +43,6 @@ jobs:
   build-linux:
     name: Build for Linux
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
-    # Build on Ubuntu 22.04 for glibc 2.35 compatibility.
-    # ci/check-linux.sh verifies the resulting requirements.
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -146,7 +133,6 @@ jobs:
   build-windows:
     name: Build for Windows
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
-    # Microsoft C++ headers require clang 19 or newer.
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -244,7 +230,6 @@ jobs:
   test-linux:
     name: Linux, BYOND ${{ matrix.byond }}
     needs: build-linux
-    # Test Linux binaries on the minimum supported glibc environment.
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
@@ -284,7 +269,6 @@ jobs:
   test-windows:
     name: Windows, BYOND ${{ matrix.byond }}
     needs: build-windows
-    # Test Windows binaries on Server 2022 (Windows 10 generation).
     runs-on: windows-2022
     timeout-minutes: 20
     strategy:
@@ -321,7 +305,6 @@ jobs:
   test-wine:
     name: Wine, BYOND ${{ matrix.byond }}
     needs: build-windows
-    # Use Wine 10.0.
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
@@ -397,7 +380,6 @@ jobs:
           name: bundle-windows
           path: bundle
 
-      # package.py takes the programs from where cargo builds them
       - name: Package extension
         run: |
           mkdir -p target/i686-unknown-linux-gnu/release target/i686-pc-windows-msvc/release

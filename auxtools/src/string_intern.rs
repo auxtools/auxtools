@@ -24,7 +24,6 @@ macro_rules! byond_string {
 	};
 }
 
-// hack
 unsafe impl Sync for InternedString {}
 
 #[doc(hidden)]

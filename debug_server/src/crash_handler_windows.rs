@@ -29,8 +29,6 @@ extern "system" fn exception_filter(info: *mut EXCEPTION_POINTERS) -> LONG {
 	EXCEPTION_EXECUTE_HANDLER
 }
 
-/// Report native crash details before the handler exits without a Windows crash
-/// report.
 unsafe fn report(info: *mut EXCEPTION_POINTERS) {
 	let Some(record) = info.as_ref().and_then(|info| info.ExceptionRecord.as_ref()) else {
 		return;
@@ -47,7 +45,6 @@ unsafe fn report(info: *mut EXCEPTION_POINTERS) {
 	} else {
 		format!("{:#x}", address)
 	};
-	// Access violation parameters: operation and target address.
 	let access = match (record.ExceptionCode, record.NumberParameters >= 2) {
 		(0xC000_0005, true) => {
 			let what = match record.ExceptionInformation[0] {
@@ -61,7 +58,6 @@ unsafe fn report(info: *mut EXCEPTION_POINTERS) {
 		_ => String::new()
 	};
 	eprintln!("auxtools: native exception {:#010x} at {}{}", record.ExceptionCode, place, access);
-	// Read the DM frame last because it may be corrupted.
 	let ctx = *raw_types::funcs::CURRENT_EXECUTION_CONTEXT;
 	if let Some(ctx) = ctx.as_ref() {
 		let instance = *ctx.proc_instance();

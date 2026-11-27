@@ -44,14 +44,10 @@ use mem_profiler_stub as mem_profiler;
 
 pub static mut DEBUG_SERVER: UnsafeCell<Option<server::Server>> = UnsafeCell::new(None);
 
-/// World generation, incremented on reboot or shutdown.
 pub static WORLD_ENDS: AtomicU32 = AtomicU32::new(0);
 
-/// Abort debug server work when evaluated DM code ends the world.
-/// Unwinding code must not access the destroyed server.
 pub struct WorldEnded;
 
-/// Running BYOND build used for compilation.
 pub(crate) fn world_byond() -> dmasm::ByondVersion {
 	let (major, build) = auxtools::version::get();
 	dmasm::ByondVersion::new(major, build)
@@ -67,8 +63,6 @@ fn recover(payload: &(dyn std::any::Any + Send), server: &mut server::Server) {
 #[shutdown]
 fn debugger_shutdown() {
 	WORLD_ENDS.fetch_add(1, Ordering::Relaxed);
-	// INSTRUCTION_HOOKS are cleared on shutdown so we don't need to worry about
-	// that.
 	unsafe {
 		DEBUG_SERVER.get_mut().take();
 	}
@@ -85,7 +79,6 @@ impl InstructionHook for DebugServerInstructionHook<'static> {
 			return;
 		};
 		if instruction_hooking::passes(debug_server, ctx) {
-			// Other registered hooks may still need every instruction.
 			if unsafe { (*INSTRUCTION_HOOKS.get()).len() } == 1 {
 				instruction_hooking::rest();
 			}
@@ -95,10 +88,8 @@ impl InstructionHook for DebugServerInstructionHook<'static> {
 	}
 }
 
-/// Keep debugger work out of line to minimize idle-handler overhead.
 #[inline(never)]
 fn attend(debug_server: &mut server::Server, ctx: *mut raw_types::procs::ExecutionContext) {
-	// Breakpoints and throws can start work requiring later callbacks.
 	auxtools::instruction_hook::hear_all();
 	// BYOND calls this through extern "C" code, and a panic that gets back
 	// out there aborts the whole game. Losing the debugger is the better
@@ -112,7 +103,6 @@ fn attend(debug_server: &mut server::Server, ctx: *mut raw_types::procs::Executi
 	}
 }
 
-/// Makes `server` the debug server, run on every instruction
 fn install_server(server: server::Server) {
 	let debug_server_instruction_hook;
 	unsafe {

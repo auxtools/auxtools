@@ -27,7 +27,6 @@ case "$(uname -s)" in
 	*)
 		if [ -n "${WINE:-}" ]; then
 			exe=.exe
-			# Wine has the whole filesystem as drive Z
 			BYOND_PATH="Z:$(printf '%s' "$byond" | tr / '\\')"
 			export WINEDEBUG="${WINEDEBUG:--all}"
 		else
@@ -59,7 +58,6 @@ for test in $tests; do
 	run "$test" "$programs/$test$exe"
 done
 
-# cargo runs a package's unit tests from the package's directory
 if [ -d "$programs/unit" ] && [ $# -eq 0 ]; then
 	root=$PWD
 	for test in $(cd "$programs/unit" && find . -type f | sort); do

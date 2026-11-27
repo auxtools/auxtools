@@ -6,8 +6,6 @@ use crate::{
 };
 
 thread_local! {
-	// Local names indexed by bytecode buffer. Reloaded procs and frames still
-	// running old code may need names absent from the current proc table.
 	static LOCAL_NAMES: RefCell<HashMap<usize, Vec<String>>> = RefCell::new(HashMap::new());
 }
 
@@ -16,12 +14,10 @@ pub fn set_local_names(bytecode: *const u32, names: Vec<String>) {
 	LOCAL_NAMES.with(|map| map.borrow_mut().insert(bytecode as usize, names));
 }
 
-/// Whether [`set_local_names`] named the bytecode at `bytecode`.
 pub fn has_local_names(bytecode: *const u32) -> bool {
 	LOCAL_NAMES.with(|map| map.borrow().contains_key(&(bytecode as usize)))
 }
 
-/// The local names of frames of `proc` running the bytecode at `bytecode`.
 pub fn local_names_for(proc: &Proc, bytecode: *const u32) -> Vec<String> {
 	LOCAL_NAMES
 		.with(|map| map.borrow().get(&(bytecode as usize)).cloned())
@@ -55,8 +51,7 @@ pub struct StackFrame {
 	pub args: Vec<(Option<StringRef>, Value)>,
 	pub locals: Vec<(StringRef, Value)>,
 	pub file_name: Option<StringRef>,
-	pub line_number: Option<u32> /* pub time_to_resume: Option<u32>,
-	                              * TODO: current instruction & bytecode offset */
+	pub line_number: Option<u32>
 }
 
 /// Snapshots of the active DM call stack (`active`) and every sleeping proc's
@@ -94,8 +89,6 @@ impl StackFrame {
 		let src = Value::from_raw((*instance).src);
 		let dot = Value::from_raw(*(*context).dot());
 
-		// Make sure to handle arguments/locals with no names (when there are
-		// more values than names)
 		let args = (0..(*instance).args_count())
 			.map(|i| {
 				let name = param_names.get(i as usize).cloned();
@@ -103,7 +96,6 @@ impl StackFrame {
 			})
 			.collect();
 
-		// A reloaded locals table may not name every slot in an older frame.
 		let locals = (0..*(*context).locals_count())
 			.map(|i| {
 				let name = match local_names.get(i as usize) {
@@ -114,16 +106,12 @@ impl StackFrame {
 			})
 			.collect();
 
-		// Only populate the line number if we've got a file-name
 		let mut file_name = None;
 		let mut line_number = None;
 		if (*context).filename().valid() {
 			file_name = Some(StringRef::from_id(*(*context).filename()));
 			line_number = Some(*(*context).line());
 		}
-
-		// TODO: When set this? For all sleepers?
-		// let time_to_resume = None;
 
 		StackFrame {
 			context,
@@ -136,7 +124,7 @@ impl StackFrame {
 			args,
 			locals,
 			file_name,
-			line_number // time_to_resume,
+			line_number
 		}
 	}
 }
@@ -165,13 +153,10 @@ impl CallStacks {
 		unsafe { CallStacks::from_context(*funcs::CURRENT_EXECUTION_CONTEXT, CallStackKind::Active) }
 	}
 
-	/// Return sleeping stacks, innermost frame first.
 	pub fn suspended() -> Vec<Vec<StackFrame>> {
 		Self::suspended_first(usize::MAX)
 	}
 
-	/// The stacks of the first `limit` procs that are asleep, in BYOND's
-	/// order
 	pub fn suspended_first(limit: usize) -> Vec<Vec<StackFrame>> {
 		let mut suspended = vec![];
 
@@ -187,8 +172,6 @@ impl CallStacks {
 		suspended
 	}
 
-	/// Return the outermost proc instance of each sleeping stack without
-	/// walking every frame.
 	pub fn suspended_instances() -> Vec<*mut procs::ProcInstance> {
 		unsafe {
 			let buffer = (*funcs::SUSPENDED_PROCS_BUFFER).buffer;
@@ -210,7 +193,6 @@ impl CallStacks {
 			}
 		}
 
-		// BYOND stores sleeping stacks' frames in reverse-order
 		match kind {
 			CallStackKind::Active => frames,
 			CallStackKind::Suspended => frames.into_iter().rev().collect()

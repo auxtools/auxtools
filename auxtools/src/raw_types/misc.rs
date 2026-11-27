@@ -84,7 +84,6 @@ pub struct Locals_V1 {
 #[derive(Copy, Clone)]
 pub struct Locals_V2 {
 	pub count: u16,
-	// reference count
 	unk_0: u32,
 	pub names: *const strings::VariableId
 }

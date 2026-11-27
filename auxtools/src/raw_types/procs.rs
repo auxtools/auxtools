@@ -13,7 +13,6 @@ pub struct ProcEntry {
 	pub name: strings::StringId,
 	pub desc: strings::StringId,
 	pub category: strings::StringId,
-	// the last `/` part of `path`
 	path_basename: strings::StringId,
 	flags: u32,
 	pub metadata: ProcMetadata
@@ -25,7 +24,6 @@ pub struct ProcEntry {
 )]
 #[repr(C)]
 pub struct ProcMetadata {
-	// three bytes straight out of the .dmb, meaning unknown
 	#[only_in(Post1630)]
 	byte_24: i8,
 	#[only_in(Post1630)]
@@ -35,8 +33,6 @@ pub struct ProcMetadata {
 	pub bytecode: misc::BytecodeId,
 	pub locals: misc::LocalsId,
 	pub parameters: misc::ParametersId,
-	// the proc `..()` goes to, 0xFFFF for none. Brings the entry to the 44
-	// bytes BYOND strides its proc table by
 	#[only_in(Post1630)]
 	next_override: ProcId
 }
@@ -79,18 +75,14 @@ impl ProcInstance {
 struct ProcInstanceInner {
 	#[only_in(Pre516)]
 	unk_2: u32,
-	// called with the result when the proc ends, null for none
 	#[only_in(Post516)]
 	callback: u32,
 	#[only_in(Post516)]
 	callback_value: u32,
 	pub args_count: u32,
 	pub args: *mut values::Value,
-	// room for ten values, shared by the args and the locals, so a small proc
-	// doesn't have to allocate
 	arg_local_store: [u8; 0x50],
 	internal_arg_count: u32,
-	// not 0 once the store has overflowed onto the heap
 	external_arg_count: u32,
 	pub time_to_resume: u32
 }
@@ -107,13 +99,6 @@ struct ProcInstanceInner {
 /// `WorldLoad::prepare` or inside `#[init(full)]` callbacks on the first
 /// initialization may read incorrect offsets. Pointers to an `ExecutionContext`
 /// are valid only on BYOND's thread while the frame is alive.
-// Linux is 148 bytes against Windows' 152: from `cache` onward the fields sit 4
-// bytes earlier, which is the same shape Windows had before 1668. So Linux
-// always takes the Pre1668 variant.
-//
-// The whole difference is the call flags. Windows from 1668 keeps them in a
-// dword of their own, everything else packs them into the byte after
-// `test_flag`.
 #[versioned(
 	Pre1668 if cfg!(unix) || crate::version::BYOND_VERSION_MAJOR <= 515 || (crate::version::BYOND_VERSION_MAJOR == 516 && crate::version::BYOND_VERSION_MINOR <= 1667),
 	Post1668,
@@ -133,7 +118,6 @@ pub struct ExecutionContext {
 	exec_call_flags: u32,
 	cache: values::Value,
 	cache_key: values::Value,
-	// two pointers into exec_proc's own stack frame
 	scratch_ptr_a: u32,
 	scratch_ptr_b: u32,
 	pub dot: values::Value,
@@ -141,7 +125,6 @@ pub struct ExecutionContext {
 	pub stack: *mut values::Value,
 	pub locals_count: u16,
 	pub stack_size: u16,
-	// the iterators of the loops this one is nested in
 	iterator_stack: u32,
 	pub current_iterator: *mut values::Value,
 	pub iterator_allocated: u32,
@@ -151,17 +134,11 @@ pub struct ExecutionContext {
 	pub iterator_filter_bitflags: u32,
 	pub iterator_kind: u8,
 	pub infinite_loop_count: u32,
-	// 0 while the proc is sleeping. There is no separate "paused" byte
 	not_suspended: u8,
 	caller_chain_preserve_depth: u8,
-	// Nonzero for background execution, from `set background = 1` or BYOND's
-	// infinite loop check. Background procs sleep periodically.
 	pub background: u8,
 	exception_state: u8,
-	// the `try` blocks the proc is inside, innermost first: null when it's in
-	// none
 	pub throw_handler: u32,
-	// timevals. The last is the deadline a background proc's loops run against
 	time_now: [u32; 2],
 	cpu_clock_init: [u32; 2],
 	cpu_clock_quantum: [u32; 2],
@@ -181,8 +158,6 @@ pub struct SuspendedProcs {
 	pub capacity: usize
 }
 
-// On Linux the compiler lays the two index globals out the other way round,
-// `back` first. Whatever follows them isn't read.
 #[cfg(unix)]
 #[repr(C)]
 pub struct SuspendedProcs {
@@ -193,9 +168,6 @@ pub struct SuspendedProcs {
 #[cfg(test)]
 mod layout_tests {
 	use std::mem::{offset_of, size_of};
-
-	// The numbers below are read off the binaries, 516.1688: what BYOND
-	// allocates for each struct and where its own code reaches into them.
 
 	#[test]
 	fn execution_context_linux_and_old_windows() {
@@ -235,7 +207,6 @@ mod layout_tests {
 		assert_eq!(inner + offset_of!(Inner, args), 0x30);
 		assert_eq!(inner + offset_of!(Inner, external_arg_count), 0x88);
 		assert_eq!(inner + offset_of!(Inner, time_to_resume), 0x8C);
-		// 515 and older have one dword less in front of the args
 		assert_eq!(inner + offset_of!(super::ProcInstanceInnerPre516, args_count), 0x28);
 	}
 

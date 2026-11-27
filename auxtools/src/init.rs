@@ -17,8 +17,6 @@ pub fn set_init_level(level: InitLevel) {
 	unsafe { REQUIRED_INIT = level }
 }
 
-// Hooks that run on intiailization
-//
 pub type InitFunc = fn() -> Result<(), String>;
 
 #[doc(hidden)]
