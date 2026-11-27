@@ -1347,23 +1347,17 @@ impl Attached {
 		println!("ok: CLI resume");
 
 		let waiting = journal::wait_for_reboot(pid);
-		let tracing = Command::new(client::launcher_path())
-			.args(["--pid", &pid.to_string(), "trace", "/proc/value", "--by", "caller"])
-			.stdout(Stdio::piped())
-			.stderr(Stdio::piped())
-			.spawn()
-			.unwrap();
+		let mut tracing = journal::Background::start(pid, &["trace", "/proc/value", "--by", "caller"]);
+		tracing.line_with("tracing /value");
 		let seen = runner.output.matches("attach test: 2").count();
 		runner.wait_count("attach test: 2", seen + 2);
 		std::fs::write(dir.join("stop"), "yes").unwrap();
-		let traced = tracing.wait_with_output().unwrap();
-		let (out, err) = (String::from_utf8_lossy(&traced.stdout), String::from_utf8_lossy(&traced.stderr));
-		assert_eq!(traced.status.code(), Some(3), "unexpected trace output: {}{}", out, err);
+		let (code, printed) = tracing.finish();
 		assert!(
-			out.contains("; ended: world\n") && err.starts_with("error: world connection ended before the operation completed"),
-			"unexpected trace output: {}{}",
-			out,
-			err
+			code == 3 && printed.contains(" (ended: world)\n") && printed.contains("\nerror: world connection ended before the operation completed"),
+			"unexpected trace output ({}): {}",
+			code,
+			printed
 		);
 		println!("ok: world exit ends trace with code 3");
 		runner.event("terminated");
