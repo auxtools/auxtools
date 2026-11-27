@@ -1120,6 +1120,21 @@ var/const/LIMIT = 10
 /proc/f6(datum/base/sub/base)
 	return base?:COUNT
 // Guards: a_call_after_a_safe_index_keeps_the_indexed_item_as_its_receiver (compile_proc.rs)
+/datum/item
+	var/datum/item/owner
+/datum/item/proc/refresh(a)
+	return a
+/proc/f1(list/items)
+	return items?[1]:owner:refresh()
+/proc/f2(list/items)
+	return items?[1].owner.refresh()
+/proc/f3(list/items, x)
+	items?[1]:owner:refresh(x)
+/proc/f4(list/items)
+	return items?[1]:owner:owner:refresh()
+/proc/f5(list/items)
+	return items?[1]:owner:refresh(items?[2]:owner:refresh())
+// Guards: a_call_after_a_safe_index_keeps_the_indexed_item_as_its_receiver (compile_proc.rs)
 /datum/item/proc/refresh(a)
 	return a
 /datum/holder
@@ -1209,6 +1224,198 @@ var/const/LIMIT = 10
 	base?:named()?.S = 3
 /proc/f17(datum/base/base)
 	return base?:make():LIMIT
+// Guards: every_implicit_cast_in_a_value_takes_the_destinations_type (compile_proc.rs)
+// Builds: 516.1648-
+/datum/item
+/datum/other
+/datum/thing
+	var/datum/item/owner
+	var/datum/other/o
+/proc/g(x, y)
+	return x
+/proc/f1(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = flag ? astype(a) : astype(b)
+	return r
+/proc/f2(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = astype(a) ? astype(b) : astype(a)
+	return r
+/proc/f3(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r
+	r = flag ? astype(a) : astype(b)
+	return r
+/proc/f4(flag, datum/other/a, datum/thing/b)
+	b.owner = flag ? astype(a) : astype(b)
+/proc/f5(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = astype(a) + astype(b)
+	return r
+/proc/f6(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = g(astype(a), astype(b))
+	return r
+/proc/f7(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = astype(astype(a))
+	return r
+/proc/f8(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = new(astype(a))
+	return r
+/proc/f9(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = (astype(a) || astype(b)) + astype(b)
+	return r
+/proc/f10(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r
+	r ||= flag ? astype(a) : astype(b)
+	return r
+/proc/f11(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = (b.o = astype(b)) + astype(a)
+	return r
+/proc/f12(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = (b.o ||= astype(b)) + astype(a)
+	return r
+/proc/f13(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = (b?.o = astype(b)) + astype(a)
+	return r
+/proc/f14(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = (b?.o ||= astype(b)) + astype(a)
+	return r
+/proc/f15(flag, datum/other/a, datum/thing/b)
+	var/datum/item/r = 1
+	return astype(a)
+// Guards: every_implicit_cast_in_a_value_takes_the_destinations_type (compile_proc.rs)
+/datum/item
+/proc/f(flag)
+	var/datum/item/r = flag ? locate() : locate()
+	return r
+// Guards: an_augmented_assignments_implicit_cast_takes_the_destinations_type (compile_proc.rs)
+// Builds: 516.1648-
+/datum/item
+/datum/other
+/datum/thing
+	var/datum/item/o
+	var/list/l
+/proc/f1(datum/other/a, datum/thing/q)
+	var/datum/item/x
+	x += astype(a)
+	return x
+/proc/f2(datum/other/a, datum/thing/q)
+	q.o -= astype(a)
+/proc/f3(datum/other/a, datum/thing/q)
+	var/datum/item/x
+	x |= astype(a)
+	return x
+/proc/f4(datum/other/a, datum/thing/q)
+	return (q.o += astype(a))
+/proc/f5(datum/other/a, datum/thing/q)
+	var/datum/other/r = (q.o += astype(a))
+	return r
+/proc/f6(datum/other/a, datum/thing/q)
+	var/list/l = list()
+	l += astype(a)
+	return l
+/proc/f7(datum/other/a, datum/thing/q)
+	q.l[1] += astype(a)
+/proc/f8(datum/other/a, datum/thing/q)
+	q?.o += astype(a)
+// Guards: an_augmented_assignments_implicit_cast_takes_the_destinations_type (compile_proc.rs)
+/datum/item
+/datum/other
+/datum/thing
+	var/datum/item/o
+	var/list/l
+/proc/f()
+	var/datum/item/x = 1
+	x += new
+	return x
+// Guards: a_named_arguments_place_key_types_its_value (compile_proc.rs)
+// Builds: 516.1648-
+/datum/item
+/datum/other
+/datum/thing
+	var/datum/other/o
+	var/list/l
+	var/datum/item/i
+/proc/g(x, y)
+	return x
+/proc/f1(datum/other/a, datum/thing/q)
+	return g(q.o = astype(q))
+/proc/f2(datum/other/a, datum/thing/q)
+	var/datum/item/r = list(q.o = astype(q))
+	return r
+/proc/f3(datum/other/a, datum/thing/q)
+	return g(q.l = astype(a))
+/proc/f4(datum/other/a, datum/thing/q)
+	return g(q.o[1] = astype(q))
+/proc/f5(datum/other/a, datum/thing/q)
+	return g(q?.o = astype(q))
+/proc/f6(datum/other/a, datum/thing/q)
+	return g(q.i = astype(a), q.o = astype(q))
+/proc/f7(datum/other/a, datum/thing/q)
+	return new /datum/other(q.o = astype(q))
+/proc/f8(datum/other/a, datum/thing/q)
+	return call(q, "x")(q.o = astype(q))
+// Guards: a_named_arguments_place_key_types_its_value (compile_proc.rs)
+/datum/item
+/datum/other
+/datum/thing
+	var/datum/other/o
+	var/list/l
+	var/datum/item/i
+/proc/g(x, y)
+	return x
+/proc/f(datum/thing/q)
+	return list(q.o = new)
+// Guards: an_elements_implicit_cast_takes_its_holders_type (compile_proc.rs)
+// Builds: 516.1648-
+/datum/item
+/datum/other
+	var/list/l
+/datum/thing
+	var/datum/other/o
+	var/list/l
+	var/list/datum/item/li
+var/list/gl
+/proc/f1(datum/other/a, datum/thing/q)
+	q.o[1] = astype(q)
+/proc/f2(datum/other/a, datum/thing/q)
+	q.l[astype(q)] = 1
+/proc/f3(datum/other/a, datum/thing/q)
+	q.o.l[1] = astype(a)
+/proc/f4(datum/other/a, datum/thing/q)
+	q?.l[1] = astype(a)
+/proc/f5(datum/other/a, datum/thing/q)
+	gl[1] = astype(a)
+/proc/f6(datum/other/a, datum/thing/q)
+	args[1] = astype(a)
+/proc/f7(datum/other/a, datum/thing/q)
+	q.l[1] ||= astype(a)
+/proc/f8(datum/other/a, datum/thing/q)
+	return (q.o[1] = astype(q))
+/proc/f9(datum/other/a, datum/thing/q)
+	var/datum/item/r = (q.l[1] = astype(q))
+	return r
+/proc/f10(datum/other/a, datum/thing/q)
+	var/list/l = list()
+	l[1] = astype(a)
+// Guards: an_elements_implicit_cast_takes_its_holders_type (compile_proc.rs)
+/datum/item
+/datum/other
+	var/list/l
+/datum/thing
+	var/datum/other/o
+	var/list/l
+	var/list/datum/item/li
+var/list/gl
+/proc/f1(datum/thing/q)
+	q.li[1] = new
+/proc/f2(datum/thing/q)
+	q.o[1] = new
+/proc/f3(datum/thing/q)
+	return (q.l[2] = new)
+// Guards: a_for_loops_var_types_only_its_initial_value (compile_proc.rs)
+// Builds: 516.1648-
+/datum/item
+/datum/other
+/proc/f(datum/other/a)
+	for(var/datum/item/r = 1; astype(a); r = null)
+		return r
 // Guards: a_safe_place_after_a_call_is_typed_as_a_read_finds_it (compile_proc.rs)
 /datum/child
 	var/datum/child/next

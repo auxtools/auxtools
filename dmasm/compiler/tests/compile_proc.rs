@@ -642,6 +642,288 @@ fn a_call_after_a_safe_index_keeps_the_indexed_item_as_its_receiver() {
         assert_has(&code, &["ListGet", "SetVar cache", "PushCache"]);
         assert_has(&code, &[call, "PopCache"]);
     }
+    let types = "/datum/item\n\tvar/datum/item/owner\n/datum/item/proc/refresh(a)\n\treturn a\n";
+    for (body, args) in [
+        ("return items?[1]:owner:refresh()", ""),
+        ("return items?[1].owner.refresh()", ""),
+        ("items?[1]:owner:refresh(x)", "GetVar arg(1)\n"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(list/items, x)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        let count = if args.is_empty() { 0 } else { 1 };
+        assert_has(
+            &code,
+            &[&format!(
+                "ListGet\nSetVar cache\nPushCache\n{args}PopCache\n\
+                 Call cache = cache[\"owner\"]; dynamic_proc(\"refresh\") {count}\nPopCache"
+            )],
+        );
+    }
+}
+
+#[test]
+fn every_implicit_cast_in_a_value_takes_the_destinations_type() {
+    let types = "/datum/item\n/datum/other\n/datum/thing\n\tvar/datum/item/owner\n\
+                 \tvar/datum/other/o\n/proc/g(x, y)\n\treturn x\n";
+    for (body, casts) in [
+        ("var/datum/item/r = flag ? astype(a) : astype(b)", 2),
+        ("var/datum/item/r = astype(a) ? astype(b) : astype(a)", 3),
+        ("var/datum/item/r\n\tr = flag ? astype(a) : astype(b)", 2),
+        ("b.owner = flag ? astype(a) : astype(b)", 2),
+        ("var/datum/item/r = astype(a) + astype(b)", 2),
+        ("var/datum/item/r = g(astype(a), astype(b))", 2),
+        ("var/datum/item/r = astype(astype(a))", 2),
+        ("var/datum/item/r = new(astype(a))", 1),
+        ("var/datum/item/r = (astype(a) || astype(b)) + astype(b)", 3),
+        ("var/datum/item/r\n\tr ||= flag ? astype(a) : astype(b)", 2),
+        ("var/datum/item/r = (b.o = astype(b)) + astype(a)", 1),
+        ("var/datum/item/r = (b.o ||= astype(b)) + astype(a)", 1),
+        ("var/datum/item/r = (b?.o = astype(b)) + astype(a)", 1),
+        ("var/datum/item/r = (b?.o ||= astype(b)) + astype(a)", 1),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(flag, datum/other/a, datum/thing/b)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert_eq!(
+            code.matches("PushVal /datum/item\nAsType").count(),
+            casts,
+            "{body}\n{code}"
+        );
+    }
+    let code = compile(
+        &format!("{types}/proc/f(flag)\n\tvar/datum/item/r = flag ? locate() : locate()\n"),
+        "",
+        "f",
+    );
+    assert_eq!(
+        code.matches("PushVal /datum/item\nLocateRef").count(),
+        2,
+        "{code}"
+    );
+    let code = compile(
+        &format!("{types}/proc/f(datum/thing/b)\n\tvar/datum/item/r = (b.o = astype(b)) + 1\n"),
+        "",
+        "f",
+    );
+    assert_has(&code, &["PushVal /datum/other", "AsType"]);
+    let code = compile(
+        &format!("{types}/proc/f(datum/other/a)\n\tvar/datum/item/r = 1\n\treturn astype(a)\n"),
+        "",
+        "f",
+    );
+    assert_has(&code, &["PushVal /datum/other", "AsType"]);
+}
+
+#[test]
+fn an_implicit_value_for_a_destination_without_a_type_is_refused() {
+    let types = "/datum/item\n/datum/other\n/datum/thing\n\tvar/u\n\tvar/datum/other/o\n\
+                 \tvar/list/l\nvar/gu\n/proc/f(x)\n\treturn x\n/proc/mk()\n\treturn 1\n";
+    for (body, place) in [
+        ("var/x = astype(a)", "x"),
+        ("var/x\n\tx = astype(a)", "x"),
+        ("q.u = astype(a)", "q.u"),
+        ("var/x = new", "x"),
+        ("var/x = locate()", "x"),
+        ("var/x = f(astype(a))", "x"),
+        ("var/x = q ? astype(a) : 1", "x"),
+        ("var/x = __IMPLIED_TYPE__", "x"),
+        ("var/x = 1\n\tx += astype(a)", "x"),
+        ("var/x = 1\n\tx ||= astype(a)", "x"),
+        ("var/x\n\tx ||= new", "x"),
+        (". = astype(a)", "."),
+        ("gu = astype(a)", "gu"),
+        ("var/x = locate() in q.l", "x"),
+        ("q?.u = astype(a)", "<expression>.u"),
+        ("q?.u ||= astype(a)", "<expression>.u"),
+        ("return f(q.u = astype(a))", "q.u"),
+        ("return list(\"k\" = astype(a))", "\"k\""),
+        ("return list(k = astype(a))", "\"k\""),
+        ("return new /datum/item(x = astype(a))", "\"x\""),
+        ("f(null = astype(a))", "\"null\""),
+        ("var/l\n\tl[1] = astype(a)", "l"),
+        ("q.u[1] = astype(a)", "q.u"),
+        ("var/list/l\n\tl[1][2] = astype(a)", ""),
+        ("q.l?[1] = astype(a)", "<expression>"),
+        ("mk()[1] = astype(a)", ""),
+        ("mk().o = new", ""),
+        ("var/x\n\tx[astype(q)] = 1", "x"),
+        ("for(var/x = astype(a); x; x = null)\n\t\treturn", "x"),
+    ] {
+        let lines =
+            types.lines().count() + 1 + body.lines().filter(|l| !l.starts_with("\t\t")).count();
+        assert_eq!(
+            compile_error(&format!(
+                "{types}/proc/g(datum/other/a, datum/thing/q)\n\t{body}\n"
+            )),
+            format!("line {lines}: {place}: unknown variable type"),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        compile_error(&format!("{types}/proc/g(datum/other/a, x = astype(a))\n")),
+        "x: unknown variable type"
+    );
+    let src = format!("{types}/datum/item/var/datum/other/a\n/proc/g()\n\treturn astype(a)\n");
+    let ctx = dreammaker::Context::default();
+    let pp = dreammaker::Preprocessor::from_buffer(&ctx, "test.dm".into(), src);
+    let mut parser = dreammaker::Parser::new(&ctx, pp);
+    parser.enable_procs();
+    let tree = parser.parse_object_tree();
+    let item = tree.find("/datum/item").unwrap();
+    let source = ProcSource {
+        tree: &tree,
+        ty: item,
+        name: "g",
+        value: &tree.root().get().procs["g"].value[0],
+        file: "test.dm",
+        debug_info: false,
+        index: None,
+        byond: dmasm_compiler::ByondVersion::LATEST,
+        file_names: None,
+    };
+    let error = dmasm_compiler::compiler::compile_proc_as(&source, None, &[], Some(""));
+    assert!(
+        error
+            .as_ref()
+            .is_err_and(|e| e.to_string().ends_with(": unknown variable type")),
+        "an initializer of a var without a type: {error:?}"
+    );
+    for body in [
+        "var/x = (q.o = astype(a))",
+        "return astype(a)",
+        "f(astype(a))",
+        "var/x = istype(a)",
+        "q.l[1] = astype(a)",
+        "var/list/datum/item/l = list()\n\tl[1] = astype(a)",
+    ] {
+        compile(
+            &format!("{types}/proc/f2(datum/other/a, datum/thing/q)\n\t{body}\n"),
+            "",
+            "f2",
+        );
+    }
+}
+
+#[test]
+fn an_augmented_assignments_implicit_cast_takes_the_destinations_type() {
+    let types = "/datum/item\n/datum/other\n/datum/thing\n\tvar/datum/item/o\n\tvar/list/l\n";
+    for (body, cast) in [
+        ("var/datum/item/x\n\tx += astype(a)", "/datum/item"),
+        ("q.o -= astype(a)", "/datum/item"),
+        ("var/datum/item/x\n\tx |= astype(a)", "/datum/item"),
+        ("return (q.o += astype(a))", "/datum/item"),
+        ("var/datum/other/r = (q.o += astype(a))", "/datum/item"),
+        ("var/list/l = list()\n\tl += astype(a)", "/list"),
+        ("q.l[1] += astype(a)", "/list"),
+        ("q?.o += astype(a)", "/datum/item"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(datum/other/a, datum/thing/q)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert_has(&code, &[&format!("PushVal {cast}"), "AsType"]);
+    }
+    let code = compile(
+        &format!("{types}/proc/f()\n\tvar/datum/item/x = 1\n\tx += new\n"),
+        "",
+        "f",
+    );
+    assert_has(&code, &["PushVal /datum/item", "New 0"]);
+}
+
+#[test]
+fn a_named_arguments_place_key_types_its_value() {
+    let types = "/datum/item\n/datum/other\n/datum/thing\n\tvar/datum/other/o\n\tvar/list/l\n\
+                 \tvar/datum/item/i\n/proc/g(x, y)\n\treturn x\n";
+    for (body, casts) in [
+        ("return g(q.o = astype(q))", vec!["/datum/other"]),
+        (
+            "var/datum/item/r = list(q.o = astype(q))",
+            vec!["/datum/other"],
+        ),
+        ("return g(q.l = astype(a))", vec!["/list"]),
+        ("return g(q.o[1] = astype(q))", vec!["/datum/other"]),
+        ("return g(q?.o = astype(q))", vec!["/datum/other"]),
+        (
+            "return g(q.i = astype(a), q.o = astype(q))",
+            vec!["/datum/item", "/datum/other"],
+        ),
+        (
+            "return new /datum/other(q.o = astype(q))",
+            vec!["/datum/other"],
+        ),
+        (
+            "return call(q, \"x\")(q.o = astype(q))",
+            vec!["/datum/other"],
+        ),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(datum/other/a, datum/thing/q)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        let found: Vec<_> = code
+            .lines()
+            .zip(code.lines().skip(1))
+            .filter(|(_, next)| *next == "AsType")
+            .map(|(push, _)| push.trim_start_matches("PushVal "))
+            .collect();
+        assert_eq!(found, casts, "{body}\n{code}");
+    }
+    let code = compile(
+        &format!("{types}/proc/f(datum/thing/q)\n\treturn list(q.o = new)\n"),
+        "",
+        "f",
+    );
+    assert_has(&code, &["PushVal /datum/other", "New 0"]);
+}
+
+#[test]
+fn an_elements_implicit_cast_takes_its_holders_type() {
+    let types = "/datum/item\n/datum/other\n\tvar/list/l\n/datum/thing\n\tvar/datum/other/o\n\
+                 \tvar/list/l\n\tvar/list/datum/item/li\nvar/list/gl\n";
+    for (body, cast) in [
+        ("q.o[1] = astype(q)", "/datum/other"),
+        ("q.l[astype(q)] = 1", "/list"),
+        ("q.o.l[1] = astype(a)", "/list"),
+        ("q?.l[1] = astype(a)", "/list"),
+        ("gl[1] = astype(a)", "/list"),
+        ("args[1] = astype(a)", "/list"),
+        ("q.l[1] ||= astype(a)", "/list"),
+        ("return (q.o[1] = astype(q))", "/datum/other"),
+        ("var/datum/item/r = (q.l[1] = astype(q))", "/list"),
+        ("var/list/l = list()\n\tl[1] = astype(a)", "/list"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(datum/other/a, datum/thing/q)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert_has(&code, &[&format!("PushVal {cast}"), "AsType"]);
+    }
+    let code = compile(
+        &format!("{types}/proc/f(datum/thing/q)\n\tq.li[1] = new\n"),
+        "",
+        "f",
+    );
+    assert_has(&code, &["PushVal /list", "New 0"]);
+}
+
+#[test]
+fn a_for_loops_var_types_only_its_initial_value() {
+    let code = compile(
+        "/datum/item\n/datum/other\n/proc/f(datum/other/a)\n\
+         \tfor(var/datum/item/r = 1; astype(a); r = null)\n\t\treturn r\n",
+        "",
+        "f",
+    );
+    assert_has(&code, &["PushVal /datum/other", "AsType"]);
 }
 
 #[test]
@@ -713,7 +995,7 @@ fn a_safe_place_after_a_call_is_typed_as_a_read_finds_it() {
     ] {
         assert_eq!(
             compile_error(&format!("{types}/proc/g(datum/maker/maker)\n\t{body}\n")),
-            "line 13: implicit new() calls are not supported",
+            "line 13: : unknown variable type",
             "{}",
             body
         );

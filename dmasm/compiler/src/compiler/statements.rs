@@ -67,7 +67,11 @@ pub(super) fn emit_proc_body(
             } => &**lhs,
             other => other,
         };
-        compiler.implicit_type = implicit_type_for(compiler, &param.var_type.type_path.to_string());
+        compiler.implicit_type = implied_for(
+            compiler,
+            &param.var_type.type_path.to_string(),
+            param.name.as_str(),
+        );
         let kind = compiler.emit_expr(default.clone());
         compiler.implicit_type = None;
         let kind = kind?;
@@ -1180,7 +1184,7 @@ fn emit_var_statement(
         return Ok(());
     }
     let ty = var.var_type.type_path.to_string();
-    compiler.implicit_type = implicit_type_for(compiler, &ty);
+    compiler.implicit_type = implied_for(compiler, &ty, var.name.as_str());
     let slot_var = |compiler: &mut Compiler| {
         let slot = ctx(compiler).declare_typed_local(var.name.as_str(), ty.clone());
         Variable::Local(slot)
@@ -1193,6 +1197,7 @@ fn emit_var_statement(
             emit_value(compiler, value)?;
             compiler.emit_ins(Instruction::SetVar(local));
         }
+        compiler.implicit_type = None;
         return Ok(());
     }
     let sized_list = matches!(&var.value, Some(Expression::Base { term, .. })
@@ -1296,7 +1301,14 @@ fn loop_filter(compiler: &Compiler, ty: &str) -> (crate::TypeFilter, Option<Stri
     (filter, if exact { None } else { Some(path) })
 }
 
-pub(super) fn implicit_type_for(compiler: &Compiler, ty: &str) -> Option<String> {
+pub(super) fn implied_for(compiler: &Compiler, ty: &str, name: &str) -> Option<super::Implied> {
+    if ty.is_empty() {
+        return Some(super::Implied::Untyped(name.to_owned()));
+    }
+    implicit_type_for(compiler, ty).map(super::Implied::Type)
+}
+
+fn implicit_type_for(compiler: &Compiler, ty: &str) -> Option<String> {
     if ty.is_empty() {
         return None;
     }
@@ -1314,7 +1326,7 @@ fn is_list_path(ty: &str) -> bool {
     ty.split('/').any(|part| part == "list")
 }
 
-fn list_type_of(compiler: &Compiler, expr: &Expression) -> Option<String> {
+pub(super) fn list_type_of(compiler: &Compiler, expr: &Expression) -> Option<String> {
     if !super::procs::place_typed(expr) {
         return None;
     }
@@ -1667,7 +1679,6 @@ pub(super) fn emit_safe_chain_write<'a>(
         Option<dreammaker::objtree::TypeRef<'a>>,
         super::procs::After,
     ),
-    place: Option<&Expression>,
     static_var: Option<Variable>,
     value: Option<&Expression>,
     write: SafeWrite,
@@ -1730,12 +1741,9 @@ pub(super) fn emit_safe_chain_write<'a>(
             restore_receiver(compiler, call);
         }
     }
-    let implicit = place.and_then(|p| compiler.place_type_name(p));
     let value_start = compiler.nodes.len();
     if let (Some(value), false) = (value, matches!(write, SafeWrite::Logical { .. })) {
-        compiler.implicit_type = implicit.clone();
         emit_value(compiler, value)?;
-        compiler.implicit_type = None;
     }
     if fields.is_none() {
         let (computed, fields) = computed;
@@ -1828,9 +1836,7 @@ pub(super) fn emit_safe_chain_write<'a>(
                     }
                 }
                 let start = compiler.nodes.len();
-                compiler.implicit_type = implicit;
                 emit_value(compiler, value.expect("a value"))?;
-                compiler.implicit_type = None;
                 if compiler.nodes[start..]
                     .iter()
                     .any(|n| matches!(n, Node::Instruction(i, _) if super::procs::touches_cache(i)))
@@ -1933,9 +1939,7 @@ pub(super) fn emit_safe_chain_write<'a>(
                 Instruction::Jz(Label::Named(end.clone()))
             });
             let start = compiler.nodes.len();
-            compiler.implicit_type = implicit;
             emit_value(compiler, value.expect("a value"))?;
-            compiler.implicit_type = None;
             if compiler.nodes[start..]
                 .iter()
                 .any(|n| matches!(n, Node::Instruction(i, _) if super::procs::touches_cache(i)))
@@ -2063,16 +2067,7 @@ pub(super) fn emit_safe_write(
     emit_value(compiler, &base)?;
     let static_var = static_place(compiler, place, chain.index.is_some());
     let start = safe_start(compiler, &base);
-    emit_safe_chain_write(
-        compiler,
-        chain,
-        start,
-        Some(place),
-        static_var,
-        value,
-        write,
-        value_form,
-    )?;
+    emit_safe_chain_write(compiler, chain, start, static_var, value, write, value_form)?;
     Ok(true)
 }
 
@@ -2098,7 +2093,12 @@ fn emit_expr_statement(compiler: &mut Compiler, expr: &Expression) -> Result<(),
             return Ok(());
         }
     }
-    emit_expr_statement_inner(compiler, expr)?;
+    if let Expression::AssignOp { lhs, .. } = expr {
+        compiler.implicit_type = Some(compiler.destination(lhs));
+    }
+    let emitted = emit_expr_statement_inner(compiler, expr);
+    compiler.implicit_type = None;
+    emitted?;
     let n = compiler.nodes.len();
     if n >= 3
         && matches!(
@@ -2204,13 +2204,7 @@ fn emit_expr_statement_inner(
         Expression::AssignOp { op, lhs, rhs }
             if !matches!(op, AssignOp::AndAssign | AssignOp::OrAssign) =>
         {
-            if *op == AssignOp::Assign {
-                compiler.implicit_type = compiler
-                    .place_type_name(lhs)
-                    .or_else(|| list_type_of(compiler, lhs));
-            }
             emit_value(compiler, rhs)?;
-            compiler.implicit_type = None;
             warn_pointer_index(compiler, lhs);
             compiler.place = *op != AssignOp::Assign;
             let kind = compiler.emit_inner_expr(unparenthesised(lhs))?;
@@ -2276,9 +2270,6 @@ fn emit_expr_statement_inner(
                     Instruction::Jz(Label::Named(end.to_owned()))
                 }
             };
-            let implicit = compiler
-                .place_type_name(lhs)
-                .or_else(|| list_type_of(compiler, lhs));
             let kind = compiler.emit_inner_expr((**lhs).clone())?;
             if matches!(kind, EvalKind::ListRef | EvalKind::Field(..)) {
                 let field = matches!(kind, EvalKind::Field(..));
@@ -2292,10 +2283,8 @@ fn emit_expr_statement_inner(
                 compiler.emit_ins(Instruction::Test);
                 compiler.emit_ins(jump(&end));
                 let start = compiler.nodes.len();
-                compiler.implicit_type = implicit.clone();
                 compiler.global_field = false;
                 emit_value(compiler, rhs)?;
-                compiler.implicit_type = None;
                 let saves = std::mem::take(&mut compiler.global_field)
                     || saves_cache(compiler, start)
                     || unfolded_saves_cache(compiler, rhs);
@@ -2330,9 +2319,7 @@ fn emit_expr_statement_inner(
             compiler.emit_ins(Instruction::Test);
             compiler.emit_ins(jump(&end));
             compiler.end_assignment_statement();
-            compiler.implicit_type = implicit.clone();
             emit_value(compiler, rhs)?;
-            compiler.implicit_type = None;
             compiler.emit_ins(Instruction::SetVar(var));
             compiler.emit_label(end);
             Ok(())
@@ -2555,9 +2542,7 @@ pub(super) fn emit_safe_logical_assign(
         Instruction::JmpAnd(Label::Named(end.clone()))
     });
     let start = compiler.nodes.len();
-    compiler.implicit_type = compiler.place_type_name(place);
     emit_value(compiler, rhs)?;
-    compiler.implicit_type = None;
     if compiler.nodes[start..]
         .iter()
         .any(|n| matches!(n, Node::Instruction(i, _) if super::procs::touches_cache(i)))

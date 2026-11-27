@@ -16,8 +16,8 @@ mod known_bugs;
 mod procs;
 mod statements;
 
+pub use procs::{call_name, compile_proc_as, labels_mut, new_tree, proc_path};
 pub use procs::{compile_proc, ByondBug, CompiledProc, ProcSource, StaticLocal};
-pub use procs::{compile_proc_as, labels_mut, new_tree, proc_path};
 pub use procs::{definition_order, definition_order_at, resolve_proc_references, type_proc_path};
 
 mod args;
@@ -57,6 +57,50 @@ fn dynamic_name(ident: &str) -> DMString {
     DMString(ident.replace('_', " ").into_bytes())
 }
 
+#[derive(Clone)]
+enum Implied {
+    Type(String),
+    Untyped(String),
+}
+
+fn destination_name(place: &Expression) -> String {
+    use dreammaker::ast::{ListAccessKind, PropertyAccessKind, Term};
+    let Expression::Base { term, follow } = place else {
+        return String::new();
+    };
+    let (follow, element) = match follow.split_last() {
+        Some((last, rest)) if matches!(last.elem, Follow::Index(ListAccessKind::Normal, _)) => {
+            (rest, true)
+        }
+        _ => (&follow[..], false),
+    };
+    if element && matches!(follow.last().map(|f| &f.elem), Some(Follow::Index(..))) {
+        return String::new();
+    }
+    let mut name = match &term.elem {
+        Term::Ident(name) => Some(name.to_string()),
+        Term::String(text) => Some(format!("\"{}\"", text)),
+        Term::Expr(inner) if follow.is_empty() => return destination_name(inner),
+        _ => None,
+    };
+    for f in follow {
+        name = match &f.elem {
+            Follow::Field(kind, field) => {
+                let (before, colon) = match kind {
+                    PropertyAccessKind::SafeDot => (Some("<expression>".to_owned()), false),
+                    PropertyAccessKind::SafeColon => (Some("<expression>".to_owned()), true),
+                    PropertyAccessKind::Colon => (name, true),
+                    _ => (name, false),
+                };
+                before.map(|before| format!("{before}{}{field}", if colon { ":" } else { "." }))
+            }
+            Follow::Index(ListAccessKind::Safe, _) => Some("<expression>".to_owned()),
+            _ => None,
+        };
+    }
+    name.unwrap_or_default()
+}
+
 #[derive(Debug)]
 pub enum CompileError {
     ParseError(dreammaker::DMError),
@@ -83,6 +127,7 @@ pub enum CompileError {
     UnsupportedCompilerMacro { name: String },
     UnsupportedStatement(&'static str),
     UndefinedVar(String),
+    UntypedDestination(String),
     AtLine(u32, Box<CompileError>),
 
     AmbiguousListConstructor,
@@ -118,6 +163,7 @@ impl CompileError {
             CompileError::UnsupportedCompilerMacro { .. } => Id::UnsupportedCompilerMacro,
             CompileError::UnsupportedStatement(_) => Id::UnsupportedStatement,
             CompileError::UndefinedVar(_) => Id::UndefinedVar,
+            CompileError::UntypedDestination(_) => Id::ImplicitNewUntyped,
             CompileError::AtLine(_, e) => e.id(),
             CompileError::AmbiguousListConstructor => Id::AmbiguousListConstructor,
             CompileError::NotInByond { .. } => Id::NotInByond,
@@ -169,6 +215,9 @@ impl fmt::Display for CompileError {
             }
 
             CompileError::UndefinedVar(name) => write!(f, "undefined variable: {}", name),
+            CompileError::UntypedDestination(place) => {
+                write!(f, "{}: unknown variable type", place)
+            }
             CompileError::ExpectedLValue => write!(f, "expected an assignable expression"),
             CompileError::ExpectedFieldReference => {
                 write!(f, "expected a variable, field, or list element")
@@ -706,7 +755,7 @@ struct Compiler<'a> {
     debugger: bool,
     cache: Option<Vec<Variable>>,
     last_line: Option<u32>,
-    implicit_type: Option<String>,
+    implicit_type: Option<Implied>,
     explicit_src: bool,
     debug_info: bool,
     byond: ByondVersion,
@@ -869,6 +918,52 @@ impl<'a> Compiler<'a> {
     fn place_type_name(&self, place: &Expression) -> Option<String> {
         self.static_type_name(place)
             .filter(|_| procs::place_typed(place))
+    }
+
+    fn implied_type(&self) -> Result<Option<String>, CompileError> {
+        match &self.implicit_type {
+            Some(Implied::Type(path)) => Ok(Some(path.clone())),
+            Some(Implied::Untyped(place)) if !self.debugger => {
+                Err(CompileError::UntypedDestination(place.clone()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn destination(&self, place: &Expression) -> Implied {
+        match self.destination_type(place) {
+            Some(path) => Implied::Type(path),
+            None => Implied::Untyped(destination_name(place)),
+        }
+    }
+
+    fn destination_type(&self, place: &Expression) -> Option<String> {
+        let var_type = |place: &Expression| match place {
+            Expression::Base { term, follow }
+                if follow.is_empty()
+                    && matches!(&term.elem, dreammaker::ast::Term::Ident(i) if i.as_str() == "args") =>
+            {
+                Some("/list".to_owned())
+            }
+            _ => self
+                .place_type_name(place)
+                .or_else(|| statements::list_type_of(self, place)),
+        };
+        let Expression::Base { term, follow } = place else {
+            return var_type(place);
+        };
+        match follow.split_last().map(|(last, rest)| (&last.elem, rest)) {
+            Some((Follow::Index(dreammaker::ast::ListAccessKind::Normal, _), rest))
+                if !matches!(rest.last().map(|f| &f.elem), Some(Follow::Index(..))) =>
+            {
+                var_type(&Expression::Base {
+                    term: term.clone(),
+                    follow: rest.to_vec().into_boxed_slice(),
+                })
+            }
+            Some((Follow::Index(..), _)) => None,
+            _ => var_type(place),
+        }
     }
 
     pub(crate) fn end_assignment_statement(&mut self) {
