@@ -26,7 +26,7 @@ retour = { workspace = true }
 interprocess = "=2.4.7"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["libloaderapi", "errhandlingapi", "ioapiset", "processthreadsapi"] }
+winapi = { version = "0.3", features = ["libloaderapi", "errhandlingapi"] }
 
 [lints]
 workspace = true
