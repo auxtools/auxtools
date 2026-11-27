@@ -70,12 +70,27 @@ pub fn statics(built: Built) {
 	assert_eq!(eval(&mut client, "\"[st_unknown()] [st_unknown_global()]\""), "\"5 1\"");
 	println!("ok: a local const leaves the global of its name as it was when its proc's old code doesn't compile");
 
+	assert_eq!(eval(&mut client, "\"[st_defaulted()[1]] [st_defaulted()[2]]\""), "\"6 1\"");
+	let changes = source.edit(
+		"statics.dm",
+		"\tif (/datum/st_twice::f())\n\t\treturn list(ST_DEFAULT + 1, x)",
+		"\treturn ST_DEFAULT"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "\"[st_defaulted()] [st_default_global()]\""), "\"5 1\"");
+	println!("ok: a local const leaves the global of its name as it was when a parameter default reads the global");
+
 	assert_eq!(eval(&mut client, "\"[st_branch(1)] [st_branch(1)]\""), "\"1 2\"");
 	let changes = source.edit(
 		"statics.dm",
 		"\tif (which == 1)\n\t\tvar/static/st_branch_count = 0",
 		"\tif (which == 2)\n\t\tvar/static/st_branch_count = 10\n\t\tst_branch_count++\n\t\treturn st_branch_count\n\tif (which == \
 		 1)\n\t\tvar/static/st_branch_count = 0"
+	);
+	assert!(
+		changes.deferred.is_empty(),
+		"the added branch's static waits for a reboot: {:?}",
+		changes.deferred
 	);
 	reload(&mut watcher, &changes);
 	assert_eq!(
@@ -97,6 +112,64 @@ pub fn statics(built: Built) {
 	reload(&mut watcher, &changes);
 	assert_eq!(eval(&mut client, renamed), "\"10 8\"");
 	println!("ok: a global const changes after a static of its name was renamed");
+
+	assert_eq!(eval(&mut client, "\"[st_seeded()] [st_seeded()]\""), "\"2 3\"");
+	let changes = source.edit(
+		"statics.dm",
+		"\tst_seed++\n\treturn st_seed",
+		"\tvar/static/list/st_cache = list(st_seed)\n\tst_seed++\n\treturn \"[st_seed] [st_cache[1]]\""
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "st_seeded()"), "\"4 3\"");
+	println!("ok: a new static's initializer reads an earlier static of its proc");
+
+	assert_eq!(eval(&mut client, "\"[st_gone_root()] [(new /datum/st_gone).count()]\""), "\"5 8\"");
+	let changes = source.edit(
+		"statics.dm",
+		"\n/datum/st_gone/proc/count()\n\tvar/static/ST_GONE = 7\n\tST_GONE++\n\treturn ST_GONE\n",
+		""
+	);
+	reload(&mut watcher, &changes);
+	let changes = source.edit("statics.dm", "ST_GONE = 5", "ST_GONE = 10");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "st_gone_root()"), "10");
+	println!("ok: a global const changes after a proc with a static of its name was removed");
+
+	assert_eq!(eval(&mut client, "st_armed(1)"), "2");
+	let changes = source.edit(
+		"statics.dm",
+		"\t\treturn st_arm\n\treturn 0",
+		"\t\treturn st_arm\n\tvar/static/list/st_arm_cache = list(st_arm)\n\treturn st_arm_cache[1]"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "\"[st_armed(0)] [st_armed(1)]\""),
+		"\"20 3\"",
+		"the new static's value from the global, and the count of the static in the block before it"
+	);
+	println!("ok: a new static's initializer reads a global when a static of its name is in a block that has ended");
+
+	assert_eq!(eval(&mut client, "st_sown()"), "1");
+	let changes = source.edit(
+		"statics.dm",
+		"\tvar/const/ST_SOWN = 1\n\treturn ST_SOWN",
+		"\tvar/const/ST_SOWN = 2\n\tvar/static/list/st_sown_cache = list(ST_SOWN)\n\treturn st_sown_cache"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "st_sown()[1]"), "2", "the new static's value from the changed const");
+	println!("ok: a new static's initializer reads the new value of a local const that the edit changes");
+
+	let pair = "(new /datum/st_pair).f()";
+	assert_eq!(eval(&mut client, &format!("\"[{pair}] [{pair}]\"")), "\"7 9\"");
+	let changes = source.edit(
+		"statics.dm",
+		"\n/datum/st_pair/proc/f()\n",
+		"\nvar/st_rolled = rand(1, 2)\n\n/datum/st_pair/proc/f()\n"
+	);
+	assert!(changes.deferred.is_empty(), "the edit waits for a reboot: {:?}", changes.deferred);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, &format!("\"[{pair}] [st_rolled in list(1, 2)]\"")), "\"11 1\"");
+	println!("ok: an added global leaves alone the statics of two overrides with the same name");
 }
 
 fn declared_references(client: &mut Client, path: &str) -> (u32, u32) {

@@ -67,7 +67,7 @@ struct AddedVars {
 	first: u32,
 	vars: Vec<PreparedNewVar>,
 	param_names: HashMap<String, u32>,
-	run_once: Vec<(u32, String, ProcReload)>,
+	run_once: Vec<(u32, String, ProcReload, HashMap<(StaticScope, Vec<u8>), u32>)>,
 	in_lists_before: u32,
 	in_lists: Vec<(u32, ProcEntryWords)>,
 	instances: StagedInstances,
@@ -545,6 +545,10 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 			}
 			continue;
 		}
+		if let Ok(proc) = find(&removed.proc) {
+			let own = world_globals.globals_of(&proc).locals;
+			added.proc_locals.extend(own.values().flat_map(|own| own.values().copied()));
+		}
 		match prepare_removal(removed, &mut staged) {
 			Ok(p) => {
 				if removed.verb {
@@ -675,7 +679,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 
 	inherit::prepare(builtin_inherited, &mut prepared, &mut errors);
 
-	for (id, name, init) in std::mem::take(&mut added.run_once) {
+	for (id, name, init, owner_slots) in std::mem::take(&mut added.run_once) {
 		let code = value_code(init);
 		if !code.locals.is_empty() {
 			errors.push(format!(
@@ -684,7 +688,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 			));
 			continue;
 		}
-		match assemble(&name, &code, None, &pending, &mut world_globals, &mut added) {
+		match assemble_with(&name, &code, None, owner_slots, &pending, &mut world_globals, &mut added) {
 			Ok(bytecode) => prepared.run_once.push((id, name, bytecode)),
 			Err(e) => errors.push(e)
 		}
@@ -775,6 +779,7 @@ fn assemble_with(
 	added
 		.proc_locals
 		.extend(proc_globals.locals.values().flat_map(|own| own.values().copied()));
+	let first_run_once = added.run_once.len();
 	let new_statics = new_statics(code, &proc_globals, pending, added).map_err(|e| format!("{}: {}", name, e))?;
 	let mut env = ReloadEnv {
 		proc_globals,
@@ -782,6 +787,7 @@ fn assemble_with(
 		pending,
 		new_statics,
 		known,
+		proc_locals: &added.proc_locals,
 		instances: &mut added.instances,
 		place: uses.place(),
 		error: None
@@ -790,6 +796,9 @@ fn assemble_with(
 		Ok(bytecode) => bytecode,
 		Err(e) => return Err(format!("{}: {}", name, env.error.take().unwrap_or_else(|| describe_assemble_error(&e))))
 	};
+	for (.., init, owner_slots) in &mut added.run_once[first_run_once..] {
+		*owner_slots = env.proc_statics_read(&init.nodes);
+	}
 
 	if bytecode.len() > u16::MAX as usize {
 		return Err(format!(
@@ -1803,7 +1812,9 @@ fn new_statics(
 		};
 		let id = added.add(new_string(&local.name)?, value);
 		if let (None, Some(init)) = (&local.value, &local.init) {
-			added.run_once.push((id, format!("static local {}", local.name), (**init).clone()));
+			added
+				.run_once
+				.push((id, format!("static local {}", local.name), (**init).clone(), HashMap::new()));
 		}
 		if matches!(local.scope, StaticScope::Proc { .. }) {
 			added.proc_locals.push(id);
@@ -2380,7 +2391,9 @@ fn prepare_new_var(
 	let name = name_ref.get_id().0;
 	type_vars.new_names.insert(id, name);
 	if let Some(init) = &new.init {
-		added.run_once.push((id, format!("{}/var/{}", new.type_path, new.var), (**init).clone()));
+		added
+			.run_once
+			.push((id, format!("{}/var/{}", new.type_path, new.var), (**init).clone(), HashMap::new()));
 	}
 
 	if !new.type_path.is_empty() {
@@ -2501,7 +2514,7 @@ fn prepare_redeclared(
 			return Err(fail(format!("expected one matching runtime variable, found {}", ids.len())));
 		};
 		if let Some(init) = &var.init {
-			added.run_once.push((id, format!("/var/{}", var.var), (**init).clone()));
+			added.run_once.push((id, format!("/var/{}", var.var), (**init).clone(), HashMap::new()));
 		} else if let Some(value) = &var.value {
 			let (value, text) = owned_value(value, pending).map_err(fail)?;
 			global_values.push((id, value, text));
@@ -2540,7 +2553,9 @@ fn prepare_redeclared(
 			.globals
 			.insert((StaticScope::of_type(&var.type_path), var.var.as_bytes().to_vec()), id);
 		if let Some(init) = &var.init {
-			added.run_once.push((id, format!("{}/var/{}", var.type_path, var.var), (**init).clone()));
+			added
+				.run_once
+				.push((id, format!("{}/var/{}", var.type_path, var.var), (**init).clone(), HashMap::new()));
 		} else if let Some(value) = &var.value {
 			let (value, text) = owned_value(value, pending).map_err(fail)?;
 			global_values.push((id, value, text));
@@ -3841,9 +3856,34 @@ struct ReloadEnv<'a> {
 	pending: &'a Pending,
 	new_statics: HashMap<(StaticScope, Vec<u8>), u32>,
 	known: HashMap<(StaticScope, Vec<u8>), u32>,
+	proc_locals: &'a [u32],
 	instances: &'a mut StagedInstances,
 	place: Option<(Vec<u8>, u32, u32)>,
 	error: Option<String>
+}
+
+impl ReloadEnv<'_> {
+	fn proc_statics_read(&mut self, nodes: &[Node]) -> HashMap<(StaticScope, Vec<u8>), u32> {
+		let mut found = HashMap::new();
+		for node in nodes {
+			let Node::Instruction(ins, _) = node else {
+				continue;
+			};
+			for var in ins.variables() {
+				for global in var.globals() {
+					let Some(scope @ StaticScope::Proc { .. }) = &global.scope else {
+						continue;
+					};
+					let id = dmasm::assembler::AssembleEnv::get_global_index(self, &global.name.0, Some(scope));
+					self.error = None;
+					if let Some(id) = id {
+						found.insert((scope.clone(), global.name.0.clone()), id);
+					}
+				}
+			}
+		}
+		found
+	}
 }
 
 impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
@@ -3940,7 +3980,16 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 			return Some(id);
 		}
 
-		let candidates = variable_ids(name);
+		let mut candidates = variable_ids(name);
+		if candidates.len() > 1 {
+			let proc_locals = PROC_LOCALS.lock().unwrap();
+			let globals: Vec<u32> = (candidates.iter().copied())
+				.filter(|id| !proc_locals.contains(id) && !self.proc_locals.contains(id))
+				.collect();
+			if !globals.is_empty() {
+				candidates = globals;
+			}
+		}
 		match candidates.len() {
 			0 => {
 				self.error = Some(format!("global variable not found in the running world: {}", shown));

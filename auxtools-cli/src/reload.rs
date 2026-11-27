@@ -3,17 +3,18 @@ use std::path::PathBuf;
 use auxtools_protocol::{HotReloadRequest, LocalReads, ParsedReads, ShadowingProc};
 use dmasm::{
 	diagnostic::Id,
-	reload::{Changes, Plan, ProcKey, ProcReload, Refusal, Snapshot},
+	reload::{locals, Changes, Plan, ProcKey, ProcReload, Refusal, Snapshot, StaticVar},
 	Node, StaticScope
 };
 
-mod locals;
+mod reads;
 
 pub const RESTART: &str = "Rebuild the .dmb, then restart the world to load all of the new code.";
 
 pub fn request(changes: &Changes, before: &Snapshot, restarted: bool) -> HotReloadRequest {
 	let mut plan = changes.plan.clone();
-	let local_reads = without_existing_statics(&mut plan, changes, before);
+	let mut local_reads = without_existing_statics(&mut plan, changes, before);
+	local_reads.extend(removed_locals(&plan, before));
 	HotReloadRequest {
 		shadowing_procs: shadowing_procs(&plan, before),
 		local_reads,
@@ -112,17 +113,34 @@ fn without_existing_statics(plan: &mut Plan, changes: &Changes, before: &Snapsho
 		let (_, new_locals) = old_and_new_locals(code, changes, before);
 		let (matched, _) = locals::matched(&old.declared, &new_locals);
 		let was = |name: &str, nth: u32| matched.iter().find(|(had, new, _)| *had == name && *new == nth).map(|(.., old)| *old);
-		let nodes = &code.nodes;
-		code.statics.retain_mut(|local| {
-			let nth = local_number(&local.scope);
-			let old_nth = was(&local.name, nth);
-			let read_now = reads_static(nodes, &local.name, &local.scope);
+		let sent = |local: &StaticVar, read_now: bool| -> Option<bool> {
+			let old_nth = was(&local.name, local_number(&local.scope));
 			let initialized = local.init.is_some() && local.value.is_none() && !local.constant;
 			if !old_nth.is_some_and(|old_nth| old.read_as(&local.name, old_nth)) {
-				local.constant = false;
-				return old_nth.is_none() || read_now && !initialized;
+				return (old_nth.is_none() || read_now && !initialized).then_some(false);
 			}
-			local.constant && read_now
+			(local.constant && read_now).then_some(true)
+		};
+		let run_once: Vec<&[Node]> = (code.statics.iter())
+			.filter(|local| !local.constant && local.value.is_none())
+			.filter(|local| sent(local, reads_static(&code.nodes, &local.name, &local.scope)).is_some())
+			.filter_map(|local| Some(&local.init.as_ref()?.nodes[..]))
+			.collect();
+		let sending: Vec<Option<bool>> = (code.statics.iter())
+			.map(|local| {
+				let read_now = std::iter::once(&code.nodes[..])
+					.chain(run_once.iter().copied())
+					.any(|nodes| reads_static(nodes, &local.name, &local.scope));
+				sent(local, read_now)
+			})
+			.collect();
+		let mut sending = sending.into_iter();
+		code.statics.retain_mut(|local| {
+			let Some(constant) = sending.next().flatten() else {
+				return false;
+			};
+			local.constant = constant;
+			true
 		});
 		found.extend(old.reads.iter().map(|(name, reads, parsed)| {
 			LocalReads {
@@ -136,6 +154,21 @@ fn without_existing_statics(plan: &mut Plan, changes: &Changes, before: &Snapsho
 					.map(|(_, new, old)| (*new, *old))
 					.collect()
 			}
+		}));
+	}
+	found
+}
+
+fn removed_locals(plan: &Plan, before: &Snapshot) -> Vec<LocalReads> {
+	let mut found = vec![];
+	for removed in &plan.removed_procs {
+		let old = OldLocals::of(before, &removed.proc);
+		found.extend(old.reads.into_iter().map(|(name, reads, parsed)| LocalReads {
+			proc: removed.proc.clone(),
+			name,
+			reads,
+			parsed,
+			kept: vec![]
 		}));
 	}
 	found
@@ -162,10 +195,13 @@ impl<'a> OldLocals<'a> {
 				.filter(|(name, _)| names.contains(&name.as_str()))
 				.map(|(name, reads)| (name, reads, None))
 				.collect(),
-			Err(_) => names
-				.into_iter()
-				.filter_map(|name| Some((name.to_owned(), vec![], Some(locals::parsed_reads(body, name)?))))
-				.collect()
+			Err(_) => {
+				let params = snapshot.proc_parameters(proc).unwrap_or_default();
+				names
+					.into_iter()
+					.filter_map(|name| Some((name.to_owned(), vec![], Some(reads::parsed_reads(params, body, name)?))))
+					.collect()
+			}
 		};
 		Self { declared, reads }
 	}
@@ -443,6 +479,20 @@ mod tests {
 	}
 
 	#[test]
+	fn a_request_sends_the_local_consts_a_new_statics_initializer_reads() {
+		let before = "/proc/f()\n\tvar/const/SEED = 1\n\treturn SEED\n";
+		let after = "/proc/f()\n\tvar/const/SEED = 2\n\tvar/static/list/cache = list(SEED)\n\treturn cache\n";
+		let (old, changes) = edited("initializer-consts", before, after);
+		let sent = request(&changes, &old, false);
+		let statics: Vec<String> = sent.plan.reloads[0]
+			.statics
+			.iter()
+			.map(|local| format!("{} {}", local.name, local.constant))
+			.collect();
+		assert_eq!(statics, ["SEED true", "cache false"]);
+	}
+
+	#[test]
 	fn a_request_tells_a_procs_locals_from_globals_of_their_name() {
 		let before = "var/LIMIT = 1\n/proc/f()\n\tvar/const/LIMIT = 5\n\treturn global.LIMIT\n/proc/g()\n\tvar/static/LIMIT = \
 		              7\n\tLIMIT++\n\treturn list(LIMIT, global.LIMIT)\n";
@@ -515,6 +565,29 @@ mod tests {
 		assert_eq!(reads, ["LIMIT [] Some(Unknown)", "count [] Some(Only(0))"]);
 	}
 
+	#[test]
+	fn a_request_sends_a_const_as_new_when_a_parameter_default_of_old_code_that_doesnt_compile_reads_a_global() {
+		let twice = "/datum/t/proc/f()\n\treturn 0\n/datum/t/f()\n\treturn 1\n/datum/t/f()\n\treturn 2\n";
+		let before =
+			format!("var/LIMIT = 1\n{twice}/proc/f(x = global.LIMIT)\n\tvar/const/LIMIT = 5\n\tif (/datum/t::f())\n\t\treturn list(LIMIT + 1, x)\n");
+		let after = before.replace("\tif (/datum/t::f())\n\t\treturn list(LIMIT + 1, x)", "\treturn LIMIT");
+		let (old, changes) = edited("uncompiled-default", &before, &after);
+		assert!(old.compile(&changes.plan.reloads[0].proc).is_err(), "dmasm compiles the old code");
+		let sent = request(&changes, &old, false);
+		let statics: Vec<String> = sent.plan.reloads[0]
+			.statics
+			.iter()
+			.map(|local| format!("{} {}", local.name, local.constant))
+			.collect();
+		assert_eq!(statics, ["LIMIT false"]);
+		let reads: Vec<String> = sent
+			.local_reads
+			.iter()
+			.map(|reads| format!("{} {:?}", reads.name, reads.parsed))
+			.collect();
+		assert_eq!(reads, ["LIMIT Some(Unknown)"]);
+	}
+
 	fn sent_statics(sent: &HotReloadRequest) -> Vec<String> {
 		sent.plan
 			.reloads
@@ -573,6 +646,20 @@ mod tests {
 		let sent = request(&changes, &old, false);
 		let statics: Vec<&str> = sent.plan.reloads[0].statics.iter().map(|local| local.name.as_str()).collect();
 		assert!(statics.is_empty(), "expected no statics sent, got {:?}", statics);
+	}
+
+	#[test]
+	fn a_request_sends_the_reads_of_a_removed_procs_locals() {
+		let before = "var/const/N = 5\n/datum/t\n/datum/t/proc/f()\n\tvar/static/N = 7\n\tN++\n\treturn N + global.N\n";
+		let (old, changes) = edited("removed", before, "var/const/N = 5\n/datum/t\n");
+		assert_eq!(changes.plan.removed_procs.len(), 1, "{:?}", changes.plan);
+		let sent = request(&changes, &old, false);
+		let reads: Vec<String> = sent
+			.local_reads
+			.iter()
+			.map(|reads| format!("{} {} {:?} {:?}", reads.proc, reads.name, reads.reads, reads.kept))
+			.collect();
+		assert_eq!(reads, ["/datum/t/f N [Some(0), Some(0), None] []"]);
 	}
 
 	#[test]

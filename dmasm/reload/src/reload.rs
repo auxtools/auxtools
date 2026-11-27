@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use dreammaker::ast::{Block, Statement};
+use dreammaker::ast::{Block, Parameter, Statement};
 use dreammaker::objtree::{ObjectTree, ProcValue, TypeRef};
 use dreammaker::preprocessor::DefineHistory;
 use dreammaker::{Context, FileId, Severity};
@@ -22,6 +22,7 @@ use crate::{ByondVersion, Instruction, Node, StaticScope};
 pub use reparent::{Reparented, ReparentedType};
 
 mod global_init;
+pub mod locals;
 mod resources;
 pub use global_init::GlobalInit;
 
@@ -909,7 +910,10 @@ impl Snapshot {
                 if settings(old_value.code.as_ref()) != settings(new_value.code.as_ref()) {
                     return Err(format!("{key}: `set` statements changed"));
                 }
-                fn statics(v: &ProcValue) -> Vec<(&str, Option<&dreammaker::ast::Expression>)> {
+                fn statics(
+                    v: &ProcValue,
+                ) -> Vec<(&str, Option<String>, Option<&dreammaker::ast::Expression>)>
+                {
                     v.code
                         .as_deref()
                         .map(global_init::static_initializers)
@@ -1177,6 +1181,10 @@ impl Snapshot {
         self.find(key)?.1.code.as_ref()
     }
 
+    pub fn proc_parameters(&self, key: &ProcKey) -> Option<&[Parameter]> {
+        Some(&self.find(key)?.1.parameters)
+    }
+
     pub fn compile_reload(&self, key: &ProcKey) -> Result<ProcReload, Diagnostic> {
         let mut reload = self.compile_code(key)?;
         reload.settings = Some(
@@ -1190,8 +1198,12 @@ impl Snapshot {
         let (_, value) = self.find(key).ok_or_else(|| no_proc(key))?;
         let compiled = self.compile(key)?;
         let (ty, _) = self.find(key).ok_or_else(|| no_proc(key))?;
+        let declared = value
+            .code
+            .as_deref()
+            .map(locals::declared)
+            .unwrap_or_default();
         let mut statics = vec![];
-        let mut earlier = vec![];
         for s in compiled.statics {
             let constant = s.value.as_ref().and_then(const_value);
             let init = match (&constant, &s.expression) {
@@ -1201,11 +1213,10 @@ impl Snapshot {
                     &s.type_path,
                     value_location(expression, value.location),
                     static_proc_path(&s.scope),
-                    &earlier,
+                    &visible_statics(&declared, &s.name, static_number(&s.scope)),
                 )?)),
                 _ => None,
             };
-            earlier.push((s.name.clone(), static_number(&s.scope)));
             statics.push(StaticVar {
                 name: s.name,
                 value: constant,
@@ -1285,13 +1296,9 @@ impl Snapshot {
     ) -> Result<ProcReload, Diagnostic> {
         use dreammaker::ast::{Expression, Ident, PathOp, Prefab, RelativePath, Spanned, Term};
         let mut expression = expression.clone();
-        if let Expression::Base { term, .. } = &mut expression {
+        let made = constructed_type(declared, &expression);
+        if let (Some(declared), Expression::Base { term, .. }) = (made, &mut expression) {
             if let Term::NewImplicit { args } = &term.elem {
-                let declared = if declared.trim_start_matches('/').starts_with("list/") {
-                    "list"
-                } else {
-                    declared
-                };
                 let mut parts = declared.split('/').filter(|part| !part.is_empty());
                 let Some(first) = parts.next() else {
                     return Err(Diagnostic::error(
@@ -1928,6 +1935,7 @@ fn colon_reads_any(value: &ProcValue, names: &HashSet<&str>) -> bool {
 }
 
 fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &mut Changes) {
+    use dreammaker::ast::{Follow, Term};
     if changes.consts.is_empty()
         && changes.retyped.is_empty()
         && changes.defaults_changed.is_empty()
@@ -1943,6 +1951,7 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         .map(String::as_str)
         .collect();
     let colon_names: HashSet<&str> = changes.colon_names.iter().map(String::as_str).collect();
+    let retyped: HashSet<&str> = changes.retyped.iter().map(String::as_str).collect();
     let consts: HashSet<&str> = changes
         .consts
         .iter()
@@ -1980,8 +1989,22 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
                 let path = &new_ty.get().path;
                 let why = if folds_changed(old, new, path, new_value, &consts) {
                     "folds a `const` variable whose value changed"
-                } else if colon_rebinds(old, new, path, new_value, &colon_names) {
+                } else if !colon_names.is_empty()
+                    && chain_rebinds(old, new, path, new_value, |_, follow| {
+                        colon_fields(follow).any(|name| colon_names.contains(name))
+                    })
+                {
                     "reads a variable via `x:name` that another type now declares"
+                } else if !retyped.is_empty()
+                    && chain_rebinds(old, new, path, new_value, |term, follow| {
+                        matches!(term, Term::Ident(name) if retyped.contains(name.as_str()))
+                            || follow.iter().any(|f| {
+                                matches!(&f.elem, Follow::Field(_, name)
+                                    if retyped.contains(name.as_str()))
+                            })
+                    })
+                {
+                    "reads a variable through another variable whose declared type changed"
                 } else {
                     continue;
                 };
@@ -2364,24 +2387,21 @@ fn folds_changed(
     found
 }
 
-fn colon_rebinds(
+fn chain_rebinds(
     old: &Snapshot,
     new: &Snapshot,
     ty: &str,
     value: &ProcValue,
-    names: &HashSet<&str>,
+    reads: impl Fn(&dreammaker::ast::Term, &[dreammaker::ast::Spanned<dreammaker::ast::Follow>]) -> bool,
 ) -> bool {
     use dreammaker::ast::{Expression, Term};
-    if names.is_empty() {
-        return false;
-    }
     let local_types = retargeted::local_read_types(value);
     let mut found = false;
     syntax::walk_proc(value, &mut |node| {
         let syntax::Node::Expression(expression @ Expression::Base { term, follow }) = node else {
             return;
         };
-        if found || !colon_fields(follow).any(|name| names.contains(name)) {
+        if found || !reads(&term.elem, follow) {
             return;
         }
         let locals: Vec<(&str, &str)> = match &term.elem {
@@ -3808,6 +3828,33 @@ fn static_proc_path(scope: &StaticScope) -> Option<&str> {
         StaticScope::Proc { path, .. } => Some(path),
         _ => None,
     }
+}
+
+pub(crate) fn constructed_type<'d>(
+    declared: &'d str,
+    expression: &dreammaker::ast::Expression,
+) -> Option<&'d str> {
+    use dreammaker::ast::{Expression, Term};
+    let Expression::Base { term, .. } = expression else {
+        return None;
+    };
+    if !matches!(term.elem, Term::NewImplicit { .. }) {
+        return None;
+    }
+    let path = declared.trim_start_matches('/');
+    if path == "list" || path.starts_with("list/") {
+        Some("list")
+    } else {
+        Some(declared)
+    }
+}
+
+fn visible_statics(declared: &[locals::Declared], name: &str, nth: u32) -> Vec<(String, u32)> {
+    declared
+        .iter()
+        .position(|local| local.name == name && local.nth == nth)
+        .map(|at| locals::visible_at(declared, at))
+        .unwrap_or_default()
 }
 
 fn static_number(scope: &StaticScope) -> u32 {

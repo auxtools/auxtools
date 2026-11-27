@@ -302,6 +302,24 @@ pub fn dependents(built: Built) {
 		"a proc dmasm can't compile that reads items[1]:name from another type after the reload isn't refused"
 	);
 	println!("ok: a reload is refused for a proc dmasm can't compile that reads items[1]:name from another type");
+
+	assert_eq!(eval(&mut client, "dep_retyped_alone()"), "5");
+	let refused = refused_edit(
+		&mut source,
+		"dependents.dm",
+		"var/datum/dep_retype_alone_first/dep_retype_alone_target",
+		"var/datum/dep_retype_alone_later/dep_retype_alone_target"
+	);
+	let shown: Vec<String> = refused.iter().map(|r| format!("{:#}", r)).collect();
+	assert_eq!(
+		shown,
+		[
+			"/dep_retyped_alone: reads a variable through another variable whose declared type changed, so it must be recompiled, but it failed to \
+			 compile: unsupported: `type::proc()` targeting a type's second or later override"
+		],
+		"a proc dmasm can't compile that reads a const through a retyped var isn't refused"
+	);
+	println!("ok: a reload is refused for a proc dmasm can't compile that reads a const through a var declared with another type");
 }
 
 fn refused_edit(source: &mut Source, file: &str, from: &str, to: &str) -> Vec<dmasm::reload::Refusal> {

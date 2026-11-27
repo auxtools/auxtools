@@ -101,3 +101,56 @@ var/const/ST_RENAMED = 5
 	var/static/ST_RENAMED = 7
 	ST_RENAMED++
 	return ST_RENAMED
+
+var/ST_DEFAULT = 1
+
+/proc/st_defaulted(x = global.ST_DEFAULT)
+	var/const/ST_DEFAULT = 5
+	if (/datum/st_twice::f())
+		return list(ST_DEFAULT + 1, x)
+
+/proc/st_default_global()
+	return ST_DEFAULT
+
+/proc/st_seeded()
+	var/static/st_seed = 1
+	st_seed++
+	return st_seed
+
+var/const/ST_GONE = 5
+
+/proc/st_gone_root()
+	return ST_GONE
+
+/datum/st_gone
+
+/datum/st_gone/proc/count()
+	var/static/ST_GONE = 7
+	ST_GONE++
+	return ST_GONE
+
+var/st_arm = 20
+
+/proc/st_armed(x)
+	if (x)
+		var/static/st_arm = 1
+		st_arm++
+		return st_arm
+	return 0
+
+/proc/st_sown()
+	var/const/ST_SOWN = 1
+	return ST_SOWN
+
+/datum/st_pair/proc/f()
+	return 0
+
+/datum/st_pair/f()
+	var/static/st_pair_count = 0
+	st_pair_count++
+	return st_pair_count
+
+/datum/st_pair/f()
+	var/static/st_pair_count = 5
+	st_pair_count++
+	return ..() + st_pair_count

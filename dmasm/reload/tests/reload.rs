@@ -4428,6 +4428,39 @@ fn a_static_reading_a_changed_colon_name_is_given_to_a_reboot() {
     assert!(code.contains("PushInt 10"), "{}", code);
 }
 
+#[test]
+fn a_static_reading_through_a_retyped_var_is_given_to_a_reboot() {
+    let before = "/datum/a\n\tvar/const/LIMIT = 5\n\n/datum/b\n\tvar/const/LIMIT = 9\n\n\
+                  var/datum/a/target\n\n\
+                  /proc/limits()\n\tvar/static/list/limits = list(target.LIMIT + 1)\n\treturn limits\n";
+    let after = before.replace("var/datum/a/target", "var/datum/b/target");
+    let changes = changes("static-reading-retyped", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert_eq!(global_init_sets(&changes), ["/proc/limits#0:limits @10"]);
+    let code = dmasm_bytecode::format(&changes.global_init.as_ref().unwrap().code.nodes);
+    assert!(code.contains("PushInt 10"), "{}", code);
+}
+
+#[test]
+fn a_static_in_a_branch_added_above_another_is_a_new_one() {
+    let before = "/proc/f(x)\n\tif (x == 1)\n\t\tvar/static/n = 0\n\t\tn++\n\t\treturn n\n";
+    let added = "\tif (x == 2)\n\t\tvar/static/n = 10\n\t\tn++\n\t\treturn n\n";
+    let after = before.replace("\tif (x == 1)", &format!("{added}\tif (x == 1)"));
+    let changes = changes("static-branch-added", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert!(changes.global_init.is_none(), "{:?}", changes.global_init);
+
+    let changed = after.replacen("n = 0", "n = 1", 1);
+    let changes = changes_of("static-branch-changed", &after, &changed);
+    let deferred: Vec<String> = changes.deferred.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        deferred,
+        ["code/code.dm:7: /proc/f: n: changed initializer"]
+    );
+}
+
 fn sent_statics(changes: &Changes, path: &str) -> Vec<String> {
     let reload = changes.plan.reloads.iter().find(|r| r.proc.path == path);
     let reload =
@@ -4537,6 +4570,53 @@ fn a_local_const_follows_a_retyped_var_it_reads_through() {
             ["L Some(Number(10.0)) true"],
             "{path}"
         );
+    }
+}
+
+#[test]
+fn uncompiled_code_reading_through_a_retyped_var_is_refused() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let before = format!(
+        "/datum/a\n\tvar/const/LIMIT = 5\n\tvar/count = 1\n\n\
+         /datum/b\n\tvar/const/LIMIT = 9\n\tvar/count = 2\n\n\
+         /datum/a/child\n\n\
+         var/datum/a/target\n\n\
+         /proc/alone(x)\n{uncompiled}\treturn target.LIMIT\n\n\
+         /proc/folded(x)\n{uncompiled}\treturn target.LIMIT + 1\n\n\
+         /proc/plain(x)\n{uncompiled}\treturn target.count\n\n\
+         /datum/holder\n\tvar/datum/a/member_target\n\n\
+         /datum/holder/proc/member(x)\n{uncompiled}\treturn member_target.LIMIT\n"
+    );
+    for (name, from, to, refused) in [
+        (
+            "uncompiled-retyped-other",
+            "/datum/a/",
+            "/datum/b/",
+            &["/alone", "/datum/holder/member", "/folded"][..],
+        ),
+        (
+            "uncompiled-retyped-child",
+            "/datum/a/target",
+            "/datum/a/child/target",
+            &[][..],
+        ),
+    ] {
+        let after = before.replace(&format!("var{from}"), &format!("var{to}"));
+        assert_ne!(after, before, "{name}");
+        let changes = changes_of(name, &before, &after);
+        let mut paths: Vec<&str> = changes.refused.iter().map(|r| r.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, refused, "{}: {:?}", name, changes.refused);
+        for refusal in &changes.refused {
+            assert!(
+                refusal.why.starts_with(
+                    "reads a variable through another variable whose declared type changed, so it must be recompiled, but it failed to compile: "
+                ),
+                "{}: {}",
+                name,
+                refusal
+            );
+        }
     }
 }
 
@@ -4710,4 +4790,125 @@ fn uncompiled_code_naming_a_declaration_by_ancestor_search_is_not_refused() {
     let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
     let changes = changes("searched-uncompiled", &before, &removed);
     assert_eq!(reloaded(&changes), []);
+}
+
+fn reads_of(nodes: &[Node], name: &str) -> Vec<String> {
+    nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Instruction(ins, ()) => Some(ins),
+            _ => None,
+        })
+        .flat_map(|ins| ins.variables())
+        .flat_map(|var| var.globals())
+        .filter(|global| global.name.0 == name.as_bytes())
+        .map(|global| format!("{}:{name}", scope(global)))
+        .collect()
+}
+
+#[test]
+fn a_new_static_reads_the_statics_in_scope_where_it_is_declared() {
+    let before = "var/seed = 20\n\n\
+                  /proc/ended(x)\n\tif (x)\n\t\tvar/static/seed = 1\n\t\tseed++\n\t\treturn seed\n\treturn 0\n\n\
+                  /proc/open(x)\n\tvar/static/seed = 1\n\tif (x)\n\t\treturn seed\n\treturn 0\n";
+    let after = before.replace(
+        "\treturn 0\n",
+        "\tvar/static/list/cache = list(seed)\n\treturn cache[1]\n",
+    );
+    let changes = changes("static-after-a-block", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let reboot = &changes
+        .global_init
+        .as_ref()
+        .expect("no global init")
+        .code
+        .nodes;
+    let mut reads = reads_of(reboot, "seed");
+    reads.sort();
+    assert_eq!(reads, ["/proc/open#0:seed", ":seed"]);
+    for (path, read) in [("/ended", ":seed"), ("/open", "/proc/open#0:seed")] {
+        let reload = changes.plan.reloads.iter().find(|r| r.proc.path == path);
+        let reload = reload.unwrap_or_else(|| panic!("{path} isn't compiled again"));
+        let cache = reload.statics.iter().find(|s| s.name == "cache");
+        let init = cache.and_then(|cache| cache.init.as_ref());
+        let init = init.unwrap_or_else(|| panic!("{path}: no initializer for cache"));
+        assert_eq!(reads_of(&init.nodes, "seed"), [read], "{path}");
+    }
+}
+
+#[test]
+fn a_static_made_by_new_changes_its_initializer_with_its_type() {
+    let before = "/datum/a\n/datum/b\n\n/proc/item()\n\tvar/static/datum/a/item = new\n\
+                  \tvar/static/list/made = new\n\tvar/static/datum/a/held = null\n\
+                  \treturn list(item, made, held)\n";
+    let edited: HashSet<PathBuf> = vec![PathBuf::from("code/code.dm")].into_iter().collect();
+    for (name, from, to, deferred) in [
+        (
+            "static-new-retyped",
+            "datum/a/item",
+            "datum/b/item",
+            &["code/code.dm:5: /proc/item: item: changed initializer"][..],
+        ),
+        (
+            "static-list-retyped",
+            "list/made",
+            "list/datum/a/made",
+            &[][..],
+        ),
+        (
+            "static-null-retyped",
+            "datum/a/held",
+            "datum/b/held",
+            &[][..],
+        ),
+    ] {
+        let world = World::new(name, before);
+        let mut old = world.parse();
+        world.write(&before.replace(from, to));
+        let full = diff(&old, &world.parse(), Some(&edited));
+        let shown: Vec<String> = full.deferred.iter().map(ToString::to_string).collect();
+        assert_eq!(shown, deferred, "{name}");
+        let own = old.reload_file(&world.dir, std::path::Path::new("code/code.dm"));
+        match (own, deferred.is_empty()) {
+            (Ok(_), true) => {}
+            (Ok(_), false) => panic!("{name}: reloaded on its own"),
+            (Err(e), false) => assert!(e.contains("static initializers"), "{name}: {e}"),
+            (Err(e), true) => panic!("{name}: needs the full parse: {e}"),
+        }
+    }
+}
+
+#[test]
+fn the_statics_of_two_overrides_are_compared_with_their_own() {
+    let before = "/datum/t/proc/f()\n\treturn 0\n\n\
+                  /datum/t/f()\n\tvar/static/count = 0\n\tcount++\n\treturn count\n\n\
+                  /datum/t/f()\n\tvar/static/count = 5\n\tcount++\n\treturn ..() + count\n";
+    let after = format!("{before}\nvar/rolled = rand(1, 2)\n");
+    let changes = changes("override-statics", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert!(
+        changes.global_init.is_some(),
+        "no global init for the new global"
+    );
+
+    let inserted = before.replace(
+        "/datum/t/f()\n\tvar/static/count = 0",
+        "/datum/t/f()\n\tvar/static/count = 9\n\treturn count\n\n/datum/t/f()\n\tvar/static/count = 0",
+    );
+    let changes = changes_of(
+        "override-statics-inserted",
+        before,
+        &format!("{inserted}\nvar/rolled = rand(1, 2)\n"),
+    );
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+
+    let changed = before.replacen("count = 5", "count = 6", 1);
+    let changes = changes_of("override-statics-changed", before, &changed);
+    let deferred: Vec<String> = changes.deferred.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        deferred,
+        ["code/code.dm:10: /datum/t/f: count: changed initializer"]
+    );
 }

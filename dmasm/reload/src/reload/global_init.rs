@@ -46,6 +46,7 @@ fn proc_statics<'a>(
 struct Initializer<'a> {
     scope: StaticScope,
     name: String,
+    proc: Option<super::ProcKey>,
     location: Location,
     ty: TypeRef<'a>,
     declared: String,
@@ -53,7 +54,7 @@ struct Initializer<'a> {
     constant: Option<ConstValue>,
     proc_path: Option<String>,
     proc_static_names: Vec<String>,
-    earlier: Vec<(String, u32)>,
+    visible: Vec<(String, u32)>,
     sized_list: bool,
     params: Vec<(String, String)>,
     scoped_late: bool,
@@ -61,8 +62,12 @@ struct Initializer<'a> {
 }
 
 impl Initializer<'_> {
-    fn key(&self) -> (&StaticScope, &str) {
-        (&self.scope, &self.name)
+    fn key(&self) -> (Option<&super::ProcKey>, &StaticScope, &str) {
+        (self.proc.as_ref(), &self.scope, &self.name)
+    }
+
+    fn constructed(&self) -> Option<&str> {
+        super::constructed_type(&self.declared, self.expression?)
     }
 
     fn computed(&self) -> Option<(&StaticScope, &str, &str, Option<&Expression>)> {
@@ -98,15 +103,13 @@ impl Snapshot {
                 .iter()
                 .map(|(_, var)| var.name.as_str().to_owned())
                 .collect();
+            let declared = super::locals::declared(code);
             let mut seen: Vec<&str> = vec![];
-            let mut earlier: Vec<(String, u32)> = vec![];
             let proc_name = name;
             for (location, var) in found {
                 let name = var.name.as_str();
                 let number = seen.iter().filter(|n| **n == name).count();
                 seen.push(name);
-                let before = earlier.clone();
-                earlier.push((name.to_owned(), number as u32));
                 if var.var_type.flags.is_const() {
                     continue;
                 }
@@ -132,6 +135,7 @@ impl Snapshot {
                             nth: number as u32,
                         },
                         name: name.to_owned(),
+                        proc: Some(key.clone()),
                         location,
                         ty,
                         declared: var.var_type.type_path.to_string(),
@@ -139,7 +143,7 @@ impl Snapshot {
                         constant,
                         proc_path: Some(proc_path.clone()),
                         proc_static_names: proc_static_names.clone(),
-                        earlier: before,
+                        visible: super::visible_statics(&declared, name, number as u32),
                         sized_list: false,
                         params: params.clone(),
                         scoped_late: false,
@@ -347,7 +351,7 @@ fn retargeted(
                     &init.declared,
                     value_location(expression, init.location),
                     init.proc_path.as_deref(),
-                    &init.earlier,
+                    &init.visible,
                 )
                 .ok()
             };
@@ -400,13 +404,63 @@ fn differences<'a, 'b>(
     Some(table)
 }
 
+fn renumber_old_statics(
+    old: &Snapshot,
+    new: &Snapshot,
+    r: &Retargeted,
+    before: &mut [Initializer<'_>],
+) {
+    let mut numbers: HashMap<super::ProcKey, Vec<(String, u32, u32)>> = HashMap::new();
+    let mut new_keys: HashMap<super::ProcKey, super::ProcKey> = HashMap::new();
+    for key in new.procs() {
+        let Some(old_key) = r.old_key(key) else {
+            continue;
+        };
+        new_keys.insert(old_key.clone(), key.clone());
+        let (Some(was), Some(now)) = (old.proc_code(&old_key), new.proc_code(key)) else {
+            continue;
+        };
+        let declared = super::locals::declared(was);
+        if declared.is_empty() || was == now {
+            continue;
+        }
+        let (pairs, _) = super::locals::matched(&declared, &super::locals::declared(now));
+        let pairs = pairs
+            .into_iter()
+            .map(|(name, new, old)| (name.to_owned(), new, old))
+            .collect();
+        numbers.insert(old_key, pairs);
+    }
+    for Initializer {
+        proc, scope, name, ..
+    } in before
+    {
+        let Some(old_key) = proc.take() else {
+            continue;
+        };
+        *proc = new_keys.get(&old_key).cloned();
+        let Some(pairs) = numbers.get(&old_key) else {
+            continue;
+        };
+        let StaticScope::Proc { nth, .. } = scope else {
+            continue;
+        };
+        *nth = pairs
+            .iter()
+            .find(|(had, _, old)| had == name && old == nth)
+            .map_or(u32::MAX - *nth, |(_, new, _)| *new);
+    }
+}
+
 fn changed(new: &Snapshot, before: &[Initializer<'_>], after: &[Initializer<'_>]) -> Vec<Refusal> {
     let was: HashMap<_, _> = before.iter().map(|i| (i.key(), i)).collect();
     after
         .iter()
         .filter(|init| {
             was.get(&init.key()).is_some_and(|was| {
-                was.constant != init.constant || was.expression != init.expression
+                was.constant != init.constant
+                    || was.expression != init.expression
+                    || was.constructed() != init.constructed()
             })
         })
         .map(|init| {
@@ -672,6 +726,7 @@ impl<'a> Walk<'a> {
                         let init = Initializer {
                             scope,
                             name: name.to_owned(),
+                            proc: None,
                             location: var.value.location,
                             ty: t,
                             declared: declaration.var_type.type_path.to_string(),
@@ -679,7 +734,7 @@ impl<'a> Walk<'a> {
                             constant: var_constant(var),
                             proc_path: None,
                             proc_static_names: vec![],
-                            earlier: vec![],
+                            visible: vec![],
                             sized_list: false,
                             params: vec![],
                             scoped_late: false,
@@ -812,6 +867,7 @@ impl<'a> Walk<'a> {
         let init = Initializer {
             scope: StaticScope::Type(t.get().path.clone()),
             name: name.to_owned(),
+            proc: None,
             location: var.value.location,
             ty: t,
             declared: String::new(),
@@ -819,7 +875,7 @@ impl<'a> Walk<'a> {
             constant: None,
             proc_path: None,
             proc_static_names: vec![],
-            earlier: vec![],
+            visible: vec![],
             sized_list: false,
             params: vec![],
             scoped_late: false,
@@ -947,7 +1003,7 @@ impl<'a> Walk<'a> {
         let t = init.ty;
         if !global {
             if let Some(proc_path) = &init.proc_path {
-                if let Some((_, number)) = init.earlier.iter().rev().find(|(n, _)| n == name) {
+                if let Some((_, number)) = init.visible.iter().rev().find(|(n, _)| n == name) {
                     let scope = StaticScope::Proc {
                         path: proc_path.clone(),
                         nth: *number,
@@ -1364,12 +1420,20 @@ fn normal(path: &Path) -> String {
     parts.join("/").to_ascii_lowercase()
 }
 
-pub(super) fn static_initializers(code: &[Spanned<Statement>]) -> Vec<(&str, Option<&Expression>)> {
+pub(super) fn static_initializers(
+    code: &[Spanned<Statement>],
+) -> Vec<(&str, Option<String>, Option<&Expression>)> {
     let mut found = vec![];
     static_statements(code, None, &mut found);
     found
         .into_iter()
-        .map(|(_, var)| (var.name.as_str(), var.value.as_ref()))
+        .map(|(_, var)| {
+            let declared = var.var_type.type_path.to_string();
+            let made = (var.value.as_ref())
+                .and_then(|value| super::constructed_type(&declared, value))
+                .map(str::to_owned);
+            (var.name.as_str(), made, var.value.as_ref())
+        })
         .collect()
 }
 
@@ -1477,7 +1541,7 @@ where
             &init.declared,
             location,
             init.proc_path.as_deref(),
-            &init.earlier,
+            &init.visible,
         ) {
             Ok(code) => code,
             Err(e) => {
@@ -1564,6 +1628,7 @@ pub(super) fn compare(
         .map(String::as_str)
         .collect();
     let colon_names: HashSet<&str> = changes.colon_names.iter().map(String::as_str).collect();
+    let retyped: HashSet<&str> = changes.retyped.iter().map(String::as_str).collect();
     let statics = !changes.consts.is_empty()
         || !defaults.is_empty()
             && new.statics_read(|node| {
@@ -1575,6 +1640,10 @@ pub(super) fn compare(
                 matches!(node, syntax::Node::Expression(Expression::Base { follow, .. })
                     if super::colon_fields(follow).any(|name| colon_names.contains(name)))
             })
+        || !retyped.is_empty()
+            && new.statics_read(
+                |node| matches!(node, syntax::Node::Name(name) if retyped.contains(name)),
+            )
         || changes
             .plan
             .reloads
@@ -1593,7 +1662,8 @@ pub(super) fn compare(
     {
         return;
     }
-    let (before, after) = (old.initializers(true), new.initializers(true));
+    let (mut before, after) = (old.initializers(true), new.initializers(true));
+    renumber_old_statics(old, new, r, &mut before);
     let Some(table) = differences((old, &before), (new, &after), r) else {
         return;
     };
