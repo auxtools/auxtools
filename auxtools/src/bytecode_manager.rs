@@ -231,6 +231,31 @@ pub unsafe fn own_code(proc: &Proc) -> Result<(), String> {
 	Ok(())
 }
 
+/// Allocates a new, unshared bytecode entry for `proc` containing a copy of its
+/// bytecode at a new address.
+///
+/// Always creates a fresh entry, even if `proc` already owns an unshared one.
+/// Subsequent calls execute the new copy while already-running frames continue
+/// on the previous buffer. Call on BYOND's thread while the library is
+/// initialized.
+///
+/// # Errors
+///
+/// Returns an error if `proc` has no bytecode entry or if BYOND cannot allocate
+/// a new entry.
+///
+/// # Panics
+///
+/// Panics if called before the library is initialized or after shutdown.
+///
+/// # Safety
+/// Call on BYOND's thread while a world is live.
+pub unsafe fn copy_code(proc: &Proc) -> Result<(), String> {
+	give_own_entry(state(), proc, false)
+		.map(|_| ())
+		.map_err(|e| format!("could not copy bytecode for {}: {}", proc.path, e))
+}
+
 pub fn set_bytecode(proc: &Proc, bytecode: Vec<u32>) -> Result<(), String> {
 	let len = u16::try_from(bytecode.len()).map_err(|_| {
 		format!(
