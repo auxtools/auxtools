@@ -45,6 +45,12 @@ case "$(uname -s)" in
 esac
 export BYOND_PATH
 
+work=$PWD/target/run-tests
+
+panicked() {
+	grep -q "^thread '[^']*'.* panicked at" "$1"
+}
+
 failed=
 report() {
 	if [ "$2" -eq 0 ]; then
@@ -60,8 +66,13 @@ run() {
 	shift
 	echo "::group::$name"
 	start=$(date +%s)
-	${WINE:+"$WINE"} "$@"
-	status=$?
+	mkdir -p "$work"
+	${WINE:+"$WINE"} "$@" 2>&1 | tee "$work/output.log"
+	status=${PIPESTATUS[0]}
+	if [ "$status" -eq 0 ] && panicked "$work/output.log"; then
+		echo "$name panicked, but its exit status was 0"
+		status=1
+	fi
 	echo "::endgroup::"
 	report "$name" $status $(($(date +%s) - start))
 }
@@ -71,7 +82,6 @@ if [ -n "${SERIAL:-}" ]; then
 		run "$test" "$programs/$test$exe"
 	done
 else
-	work=$PWD/target/run-tests
 	rm -rf "$work"
 	[ -z "${WINE:-}" ] || "$WINE" cmd /c exit
 	declare -A pids
@@ -100,6 +110,10 @@ else
 			wait "${pids[$test]}"
 			status=$?
 			unset "pids[$test]"
+			if [ $status -eq 0 ] && panicked "$work/$test.log"; then
+				echo "$test panicked, but its exit status was 0" >>"$work/$test.log"
+				status=1
+			fi
 			echo "::group::$test"
 			cat "$work/$test.log"
 			echo "::endgroup::"
