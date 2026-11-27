@@ -5,9 +5,11 @@ macro_rules! value_tags {
 	(
 		$($variant:ident = $val:expr),* $(,)?
 	) => {
-		/// What kind of thing a value is: the byte BYOND itself keeps. A build
-		/// newer than this list has tags it doesn't name, so any byte is a
-		/// tag, and code that goes by the tag has to allow for others.
+		/// Type tag byte identifying the kind of a `raw_types::values::Value`.
+		///
+		/// Any byte is a valid tag because newer BYOND builds may introduce
+		/// tags beyond the named constants. `from_u8` and `name` return `None`
+		/// for unnamed tags, and `Debug` formats them as `Unknown(0x..)`.
 		#[repr(transparent)]
 		#[derive(PartialEq, Eq, Copy, Clone, Hash)]
 		pub struct ValueTag(pub u8);
@@ -183,8 +185,10 @@ pub union ValueData {
 	pub list: lists::ListId
 }
 
-/// Internal thing used when interfacing with BYOND. You shouldn't need to use
-/// this.
+/// BYOND's uncounted 8-byte raw value representation (tag and 4-byte data).
+///
+/// Copying or dropping this type does not update BYOND's reference counts. Use
+/// [`crate::Value`] for reference-counted access.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct Value {

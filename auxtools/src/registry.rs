@@ -1,18 +1,9 @@
-//! What auxtools finds in BYOND's binary, as data.
+//! Resolves BYOND's internal functions and globals in the running process by
+//! name.
 //!
-//! BYOND exports almost none of the functions and globals auxtools uses, so
-//! each is found by a recipe (see `byond-scan`): a byte pattern or an export,
-//! the calls to follow from it and what to read there. A recipe holds for a
-//! range of builds, and a name has one recipe for each range whose code
-//! differs. `registry/linux.rs` and `registry/windows.rs` list them, and both
-//! lists are compiled on either platform. The builds where something changed
-//! are named in `registry/builds.rs`. `examples/check_recipes.rs` checks the
-//! lists against a BYOND binary on disk.
-//!
-//! Every lookup goes through [`resolve`]. A miss is an error that names the
-//! lookup. Nothing here hands back a null pointer, because the C++ shim calls
-//! these functions without checking and `debug.rs` reads the globals the same
-//! way.
+//! Each symbol has platform-specific recipes (byte patterns or exports) scoped
+//! to ranges of BYOND builds. Lookups return `Result<usize, String>` with a
+//! descriptive error naming the missing symbol rather than a null pointer.
 
 pub mod builds;
 mod linux;
@@ -47,9 +38,12 @@ pub fn accepts(version: u32, build: u32) -> bool {
 	builds::SUPPORTED.iter().any(|&(major, first)| major == version && build >= first)
 }
 
-/// The recipe a lookup of `name` uses on `build`: the one whose range has the
-/// build; failing that the newest one from before it, which is tried in case
-/// it still matches; failing that the first, which the build is too old for.
+/// Returns the recipe for `name` on `platform` matching `build`.
+///
+/// If no recipe's range contains `build`, falls back to the newest recipe
+/// preceding `build`, or the first recipe listed for `name` if all ranges start
+/// after `build`. Returns `None` only when `platform` defines no recipes for
+/// `name`. Does not verify that `build` is supported.
 pub fn recipe_for(platform: Platform, name: &str, build: u32) -> Option<&'static Recipe> {
 	let named = || platform.recipes().iter().filter(move |recipe| recipe.name == name);
 	named()
@@ -72,9 +66,10 @@ pub fn names(platform: Platform) -> Vec<&'static str> {
 	names
 }
 
-/// Whether auxtools looks `name` up on `build`: a recipe of the name has begun
-/// by then and the name's last hasn't ended. The callers ask by the same
-/// boundaries the ranges are made of.
+/// Returns `true` if `build` falls between the start of `name`'s earliest
+/// recipe and the end of its latest recipe on `platform`.
+///
+/// Returns `false` if `platform` has no recipe for `name`.
 pub fn needed(platform: Platform, name: &str, build: u32) -> bool {
 	let named = || platform.recipes().iter().filter(move |recipe| recipe.name == name);
 	named().any(|recipe| recipe.versions.min <= build) && named().any(|recipe| build <= recipe.versions.max)
@@ -105,8 +100,17 @@ fn module_and_build() -> Result<(Module, (u32, u32)), String> {
 	Ok((module, build))
 }
 
-/// Finds `name` in the running BYOND. [`find!`](crate::registry::find) does
-/// the same and checks the name when it is compiled.
+/// Resolves the address of `name` in the running BYOND process using the recipe
+/// for the current build.
+///
+/// Prefer [`find!`](crate::registry::find) when `name` is a string literal to
+/// validate it at compile time.
+///
+/// # Errors
+///
+/// Returns an error if BYOND's core library or version cannot be read, if
+/// `name` has no recipe on this platform, if the running build is unsupported
+/// or older than the recipe, or if the pattern cannot be found.
 pub fn address(name: &str) -> Result<usize, String> {
 	let (module, build) = module_and_build()?;
 	resolve(&module, Platform::RUNNING, build, name)
@@ -116,9 +120,11 @@ pub const fn defines(name: &str) -> bool {
 	byond_scan::defines(Platform::RUNNING.recipes(), name)
 }
 
-/// The address of a function or global in the running BYOND, by its name in
-/// the registry: `registry::find!("get_variable")?`. A name this platform's
-/// list lacks does not compile.
+/// Resolves a BYOND symbol by string literal name, returning
+/// `Result<usize, String>` like `address`.
+///
+/// Validates at compile time that the target platform defines a recipe for the
+/// given name, producing a compile error if it is missing.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __registry_find {
@@ -130,8 +136,17 @@ macro_rules! __registry_find {
 #[doc(inline)]
 pub use __registry_find as find;
 
-/// Resolves a recipe of your own with the same rules auxtools applies to its
-/// own: builds older than the recipe's range are refused, newer ones are tried.
+/// Resolves a caller-supplied `byond_scan::Recipe` in the running BYOND
+/// process.
+///
+/// Refuses unsupported builds (per [`accepts`]) and builds older than the
+/// recipe's start without scanning, while still attempting builds newer than
+/// the recipe's end.
+///
+/// # Errors
+///
+/// Returns an error if BYOND's core library or version cannot be read, if the
+/// build is rejected, or if the recipe fails to match.
 pub fn find_recipe(recipe: &Recipe) -> Result<usize, String> {
 	let (module, build) = module_and_build()?;
 	resolve_checked(&module, build, recipe)
@@ -211,10 +226,18 @@ mod tests {
 		assert_eq!(range("get_variable", 1644), (1644, 1647));
 		assert_eq!(range("get_variable", 1648), (1648, u32::MAX));
 		assert_eq!(range("get_variable", 5000), (1648, u32::MAX));
-		assert_eq!(range("get_variable", 1500), (1648, u32::MAX));
+		assert_eq!(
+			range("get_variable", 1500),
+			(1648, u32::MAX),
+			"a build older than every range gets the first recipe, which refuses it"
+		);
 		assert_eq!(range("appearance_send", 1643), (1637, 1643));
 		assert_eq!(range("appearance_send", 1645), (1644, u32::MAX));
-		assert_eq!(range("misc_intern", 1700), (1637, 1643));
+		assert_eq!(
+			range("misc_intern", 1700),
+			(1637, 1643),
+			"a build past a name's last range gets that last recipe"
+		);
 		assert!(recipe_for(Platform::Linux, "no_such_name", 1648).is_none());
 	}
 

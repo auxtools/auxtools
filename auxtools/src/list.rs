@@ -2,8 +2,16 @@ use std::iter::FromIterator;
 
 use crate::*;
 
-/// A wrapper around [Values](struct.Value.html) that make working with lists a
-/// little easier. It can also hold an `/alist`, where numbers are keys.
+/// A handle to a DM list, holding one BYOND reference.
+///
+/// Not `Send`. `List::from_value` and `Value::as_list` accept any value that
+/// BYOND's `islist()` accepts, including `/alist` on BYOND 516 and later, and
+/// return `Err` for everything else.
+///
+/// `get` and `set` follow DM's `L[x]` indexing rules: numbers are 1-based
+/// positions and other values are associative keys, except in an `/alist` where
+/// numbers are keys as well. `get` and `set` return `Err` if BYOND raises a
+/// runtime error, while `append`, `remove`, `len`, and `is_list` panic instead.
 pub struct List {
 	value: Value
 }
@@ -21,7 +29,6 @@ impl List {
 		Self::default()
 	}
 
-	/// Creates a new list filled with `capacity` nulls.
 	pub fn with_size(capacity: u32) -> Self {
 		let mut id: raw_types::lists::ListId = raw_types::lists::ListId(0);
 		unsafe {
@@ -99,11 +106,15 @@ impl List {
 		self.value.raw.tag == raw_types::values::ValueTag::Alist
 	}
 
-	/// Every key and value of an `/alist`, in the order `for (var/k in A)`
-	/// gives them.
+	/// Returns all `(key, value)` pairs of an `/alist` in the same order as
+	/// `for (var/k in A)`.
 	///
-	/// This is a copy, so nothing here points into BYOND's tree once it
-	/// returns.
+	/// Each returned `Value` holds its own BYOND reference.
+	///
+	/// # Errors
+	///
+	/// Returns an error if this list is not an `/alist` (always the case before
+	/// BYOND 516).
 	pub fn alist_pairs(&self) -> DMResult<Vec<(Value, Value)>> {
 		if !self.is_alist() {
 			return Err(runtime!("cannot read alist pairs from a non-alist value"));
@@ -138,10 +149,14 @@ impl List {
 		Ok(pairs)
 	}
 
-	/// Whether DM's `islist()` says yes to this value.
+	/// Returns `true` if BYOND's `islist()` accepts `value`.
 	///
-	/// This asks BYOND instead of matching on the tag, because a tag can't
-	/// answer it: a `filters` list and a single filter share one.
+	/// Queries BYOND directly because a `filters` list and a single filter
+	/// share the same raw value tag. A pointer to a list returns `false`.
+	///
+	/// # Panics
+	///
+	/// Panics if the call into BYOND fails.
 	pub fn is_list(value: &Value) -> bool {
 		let mut is_list: u8 = 0;
 		unsafe {

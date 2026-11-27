@@ -4,30 +4,33 @@ use super::values;
 #[derive(Copy, Clone, Debug)]
 pub struct ListId(pub u32);
 
-/// One key->value pair of an associative list, as a red-black tree node.
+/// A 32-byte red-black tree node in a DM list's associative map or `/alist`.
 ///
-/// 32 bytes. Matches BYOND's own tree lookup (516.1669), which reads the key at
-/// `+0` and the children at `+16` and `+20`. This used to declare `color` at
-/// `+16`, which put both child pointers 4 bytes past where BYOND writes them.
-/// Nothing read the children, so it never showed.
+/// BYOND reads the key at offset `+0` and the child pointers at `+16` and
+/// `+20`.
 #[repr(C)]
 pub struct AssociativeListEntry {
-	/// Non-owning; the same ref also occupies a `vector_part` slot.
+	/// Entry key, holding no BYOND reference (the same value is also stored in
+	/// a `vector_part` slot).
 	pub key: values::Value,
-	/// Owning; released when the tree is torn down.
+	/// Associated value, holding a BYOND reference that is released when the
+	/// tree is freed.
 	pub value: values::Value,
 	pub left: *mut AssociativeListEntry,
 	pub right: *mut AssociativeListEntry,
 	pub parent: *mut AssociativeListEntry,
-	/// 0 = red, 1 = black.
+	/// Red-black tree node color (`0` for red, `1` for black).
 	pub color: u8
 }
 
-/// The 8-byte record an `/alist` id points at in the alist table.
+/// An 8-byte `/alist` record in BYOND's alist table (BYOND 516 and later).
+///
+/// Indexed by an `/alist` value's ID. A null `root` indicates an empty
+/// `/alist`.
 #[repr(C)]
 pub struct Alist {
 	pub root: *mut AssociativeListEntry,
-	/// A new alist starts at 1, not 0.
+	/// Reference count for this `/alist`, starting at `1`.
 	pub refcount: u32
 }
 

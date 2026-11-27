@@ -69,7 +69,7 @@ pub struct Bytecode_V2 {
 #[derive(Copy, Clone)]
 pub struct Locals_V2 {
 	pub count: u16,
-	unk_0: u32,
+	refcount: u32,
 	pub names: *const strings::VariableId
 }
 
@@ -126,7 +126,15 @@ pub fn set_bytecode(id: BytecodeId, new_bytecode: *mut u32, new_bytecode_count: 
 	}
 }
 
-/// Takes a reference to a misc entry for good, so BYOND never frees it.
+/// Increments a misc entry's reference count permanently so BYOND never frees
+/// it.
+///
+/// Call on BYOND's thread. Accepts any misc ID type (`MiscId`, `BytecodeId`,
+/// `LocalsId`, or `ParametersId`).
+///
+/// # Panics
+///
+/// Panics if BYOND raises an error for `id`.
 pub fn add_ref<T: AsMiscId>(id: &T) {
 	let mut misc: *mut c_void = std::ptr::null_mut();
 	unsafe {
@@ -135,7 +143,7 @@ pub fn add_ref<T: AsMiscId>(id: &T) {
 
 	let misc = misc as *mut Misc_V2;
 	unsafe {
-		(*misc).locals.unk_0 += 1;
+		(*misc).locals.refcount += 1;
 	}
 }
 

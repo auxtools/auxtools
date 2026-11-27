@@ -2,11 +2,18 @@ use super::{raw_types, string};
 use crate::{list, runtime, runtime::DMResult};
 use std::{ffi::CString, fmt, marker::PhantomData};
 
-/// `Value` represents any value a DM variable can hold, such as numbers,
-/// strings, datums, etc.
+/// A reference-counted DM value.
 ///
-/// There's a lot of lifetime shenanigans going on, the gist of it is to just
-/// not keep Values around for longer than your hook's execution.
+/// Holds one BYOND reference from creation until drop, and `Clone` acquires an
+/// additional reference. Neither `Send` nor `Sync`. Kept `Value`s are not
+/// released automatically at shutdown (and dropping one afterward still calls
+/// into BYOND), so do not store a `Value` past the hook that created it. Use
+/// `WeakValue` via `as_weak` for longer-lived references.
+///
+/// `PartialEq` and `Hash` compare raw tag and data bits (identity) rather than
+/// DM's `==`. Modifying the public `raw` field directly breaks reference
+/// counting. Methods taking a variable name (such as `get` and `set`) require a
+/// `StringRef` or `byond_string!`, not `&str`.
 pub struct Value {
 	pub raw: raw_types::values::Value,
 	phantom: PhantomData<*mut ()>
@@ -38,7 +45,7 @@ impl Drop for Value {
 }
 
 impl Value {
-	/// Equivalent to DM's `global.vars`.
+	/// DM's `global.vars`.
 	pub const GLOBAL: Self = Self {
 		raw: raw_types::values::Value {
 			tag: raw_types::values::ValueTag::World,
@@ -117,7 +124,20 @@ impl Value {
 		}
 	}
 
-	/// Gets a turf by coordinates.
+	/// Returns the turf at 1-based DM coordinates `(x, y, z)`.
+	///
+	/// Reads `world.maxx`, `world.maxy`, and `world.maxz` on each call.
+	///
+	/// # Errors
+	///
+	/// Returns an error if any coordinate is outside the current map bounds. In
+	/// release builds, passing `0` wraps around and returns this out-of-bounds
+	/// error.
+	///
+	/// # Panics
+	///
+	/// In debug builds, passing `0` for any coordinate panics due to unsigned
+	/// underflow.
 	pub fn turf(x: u32, y: u32, z: u32) -> DMResult {
 		let world = Self::WORLD;
 		let max_x = world.get_number(crate::byond_string!("maxx"))? as u32;
@@ -346,13 +366,31 @@ impl Value {
 		}
 	}
 
-	/// blah blah lifetime is not verified with this so use at your peril
+	/// Wraps a raw BYOND value in a `Value` and increments its reference count.
+	///
+	/// Use this when borrowing a raw value owned by something else, such as a
+	/// stack frame variable or a table slot. Dropping the returned `Value`
+	/// releases the added reference.
+	///
+	/// # Safety
+	///
+	/// Must be called on BYOND's thread, and `v` must identify a value that
+	/// currently exists in BYOND.
 	pub unsafe fn from_raw(v: raw_types::values::Value) -> Self {
 		Value::new(v.tag, v.data)
 	}
 
-	/// same as from_raw but does not increment the reference count (assumes we
-	/// already own this reference)
+	/// Wraps a raw BYOND value in a `Value` by taking ownership of the caller's
+	/// existing reference.
+	///
+	/// Does not increment BYOND's reference count, and dropping the returned
+	/// `Value` releases one reference.
+	///
+	/// # Safety
+	///
+	/// The caller must own one BYOND reference to `v` to transfer (for example,
+	/// a return value from a BYOND call). Calling this on a borrowed raw value
+	/// releases a reference still relied on elsewhere.
 	pub const unsafe fn from_raw_owned(v: raw_types::values::Value) -> Value {
 		Value {
 			raw: v,

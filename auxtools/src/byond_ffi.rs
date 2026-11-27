@@ -81,13 +81,17 @@ pub fn byond_return(value: Option<Vec<u8>>) -> *const c_char {
 	}
 }
 
-/// Creates a normal byond ffi function that can be called in DM with [call](http://www.byond.com/docs/ref/#/proc/call).
+/// Exports a function that DM can invoke with `call_ext`.
 ///
-/// You should favour [hooks](attr.hook.html) over these when working with
-/// auxtools.
+/// Supports zero arguments (`name() { ... }`), named arguments
+/// (`name(a, b) { ... }`), and a trailing variadic slice
+/// (`name(a, ...rest) { ... }`). Named arguments are `&str` values converted
+/// lossily from UTF-8, defaulting to `""` when DM passes fewer arguments.
 ///
-/// A body that panics returns an empty string: the panic would abort the game
-/// if it got out.
+/// The body runs on BYOND's thread (including before `auxtools_init`) and must
+/// evaluate to an `Option` whose inner value converts to bytes (such as
+/// `Option<String>`). `None`, empty output, or a caught panic returns an empty
+/// string to DM. Output is truncated at the first NUL byte.
 ///
 /// # Examples
 ///

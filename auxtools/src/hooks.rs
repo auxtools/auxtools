@@ -292,8 +292,11 @@ impl Proc {
 		hook_by_id(self.id, func, self.path.to_owned())
 	}
 
-	/// Whether this library installed a Rust hook for the proc. Hooks in other
-	/// auxtools libraries loaded into the same world are not visible here.
+	/// Returns `true` if this library currently has a hook installed on this
+	/// proc ID.
+	///
+	/// Call on BYOND's thread. Does not report hooks installed by other
+	/// auxtools libraries loaded into the same world.
 	pub fn is_hooked(&self) -> bool {
 		PROC_HOOKS.0.borrow().contains_key(&self.id)
 	}
@@ -322,9 +325,16 @@ fn hook_failed(proc_id: raw_types::procs::ProcId, error: &crate::Runtime) {
 	}
 }
 
-/// Whether interpreter calls bypass the call_proc_by_id detour. GCC inlined
-/// them on Linux before 516.1664. Those builds dispatch proc hooks through
-/// the instruction hook (see `proc_starting`).
+/// Returns `true` on builds where BYOND's interpreter bypasses the proc-call
+/// detour.
+///
+/// This occurs on Linux before build 1664 (both BYOND 515 and 516), where GCC
+/// inlined the interpreter's proc calls. Always returns `false` on Windows. On
+/// affected builds, auxtools installs its instruction hook at initialization
+/// and dispatches proc hooks when each frame begins.
+///
+/// Reads the BYOND build recorded during the first initialization, so before
+/// initialization it returns `true` on Linux.
 pub fn calls_bypass_detour() -> bool {
 	cfg!(unix) && crate::version::get().1 < 1664
 }
@@ -340,10 +350,6 @@ static RETURN_DOT: [u32; 1] = [0x00];
 /// bytecode). Called internally by the instruction hook on builds where
 /// [`calls_bypass_detour`] returns `true`. Library authors should not call this
 /// directly.
-///
-/// Dispatch deferred work and proc hooks at the first instruction on builds
-/// where [`calls_bypass_detour`] is true. A hook's result replaces execution
-/// of the original proc.
 ///
 /// # Safety
 ///

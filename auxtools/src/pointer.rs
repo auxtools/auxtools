@@ -19,14 +19,22 @@ fn found() -> bool {
 	})
 }
 
-/// Whether pointers can be read in this world
+/// Returns `true` if the running BYOND build exports `Byond_ReadPointer`.
+///
+/// The lookup result is cached for the lifetime of the process. When this
+/// returns `false`, `read` and [`read_raw`] always return `None`.
 pub fn readable() -> bool {
 	found()
 }
 
-/// Read a pointer without retaining the returned value. Compare it or
-/// convert it to [`Value`] immediately. Returns `None` for invalid pointers
-/// or targets that no longer exist.
+/// Reads the raw value targeted by a DM pointer (`&var`).
+///
+/// Returns `None` if `pointer` is not a pointer value, if the running BYOND
+/// build lacks `Byond_ReadPointer`, or if BYOND fails the read (for example,
+/// for a variable on a deleted object).
+///
+/// The returned `RawValue` holds no BYOND reference. Compare or convert it
+/// immediately, or use `read` to obtain an owning `Value`.
 pub fn read_raw(pointer: &Value) -> Option<RawValue> {
 	if pointer.raw.tag != ValueTag::Pointer {
 		return None;

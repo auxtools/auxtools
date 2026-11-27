@@ -2,50 +2,52 @@ use byond_scan::VersionRange;
 
 pub const FIRST_515: u32 = 1637;
 
-/// The first build that keeps a type's typepath value in its entry and
-/// indexes them for text2path. Entries are 8 bytes longer from here, and a
-/// new type has to be registered. Earlier builds work the value out on
-/// demand.
+/// First build (`515.1641`) where type table entries store the typepath value,
+/// adding 8 bytes (`0x94` bytes on Linux, `0x98` on Windows) and requiring new
+/// types to be registered for `text2path`.
 pub const TYPEPATHS: u32 = 1641;
 
-/// The first Linux build compiled without frame pointers, much as 516 is.
-/// From here the pairs of globals sit the other way round (a queue's back
-/// before its front, a table's count before its pointer), `get_length`
-/// returns a value and not a count, misc entries are interned by a function
-/// that copies the words, and the interpreter keeps the running proc's frame
-/// in ESI, not EDI. Windows did not change.
+/// First Linux build (`515.1644`) compiled without CPU frame pointers.
+///
+/// Paired globals swap order, `get_length` returns a BYOND value instead of a
+/// plain count, misc interning copies the caller's words instead of taking
+/// ownership of the buffer, and the interpreter holds the pointer to the DM
+/// proc's frame in `ESI` instead of `EDI`.
 pub const LINUX_FRAMELESS: u32 = 1644;
 
-/// The first 516 build. With it came alists, and `icon_w` and `icon_z` in an
-/// appearance, before its mouse pointers.
+/// First supported BYOND 516 build (`516.1648`).
+///
+/// Introduces `/alist` support and adds `icon_w` and `icon_z` ahead of an
+/// appearance's mouse pointers, shifting those pointers by 4 bytes.
 pub const FIRST_516: u32 = 1648;
 
-/// The first Linux build where `remove_from_list` takes its arguments on the
-/// stack. Every build before it wants the list in `eax:edx`. Read off the
-/// prologue of every build from 1669 to 1675.
+/// First Linux build (`516.1674`) that passes `remove_from_list`'s list
+/// argument on the stack instead of in `eax:edx`.
 pub const LINUX_REMOVE_FROM_LIST_ON_STACK: u32 = 1674;
 
-/// The first build whose typepath registration checks for no type, which
-/// changed its first instructions.
+/// First build (`516.1686`) where typepath registration checks for a missing
+/// type, changing the function prologue matched by `register_typepath`.
 pub const TYPEPATH_NONE_CHECK: u32 = 1686;
 
-/// The newest build the recipes and the layouts were checked on. A recipe
-/// is tried on a newer build all the same. What rests on a layout that no
-/// recipe confirms is refused there until the build is checked: resource
-/// reload, which changes BYOND's appearance tree, and the text2path cache.
+/// Newest verified BYOND build (`516.1689`).
+///
+/// Newer builds still attempt symbol recipes, but resource reload returns an
+/// error and the `text2path` cache is left untouched.
 pub const NEWEST_CHECKED: u32 = 1689;
 
 /// Supported BYOND major versions paired with each series's minimum build
 /// (`515.1637` and `516.1648`), consulted by `registry::accepts`.
 pub const SUPPORTED: &[(u32, u32)] = &[(515, FIRST_515), (516, FIRST_516)];
 
-/// Every build from `first` on. A recipe with this range is the one tried
-/// on builds newer than any checked.
+/// Returns an open-ended version range from `first` onward with no upper bound.
+///
+/// Builds newer than [`NEWEST_CHECKED`] match recipes using this range.
 pub const fn since(first: u32) -> VersionRange {
 	VersionRange::from(first)
 }
 
-/// The builds from `first` up to the one before `next`
+/// Returns a half-open version range covering builds from `first` up to
+/// `next - 1`.
 pub const fn until(first: u32, next: u32) -> VersionRange {
 	VersionRange { min: first, max: next - 1 }
 }

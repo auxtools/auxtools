@@ -34,7 +34,8 @@ pub struct ProcInstance {
 	pub proc: ProcId,
 	/// The `proc_type` value this frame was invoked with, read back by `..()`.
 	pub flags: u8,
-	/// Which override of the proc this frame runs, 0 for the most derived.
+	/// Override depth of the proc running in this frame (`0` is the most
+	/// derived).
 	pub override_depth: u8,
 	pub mega_hack: u16,
 	pub usr: values::Value,

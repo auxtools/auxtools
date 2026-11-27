@@ -7,7 +7,14 @@ pub static mut SUSPENDED_PROCS_BUFFER: *mut procs::SuspendedProcsBuffer = std::p
 pub static mut SUSPENDED_FRONT: *const usize = std::ptr::null();
 pub static mut SUSPENDED_BACK: *const usize = std::ptr::null();
 
-/// The sleeping procs: their range in `SUSPENDED_PROCS_BUFFER`
+/// Returns the index range (`front..back`) of currently sleeping procs in
+/// `SUSPENDED_PROCS_BUFFER`, in queue order.
+///
+/// # Safety
+///
+/// Must be called on BYOND's thread after the library's first initialization
+/// (the underlying queue pointers are null before then). The returned indices
+/// remain valid only until DM code runs again.
 pub unsafe fn suspended_range() -> std::ops::Range<usize> {
 	*SUSPENDED_FRONT..*SUSPENDED_BACK
 }
