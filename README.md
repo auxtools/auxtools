@@ -4,7 +4,7 @@ auxtools is a debugger, instruction profiler, experimental hot reloader, static 
 command-line launcher for BYOND worlds on Windows and Linux. Use it through the
 [VS Code extension](editors/vscode/README.md) or the [`auxtools` CLI](docs/cli.md), build native
 BYOND extensions against the [`auxtools` Rust library](docs/rust-library.md), or work with DM
-bytecode directly through [dmasm](dmasm/README.md).
+bytecode directly through [dmasm](docs/dmasm.md).
 
 If you want to build or test auxtools from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -141,9 +141,9 @@ check a new BYOND build with `check_recipes`.
   `#[hook]`, DM setup, and thread safety
 - [Supported BYOND builds](docs/byond-builds.md): Tested and known-broken builds, newer build
   behavior, and checking recipes on a new build
-- [dmasm README](dmasm/README.md): `dmasm-bytecode`, `dmasm-compiler`, and `dmasm-reload` crates,
-  along with [COMPILER.md](dmasm/COMPILER.md) and
-  [DMASM Specification.md](dmasm/DMASM%20Specification.md)
+- [dmasm](docs/dmasm.md): `dmasm-bytecode`, `dmasm-compiler`, and `dmasm-reload` crates, along with
+  the [proc compiler reference](docs/dmasm-compiler.md) and
+  [DM bytecode specification](docs/dmasm-specification.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md): Building from source, running unit and integration tests, CI
   checks, and releasing
 - [Design notes](docs/design/README.md): Design decisions, internal mechanisms, and facts about

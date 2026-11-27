@@ -9,7 +9,7 @@ were checked against build 516.1687.
 
 Keep three caveats in mind when relying on any row:
 
-- **`bytecode/src/instructions.rs` is authoritative for instructions and operands.** If this
+- **`dmasm/bytecode/src/instructions.rs` is authoritative for instructions and operands.** If this
   document disagrees with that file, `instructions.rs` is right. On 2026-10-04, its operand counts
   were compared with the interpreter's handlers across eleven Windows builds (516.1659–516.1688) and
   agreed, though that check could not cover `Input` or `InputColor` and cannot see `Variable`
@@ -186,7 +186,7 @@ The second operand of `IterLoad` encodes the broad category of a typed loop vari
 
 Table conventions:
 
-- **Instruction** matches the declaration in `bytecode/src/instructions.rs`, including its operands.
+- **Instruction** matches the declaration in `dmasm/bytecode/src/instructions.rs`, including its operands.
 - **Stack** is written as `taken -> left` in Values. `flag` indicates that the instruction sets the
   test flag, and `?` means the value has not been determined.
 - Stack contents are listed from bottom to top, so in `list, index` the index is on top.
@@ -197,7 +197,7 @@ Table conventions:
 | `read` | The interpreter handler was read in the BYOND binary, the behavior was measured in a live world, or both |
 | `jit` | A JIT compiler built on dmasm compiles this instruction, declares and checks its stack effect on every compile, and tests results against the interpreter |
 | `asm` | The interpreter handler was read once in disassembly for this specification on 2026-10-04 (516.1687 Windows), sometimes along with helper functions it calls. Where a row cites DM source that compiles to the instruction, a test world was compiled with `dm.exe` 516.1687 and disassembled with dmasm, without running it |
-| `dmasm` | dmasm's compiler emits the instruction for that built-in proc with that argument count (`compiler/src/compiler/builtin_procs.rs`). Because the compiler uses it as a value, the row assumes it pushes one result. The handler has not been read |
+| `dmasm` | dmasm's compiler emits the instruction for that built-in proc with that argument count (`dmasm/compiler/src/compiler/builtin_procs.rs`). Because the compiler uses it as a value, the row assumes it pushes one result. The handler has not been read |
 | `dm` | `dm.exe` 516.1687 compiled a small proc using the built-in proc and dmasm disassembled it on 2026-10-04. **Taken** is the number of values pushed immediately before the instruction. **Left** is inferred from the following instruction (`Ret` or `Pop` means one value, `GetFlag` means the result went to the test flag, and nothing means zero). Because the handler was not read, the row summarizes documented rather than verified behavior |
 | `name` | Only the name and operands are known, so the behavior description is a guess |
 
@@ -782,7 +782,7 @@ When dmasm adds or modifies an instruction:
    a word that dmasm does not declare, the disassembler misinterprets that word as the next opcode
    and fails one or two instructions later.
 2. Add or update the instruction's row here, copying its declaration verbatim from
-   `bytecode/src/instructions.rs`.
+   `dmasm/bytecode/src/instructions.rs`.
 3. Record the weakest `Basis` value that holds for what you actually verified.
 4. Update the date near the top of this file.
 

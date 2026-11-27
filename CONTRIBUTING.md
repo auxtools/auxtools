@@ -18,7 +18,7 @@ same change. See [Design notes](#design-notes) for how they are organized, forma
 | `auxtools-protocol/` | GPL-3.0 | IPC protocol framing and message types (`PROTOCOL_VERSION` in `auxtools-protocol/src/lib.rs`) |
 | `auxtools-dm/` | GPL-3.0 | DM token formatting and `.dmb` resource checksum reader |
 | `instruction_hooking/` | GPL-3.0 | Bytecode instruction hook interface used by `debug_server` |
-| `dmasm/` | GPL-3.0 | DM bytecode assembler/disassembler, compiler, and hot reload planner ([dmasm/README.md](dmasm/README.md)) |
+| `dmasm/` | GPL-3.0 | DM bytecode assembler/disassembler, compiler, and hot reload planner ([docs/dmasm.md](docs/dmasm.md)) |
 | `editors/vscode/` | GPL-3.0 | VS Code extension (`sohpea.auxtools`), JS tests, and `.vsix` packager |
 | `tests/` | — | Integration test suites (`test_runner` with the `auxtest` `cdylib`, `debug_test`, `hot_reload_test`, `launcher_test`, `dap_test`) and host worlds |
 | `tools/debug_client/` | — | Standalone debug protocol test client |
@@ -183,7 +183,7 @@ Useful environment variables for `ci/run-tests.sh`:
 - To check BYOND symbol recipes against a `libbyond.so` or `byondcore.dll` without running a world,
   see [Checking a new BYOND build](docs/byond-builds.md#checking-a-new-byond-build).
 - To compare `dmasm-compiler` bytecode output against DreamMaker across the regression corpus, see
-  [Comparing with DreamMaker](dmasm/README.md#comparing-with-dreammaker).
+  [Comparing with DreamMaker](docs/dmasm.md#comparing-with-dreammaker).
 
 ## Design notes
 

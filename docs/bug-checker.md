@@ -27,8 +27,8 @@ Examples of issues `auxtools check` catches include:
 - `||=` and `&&=` bugs on `?.` chains
 - `pick()` ending in a zero weight before `516.1689`
 
-See [dmasm/COMPILER.md](../dmasm/COMPILER.md#warnings) for the full list. Static checking cannot
-catch bugs that appear only at runtime.
+See the [proc compiler reference](dmasm-compiler.md#warnings) for the full list. Static checking
+cannot catch bugs that appear only at runtime.
 
 ## Output and exit codes
 

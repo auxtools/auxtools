@@ -8,8 +8,8 @@ so hot reload can replace a proc with the compiled result.
 
 Pass the running world's build through `ProcSource::byond`, `compile_expr_for`, or
 `reload::ParseOptions::byond`. `ByondVersion::read_as` configures parsing for that build.
-`compiler/src/target.rs` holds a `ByondVersion` check for every build where dmasm's output changes,
-and `compiler/src/compiler/versions.rs` holds the arithmetic that varies across builds.
+`dmasm/compiler/src/target.rs` holds a `ByondVersion` check for every build where dmasm's output changes,
+and `dmasm/compiler/src/compiler/versions.rs` holds the arithmetic that varies across builds.
 
 Probes covered builds 515.1637, 515.1647, 516.1659, 516.1685, 516.1688, and 516.1689, with
 additional probes pinpointing behavior changes across 515.1637–516.1660 as well as 516.1664,
@@ -48,8 +48,8 @@ DreamMaker's builds. Differential fuzzing compared 1,536 worlds of 80 generated 
 
 The codebase harness, its bytecode patcher, and the fuzzer live outside this repository. This
 repository includes the `compare_dreammaker` example, which performs the same comparison against the
-small worlds in `compiler/tests/dreammaker/`. See
-[Comparing with DreamMaker](README.md#comparing-with-dreammaker) for how to run it.
+small worlds in `dmasm/compiler/tests/dreammaker/`. See
+[Comparing with DreamMaker](dmasm.md#comparing-with-dreammaker) for how to run it.
 
 ## Equivalent encodings
 
@@ -128,7 +128,7 @@ dmasm stays silent. If a call can replace a field, read that field into a local 
 
 ### Bugs affecting both DreamMaker and reloads
 
-These bugs (tracked in `compiler/src/compiler/known_bugs.rs`) affect both DreamMaker builds and
+These bugs (tracked in `dmasm/compiler/src/compiler/known_bugs.rs`) affect both DreamMaker builds and
 reloads:
 
 - `continue LABEL` targeting a labeled `do` ... `while` inside a counted `for` loop crashes the
@@ -401,7 +401,7 @@ below:
 | `binary_ops::emit`, `fold::binary_value` | Bit operand beyond 32 bits | Left for the world to convert at runtime |
 | `assignment::emit_conditional` | `a?.b?.c \|\|= v`, `a?[i] &&= v` as a value | Compiled via the `Safe` arms of `follow::emit_typed`, which leave a place. In ordinary procs, only plain `a?.b.c` compiles as a value and the other forms are rejected |
 
-`compiler/tests/compile_body.rs` compiles expressions both standalone and as `return EXPR` and
+`dmasm/compiler/tests/compile_body.rs` compiles expressions both standalone and as `return EXPR` and
 verifies that the emitted instructions match.
 
 ## Unsupported forms
