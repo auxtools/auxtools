@@ -89,6 +89,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Pause lifetime with multiple clients, watchers, and holds](cli/0007-pauses-with-several-clients.md): `only_looks`, `watch_only`, runtime arm of the pause wait
 - [Keeping a numbered journal across world reboots](cli/0012-the-journal.md): `spawn`
 - [Exiting quietly when an output pipe closes](cli/0027-closed-output-pipes-end-the-cli-quietly.md): `say!`, `say_part!`, `say`, `run`
+- [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `Place`, `World::name_in_world`
 
 ### `auxtools-cli/src/cli/hold.rs`
 

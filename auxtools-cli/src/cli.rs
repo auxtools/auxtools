@@ -23,6 +23,7 @@ mod trace;
 
 use std::{
 	io,
+	path::Path,
 	time::{Duration, Instant}
 };
 
@@ -234,7 +235,7 @@ fn read_stdin() -> Result<String> {
 	Ok(text.trim_end_matches(['\r', '\n']).to_owned())
 }
 
-fn expression(words: &[String], file: Option<&std::path::Path>, stdin: impl FnOnce() -> Result<String>) -> Result<String> {
+fn expression(words: &[String], file: Option<&Path>, stdin: impl FnOnce() -> Result<String>) -> Result<String> {
 	let (expression, from) = match (words, file) {
 		(_, Some(file)) => (read_text(&file.to_string_lossy())?, file.display().to_string()),
 		([dash], None) if dash == "-" => (stdin()?, "stdin".to_owned()),
@@ -244,6 +245,22 @@ fn expression(words: &[String], file: Option<&std::path::Path>, stdin: impl FnOn
 		return Err(format!("{} contains no expression", from).into());
 	}
 	Ok(expression)
+}
+
+enum Place<'a> {
+	Proc(ProcRef),
+	Line(&'a str, u32)
+}
+
+impl<'a> Place<'a> {
+	fn of(text: &'a str) -> Result<Self> {
+		let line = text.rsplit_once(':').and_then(|(file, line)| Some((file, line.parse().ok()?)));
+		match line {
+			Some((file, line)) => Ok(Place::Line(file, line)),
+			None if text.starts_with(['/', '(']) => proc_ref(text).map(Place::Proc),
+			None => Err(format!("invalid location '{}': expected FILE:LINE or /proc/path[#N]", text).into())
+		}
+	}
 }
 
 fn proc_ref(text: &str) -> Result<ProcRef> {
@@ -1264,21 +1281,21 @@ impl World {
 	}
 
 	fn set_breakpoint(&mut self, place: &str, condition: Option<String>, log: Option<Vec<LogPart>>) -> Result<Vec<Bound>> {
-		let (instructions, asked_line) = if place.starts_with(['/', '(']) {
-			let proc = self
-				.find_proc(&proc_ref(place)?)
-				.map_err(|Failure(code, why)| Failure(code, format!("cannot set breakpoint at {}: {}", place, why)))?;
-			(vec![InstructionRef { proc: proc.proc, offset: 0 }], None)
-		} else {
-			let (file, line) = place
-				.rsplit_once(':')
-				.and_then(|(file, line)| Some((file, line.parse::<u32>().ok()?)))
-				.ok_or_else(|| format!("invalid location '{}': expected FILE:LINE or /proc/path[#N]", place))?;
-			let instructions = self.locate(file, line)?;
-			if instructions.is_empty() {
-				return Err(self.nowhere(file, line)?);
+		let (instructions, asked_line) = match Place::of(place)? {
+			Place::Proc(proc) => {
+				let proc = self
+					.find_proc(&proc)
+					.map_err(|Failure(code, why)| Failure(code, format!("cannot set breakpoint at {}: {}", place, why)))?;
+				(vec![InstructionRef { proc: proc.proc, offset: 0 }], None)
 			}
-			(instructions, Some(line))
+			Place::Line(file, line) => {
+				let named = self.name_in_world(file)?;
+				let instructions = self.locate(&named, line)?;
+				if instructions.is_empty() {
+					return Err(self.nowhere(file, &named, line)?);
+				}
+				(instructions, Some(line))
+			}
 		};
 		let trigger = Trigger { condition, hit: None };
 		let mut bound = vec![];
@@ -1305,9 +1322,22 @@ impl World {
 		self.remove_breakpoint(bound.id)
 	}
 
-	fn nowhere(&mut self, file: &str, line: u32) -> Result<Failure> {
+	fn name_in_world(&mut self, file: &str) -> Result<String> {
+		if !Path::new(file).is_absolute() {
+			return Ok(file.to_owned());
+		}
+		let directory = match self.request(Request::WorldInfo)? {
+			Response::WorldInfo { args, cwd, .. } => local::world_dmb(&args, &cwd).and_then(|dmb| dmb.parent().map(Path::to_owned)),
+			_ => None
+		};
+		Ok(directory
+			.and_then(|directory| crate::adapter::files::relative_to(&directory, Path::new(file)))
+			.map_or_else(|| file.to_owned(), |relative| relative.to_string_lossy().replace('\\', "/")))
+	}
+
+	fn nowhere(&mut self, file: &str, named: &str, line: u32) -> Result<Failure> {
 		let lines = match self.request(Request::LinesWithCode {
-			file: file.to_owned(),
+			file: named.to_owned(),
 			start: 0,
 			end: u32::MAX
 		})? {
@@ -1417,7 +1447,7 @@ mod tests {
 		assert_eq!(shown.chars().count(), 200 + "... (1002 characters)".len());
 	}
 
-	use super::{expression, given_text, proc_ref, seconds_text, Failure};
+	use super::{expression, given_text, proc_ref, seconds_text, Failure, Place};
 
 	fn args(args: &[&str]) -> Vec<String> {
 		args.iter().map(|arg| (*arg).to_owned()).collect()
@@ -1479,6 +1509,27 @@ mod tests {
 		assert_eq!((proc.path.as_str(), proc.override_id), ("(in list)", 3));
 		for wrong in ["value", "/value#", "/value#two", "#1"] {
 			assert!(proc_ref(wrong).is_err(), "{}", wrong);
+		}
+	}
+
+	#[test]
+	fn a_place_ending_in_a_line_number_is_a_file() {
+		let line = |text| match Place::of(text) {
+			Ok(Place::Line(file, line)) => Some((file, line)),
+			_ => None
+		};
+		let proc = |text| match Place::of(text) {
+			Ok(Place::Proc(proc)) => Some((proc.path, proc.override_id)),
+			_ => None
+		};
+		assert_eq!(line("code/map.dm:12"), Some(("code/map.dm", 12)));
+		assert_eq!(line("/home/me/world/code/map.dm:12"), Some(("/home/me/world/code/map.dm", 12)));
+		assert_eq!(line("C:\\world\\code\\map.dm:12"), Some(("C:\\world\\code\\map.dm", 12)));
+		assert_eq!(proc("/mob/proc/attack#2"), Some(("/mob/proc/attack".to_owned(), 2)));
+		assert_eq!(proc("/datum/proc/operator:="), Some(("/datum/proc/operator:=".to_owned(), 0)));
+		assert_eq!(proc("(in list)#3"), Some(("(in list)".to_owned(), 3)));
+		for wrong in ["code/map.dm", "code/map.dm:", "code/map.dm:twelve", "map"] {
+			assert!(Place::of(wrong).is_err(), "{}", wrong);
 		}
 	}
 

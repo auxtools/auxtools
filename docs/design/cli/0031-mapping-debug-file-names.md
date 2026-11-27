@@ -33,6 +33,21 @@ time, which may not exist on the current machine.
   is not absolute or the two share no root, such as two Windows drives), the path is sent unchanged
   and the debug server resolves it by suffix.
 
+## How the CLI maps file locations
+
+In `wait pause --break` and `trace`, `Place` parses any location ending in `:` followed by a line
+number as a file and line, regardless of what it starts with. Otherwise, a location starting with
+`/` or `(` is parsed as a proc path. A proc path cannot end in `:` and a line number because a
+definition index is written `#N` and the only proc name with a colon is `operator:=`. Treating
+every location starting with `/` as a proc path would break absolute file paths on Linux, where
+`--break /home/me/proj/code/map.dm:12` would fail with "the world has no proc
+/home/me/proj/code/map.dm:12".
+
+The CLI has no include list. For an absolute file path, `World::name_in_world` asks the world for
+its directory (`WorldInfo`, the directory of the `.dmb`) and sends the path relative to that
+directory, with `..` components where needed, using the same `relative_to` helper. Relative paths
+are sent as written, and an absolute path is sent unchanged if the world's directory is not known.
+
 ## How the debug server matches names
 
 When the debug server looks up a file name, it first checks for an exact match against its recorded
@@ -44,4 +59,5 @@ files.
 
 - `auxtools-cli/src/adapter/files.rs`: `WorldFiles`, `WorldFiles::path`, `WorldFiles::name`,
   `relative_to`, `STALE`
+- `auxtools-cli/src/cli.rs`: `Place`, `World::name_in_world`
 - `debug_server/src/server/code.rs`: `procs_in`

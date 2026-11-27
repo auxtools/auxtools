@@ -34,7 +34,7 @@ use crate::{
 };
 
 mod data;
-mod files;
+pub(crate) mod files;
 mod join;
 mod journal;
 mod lifecycle;
