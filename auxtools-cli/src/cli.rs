@@ -317,14 +317,14 @@ pub struct World {
 	pid: u32,
 	client: Client,
 	events: Vec<Response>,
-	reloaded: bool,
 	notes: Vec<String>,
 	failed_conditions: Vec<String>,
 	show_instruction: bool,
 	json: Option<u32>,
 	waited: Map<String, Value>,
 	patience: Duration,
-	unavailable: Option<String>
+	unavailable: Option<String>,
+	breakpoints_set: u32
 }
 
 impl World {
@@ -334,14 +334,14 @@ impl World {
 			pid,
 			client,
 			events: vec![],
-			reloaded: false,
 			notes: vec![],
 			failed_conditions: vec![],
 			show_instruction: false,
 			json: None,
 			waited: Map::new(),
 			patience: args::DEFAULT_RESPONSE_TIMEOUT,
-			unavailable: None
+			unavailable: None,
+			breakpoints_set: 0
 		})
 	}
 
@@ -502,7 +502,7 @@ impl World {
 				}
 				Response::Notification { message } => self.notes.push(message),
 				Response::ShuttingDown => self.notes.push(WORLD_SHUTTING_DOWN.to_owned()),
-				Response::CodeChanged => self.reloaded = true,
+				Response::CodeChanged => {}
 				Response::ConditionFailed { message } => {
 					eprintln!("{}", message);
 					self.failed_conditions.push(message);
@@ -1003,16 +1003,16 @@ impl World {
 	}
 
 	fn await_pause(&mut self, until: Option<Instant>, hold: bool) -> Result<Option<BreakpointReason>> {
-		self.await_pause_for(until, hold, |_, _| true)
+		self.await_pause_for(until, hold, |_| true)
 	}
 
-	fn await_pause_for(&mut self, until: Option<Instant>, hold: bool, ours: impl Fn(&Stop, bool) -> bool) -> Result<Option<BreakpointReason>> {
+	fn await_pause_for(&mut self, until: Option<Instant>, hold: bool, ours: impl Fn(&Stop) -> bool) -> Result<Option<BreakpointReason>> {
 		let reason = loop {
 			if let Some(i) = self.events.iter().position(|e| matches!(e, Response::BreakpointHit { .. })) {
 				let Response::BreakpointHit(stop) = self.events.remove(i) else {
 					unreachable!()
 				};
-				if !ours(&stop, self.reloaded) {
+				if !ours(&stop) {
 					continue;
 				}
 				break stop.reason;
@@ -1162,14 +1162,13 @@ impl World {
 				.unwrap_or_default();
 		}
 		let paused = self.paused()?;
-		self.reloaded = false;
 		let condition = if wait.changes.is_empty() { wait.condition.clone() } else { None };
-		let mut ours_at = vec![];
+		let mut ours_breakpoints = vec![];
 		let mut ours_watches = vec![];
 		for place in &wait.breaks {
 			for bound in self.set_breakpoint(place, condition.clone(), None)? {
 				self.say_bound(place, &bound);
-				ours_at.push(bound.at.clone());
+				ours_breakpoints.push(bound.id);
 			}
 		}
 		if let (Some(reason), true) = (&paused, wait.changes.is_empty()) {
@@ -1216,10 +1215,10 @@ impl World {
 		}
 		let until = wait.timeout.map(|t| Instant::now() + t);
 		let triggered = !wait.breaks.is_empty() || !wait.changes.is_empty() || wait.runtimes;
-		let ours = |stop: &Stop, reloaded: bool| {
+		let ours = |stop: &Stop| {
 			!triggered
 				|| match &stop.reason {
-					BreakpointReason::Breakpoint => ours_at.contains(&stop.at) || (reloaded && ours_at.iter().any(|at| at.proc == stop.at.proc)),
+					BreakpointReason::Breakpoint => stop.paused_by.iter().any(|id| ours_breakpoints.contains(id)),
 					BreakpointReason::Data { changes } => changes.iter().any(|change| ours_watches.contains(&change.id)),
 					BreakpointReason::Runtime { caught, message } => wait.runtimes && (wait.caught || !caught) && wait.runtime_filter.takes(message),
 					BreakpointReason::Step | BreakpointReason::Pause => false
@@ -1257,10 +1256,12 @@ impl World {
 		let trigger = Trigger { condition, hit: None };
 		let mut bound = vec![];
 		for instruction in instructions {
-			match self.place_breakpoint(&instruction, &trigger, log.clone(), false)? {
+			self.breakpoints_set += 1;
+			let id = self.breakpoints_set;
+			match self.place_breakpoint(id, &instruction, &trigger, log.clone(), false)? {
 				Placed::Set { at, file, line } => bound.push(Bound {
 					place: place.to_owned(),
-					asked: instruction,
+					id,
 					at,
 					file,
 					line,
@@ -1274,7 +1275,7 @@ impl World {
 	}
 
 	fn unset_breakpoint(&mut self, bound: &Bound) -> Result<u32> {
-		self.remove_breakpoint(&bound.asked, false)
+		self.remove_breakpoint(bound.id)
 	}
 
 	fn nowhere(&mut self, file: &str, line: u32) -> Result<Failure> {
@@ -1310,7 +1311,7 @@ impl Asks for World {
 
 struct Bound {
 	place: String,
-	asked: InstructionRef,
+	id: u32,
 	at: InstructionRef,
 	file: Option<String>,
 	line: Option<u32>,

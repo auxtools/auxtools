@@ -264,6 +264,7 @@ var/swap_guard = FALSE
 	n += 2 // @swap_add
 	n *= 3 // @swap_mul
 	return n
+
 var/notify_ready = FALSE
 
 /proc/sc_notify()
@@ -273,3 +274,8 @@ var/notify_ready = FALSE
 		n *= 2
 	return n
 
+/proc/sc_noted()
+	var/n = 1
+	// A comment above a statement
+	n += 1 // @noted_add
+	return n

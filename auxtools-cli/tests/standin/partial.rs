@@ -23,8 +23,7 @@ fn partly_applied() {
 			warnings: vec!["a note".to_owned()],
 			failures: vec!["could not set built-in variable: no".to_owned()],
 			skipped: vec![],
-			resources: vec![],
-			moved: vec![]
+			resources: vec![]
 		})
 	);
 	launcher.wait_output("    warning: a note\n");
