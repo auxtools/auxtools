@@ -101,6 +101,18 @@ var/datum/weak_test_datum
 	for (var/i in 1 to 4096)
 		new /mob/verb/auxtest_verb(M, "auxtest clone [i]")
 
+/proc/auxtest_panics()
+	CRASH()
+
+/proc/auxtest_panic_is_caught(auxtest_dll)
+	var/raised
+	try
+		auxtest_panics()
+	catch(var/exception/e)
+		raised = e.name
+	ASSERT(findtext(raised, "panicked: auxtest asked for this panic"))
+	ASSERT(call_ext(auxtest_dll, "auxtest_ffi_panics")() == "")
+
 /proc/auxtest_hooks()
 	CRASH()
 
@@ -126,6 +138,7 @@ var/datum/weak_test_datum
 	ASSERT(init_result == "SUCCESS")
 
 	ASSERT(auxtest_hooks() == TRUE)
+	auxtest_panic_is_caught(auxtest_dll)
 	ASSERT(auxtest_lists() == TRUE)
 	ASSERT(auxtest_procs() == TRUE)
 	ASSERT(auxtest_strings() == TRUE)

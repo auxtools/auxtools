@@ -304,7 +304,21 @@ extern "C" fn on_runtime(error: *const c_char) {
 	let str = crate::text_of(unsafe { CStr::from_ptr(error) }.to_bytes());
 
 	for func in inventory::iter::<RuntimeErrorHook> {
-		func.0(&str);
+		let _ = crate::guard(|| func.0(&str));
+	}
+}
+
+fn call_hook(hook: ProcHook, src: &Value, usr: &Value, args: Vec<Value>) -> DMResult {
+	crate::guard(|| hook(src, usr, args)).unwrap_or_else(|panic| Err(crate::runtime!("panicked: {}", crate::panic_message(&*panic))))
+}
+
+fn hook_failed(proc_id: raw_types::procs::ProcId, error: &crate::Runtime) {
+	let path = PROC_HOOKS.0.borrow().get(&proc_id).map(|(_, path)| path.clone()).unwrap_or_default();
+	if let (Some(trace), Ok(message)) = (
+		Proc::find("/proc/auxtools_stack_trace"),
+		Value::from_string(format!("{} HookPath: {}", error.message, path))
+	) {
+		let _ = trace.call(&[&message]);
 	}
 }
 
@@ -359,17 +373,14 @@ pub unsafe fn proc_starting(ctx: *mut raw_types::procs::ExecutionContext) {
 		.iter()
 		.map(|v| Value::from_raw(*v))
 		.collect();
-	let result = match hook(&src, &usr, args) {
+	let result = match call_hook(hook, &src, &usr, args) {
 		Ok(r) => {
 			let raw = r.raw;
 			std::mem::forget(r);
 			raw
 		}
 		Err(e) => {
-			let path = PROC_HOOKS.0.borrow()[&proc_id].1.clone();
-			if let Some(trace) = Proc::find("/proc/auxtools_stack_trace") {
-				let _ = trace.call(&[&Value::from_string(format!("{} HookPath: {}", e.message.as_str(), path)).unwrap()]);
-			}
+			hook_failed(proc_id, &e);
 			Value::NULL.raw
 		}
 	};
@@ -408,18 +419,14 @@ extern "C" fn call_proc_by_id_hook(
 		)
 	};
 
-	let result = match hook(&src, &usr, args) {
+	let result = match call_hook(hook, &src, &usr, args) {
 		Ok(r) => {
 			let result_raw = r.raw;
 			std::mem::forget(r);
 			result_raw
 		}
 		Err(e) => {
-			let path = PROC_HOOKS.0.borrow()[&proc_id].1.clone();
-			Proc::find("/proc/auxtools_stack_trace")
-				.unwrap()
-				.call(&[&Value::from_string(format!("{} HookPath: {}", e.message.as_str(), path)).unwrap()])
-				.unwrap();
+			hook_failed(proc_id, &e);
 			Value::NULL.raw
 		}
 	};

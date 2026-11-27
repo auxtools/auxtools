@@ -22,9 +22,12 @@ mod value_from;
 pub mod version;
 mod weak_value;
 
-use std::sync::{
-	atomic::{AtomicBool, AtomicU32, Ordering},
-	Mutex, OnceLock
+use std::{
+	any::Any,
+	sync::{
+		atomic::{AtomicBool, AtomicU32, Ordering},
+		Mutex, OnceLock
+	}
 };
 
 pub use auxtools_impl::{full_shutdown, hook, init, pin_dll, runtime_handler, shutdown};
@@ -84,6 +87,20 @@ fn pin_dll() -> Result<(), ()> {
 	Ok(())
 }
 
+/// Run `work` for a call BYOND made. BYOND calls through `extern "C"` code,
+/// and a panic that unwinds into it aborts the game: the panic ends here, and
+/// its payload is returned. The library runs every callback it is given this
+/// way, except the instruction handler (see [`instruction_hook::set_handler`]).
+pub fn guard<R>(work: impl FnOnce() -> R) -> Result<R, Box<dyn Any + Send>> {
+	std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+}
+
+pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+	let message = payload.downcast_ref::<&str>().copied();
+	let message = message.or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+	message.unwrap_or("no message").to_owned()
+}
+
 static INIT_FAILURE: OnceLock<String> = OnceLock::new();
 
 byond_ffi_fn! { auxtools_init(_input) {
@@ -106,6 +123,10 @@ fn try_init() -> Result<(), String> {
 }
 
 fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), String> {
+	guard(|| init_with(prepare)).unwrap_or_else(|panic| Err(format!("panicked: {}", panic_message(&*panic))))
+}
+
+fn init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), String> {
 	if get_init_level() == InitLevel::None {
 		return Ok(());
 	}
@@ -159,7 +180,9 @@ fn init_full() -> Result<(), String> {
 	Ok(())
 }
 
-/// Called on BYOND's thread by [`init_on_world_load`] each time a world loads
+/// Called on BYOND's thread by [`init_on_world_load`] each time a world loads.
+/// A panic in `prepare` fails the init; one in `ready` or `failed` ends that
+/// call.
 pub struct WorldLoad {
 	pub prepare: fn() -> Result<(), String>,
 	pub ready: fn(),
@@ -255,7 +278,7 @@ pub(crate) fn on_proc_call(proc: raw_types::procs::ProcId, src: raw_types::value
 	PROC_CALLS.store(PROC_CALLS.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
 	if PROC_CALL_WORK_PENDING.load(Ordering::Relaxed) {
 		let work = std::mem::take(&mut *PROC_CALL_WORK.lock().unwrap());
-		let waiting: Vec<_> = work.into_iter().filter(|work| !work()).collect();
+		let waiting: Vec<_> = work.into_iter().filter(|&work| !guard(work).unwrap_or(true)).collect();
 		let mut queue = PROC_CALL_WORK.lock().unwrap();
 		queue.extend(waiting);
 		PROC_CALL_WORK_PENDING.store(!queue.is_empty(), Ordering::Relaxed);
@@ -285,13 +308,13 @@ pub(crate) fn on_proc_call(proc: raw_types::procs::ProcId, src: raw_types::value
 	match try_init_with(Some(on_load.prepare)) {
 		Ok(()) => {
 			*STARTING.lock().unwrap() = Some(proc);
-			(on_load.ready)();
+			let _ = guard(on_load.ready);
 			*STARTING.lock().unwrap() = None;
 		}
 		Err(e) => {
 			hooks::clear_hooks();
 			proc::clear_procs();
-			(on_load.failed)(&e);
+			let _ = guard(|| (on_load.failed)(&e));
 		}
 	}
 	START_RUNS_NEW.swap(u32::MAX, Ordering::Relaxed) == proc.0
