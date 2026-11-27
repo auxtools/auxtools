@@ -3,13 +3,16 @@
 #
 #     ci/fetch-byond.sh VERSION linux|windows DIRECTORY
 #
-# DIRECTORY/byond is the build afterwards, the directory with bin/ in it.
+# VERSION is a full BYOND build (such as 516.1689) listed in ci/byond.sha256.
+# The build is unpacked into DIRECTORY/byond (containing bin/). If DIRECTORY
+# already holds this build, the script leaves it untouched. Otherwise, it
+# deletes and recreates DIRECTORY.
 #
 # Tries the BYOND build mirror first (override with BYOND_MIRROR), then
 # byond.com, and verifies the SHA-256 checksum against ci/byond.sha256 before
 # unpacking.
 set -eu
-[ $# -eq 3 ] || { sed -n '2,6p' "$0" >&2; exit 2; }
+[ $# -eq 3 ] || { sed -n '2,13p' "$0" >&2; exit 2; }
 version=$1 os=$2 dest=$3
 case "$os" in
 	linux) zip=${version}_byond_linux.zip ;;

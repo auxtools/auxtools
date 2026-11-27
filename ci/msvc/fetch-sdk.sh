@@ -1,6 +1,6 @@
 #!/bin/sh
-# Fetch Microsoft C runtime and Windows SDK headers/import libraries
-# for Linux cross-compilation to i686-pc-windows-msvc.
+# Fetch the Microsoft C runtime and Windows SDK headers and import libraries
+# for cross-compiling to i686-pc-windows-msvc on Linux:
 #
 #     ci/msvc/fetch-sdk.sh DIRECTORY
 #
@@ -12,7 +12,7 @@
 # Running this script accepts Microsoft's license:
 # https://go.microsoft.com/fwlink/?LinkId=2086102
 set -eu
-[ $# -eq 1 ] || { sed -n '2,8p' "$0" >&2; exit 2; }
+[ $# -eq 1 ] || { sed -n '2,13p' "$0" >&2; exit 2; }
 dest=$1
 
 XWIN_VERSION=0.10.0

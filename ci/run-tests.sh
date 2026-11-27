@@ -3,23 +3,24 @@
 #
 #     ci/run-tests.sh PROGRAMS BYOND [TEST...]
 #
-# PROGRAMS contains test binaries, launcher and debug library; the debug
-# library has to be one built with `--features debug_server/test-commands`,
-# for the console commands the suites inspect a world with. BYOND is
-# the installation directory containing bin/. Run from the repository root.
+# PROGRAMS contains the test binaries, the launcher, and the debug library
+# (built with --features debug_server/test-commands so the suites can inspect
+# worlds through test console commands). BYOND is the installation directory
+# containing bin/. Run this script from the repository root.
 #
 # Set WINE=wine to run Windows binaries on Linux.
 #
-# The tests run side by side, each in target/run-tests/TEST with its own
-# copy of the test worlds, and each prints its output when it ends. A test
-# still running after TIMEOUT seconds (900) is ended and fails. Set SERIAL=1
-# to run them one at a time from the repository root, with no time limit.
+# Suites run in parallel, each in target/run-tests/TEST with its own copy of
+# the test worlds, printing output when finished. Any suite still running
+# after TIMEOUT seconds [default: 900] is terminated and marked failed. Set
+# SERIAL=1 to run suites one at a time from the repository root with no
+# timeout.
 #
 # With no TEST arguments, runs all integration suites and, if the directory
 # PROGRAMS/unit exists, also runs every unit test binary under it one at a
 # time from the matching repository directory. Exits with 1 if any test fails.
 set -u
-[ $# -ge 2 ] || { sed -n '2,16p' "$0" >&2; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,22p' "$0" >&2; exit 2; }
 programs=$(cd "$1" && pwd) || exit 2
 byond=$(cd "$2" && pwd) || exit 2
 shift 2
