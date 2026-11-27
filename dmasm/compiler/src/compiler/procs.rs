@@ -405,6 +405,99 @@ pub(super) fn member_var<'a>(
     ty.get_var_declaration(name).filter(|d| !d.ty().is_root())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum After {
+    Typed,
+    Index,
+    Call,
+}
+
+impl After {
+    pub(super) fn of(follow: &dreammaker::ast::Follow) -> After {
+        match follow {
+            dreammaker::ast::Follow::Index(..) => After::Index,
+            _ => After::Typed,
+        }
+    }
+}
+
+pub(super) fn field_var<'a>(
+    compiler: &Compiler<'a>,
+    ty: Option<TypeRef<'a>>,
+    kind: dreammaker::ast::PropertyAccessKind,
+    name: &str,
+    after: After,
+) -> Option<dreammaker::objtree::VarDeclarationRef<'a>> {
+    use dreammaker::ast::PropertyAccessKind;
+    match (kind, after) {
+        (PropertyAccessKind::Scope, _) => ty.and_then(|t| member_var(t, name)),
+        (_, After::Index) => colon_var(compiler, None, name),
+        (PropertyAccessKind::Colon | PropertyAccessKind::SafeColon, After::Call) => {
+            colon_var(compiler, None, name)
+        }
+        (PropertyAccessKind::Colon | PropertyAccessKind::SafeColon, After::Typed) => {
+            colon_var(compiler, ty, name)
+        }
+        (PropertyAccessKind::Dot | PropertyAccessKind::SafeDot, After::Call) => match ty {
+            Some(t) => member_var(t, name),
+            None => colon_var(compiler, None, name),
+        },
+        (PropertyAccessKind::Dot | PropertyAccessKind::SafeDot, After::Typed) => {
+            ty.and_then(|t| member_var(t, name))
+        }
+    }
+}
+
+pub(super) fn call_result<'a>(
+    compiler: &Compiler<'a>,
+    receiver: Option<TypeRef<'a>>,
+    access: dreammaker::ast::PropertyAccessKind,
+    name: &str,
+) -> (Option<TypeRef<'a>>, After) {
+    use dreammaker::ast::{ProcReturnType, PropertyAccessKind};
+    let ty = match receiver {
+        Some(t)
+            if matches!(
+                access,
+                PropertyAccessKind::Colon | PropertyAccessKind::SafeColon
+            ) =>
+        {
+            Some(colon_proc_type(t, name).unwrap_or(t))
+        }
+        Some(t) => Some(t),
+        None => first_declaring_type(compiler.proc.tree, name),
+    };
+    let Some(declaration) = ty.and_then(|t| t.get_proc_declaration(name)) else {
+        return (None, After::Typed);
+    };
+    if declaration.location.file == dreammaker::FileId::BUILTINS {
+        return (None, After::Typed);
+    }
+    let returned = match &declaration.return_type {
+        ProcReturnType::TypePath(path) => find_type(compiler, &path.to_string()),
+        ProcReturnType::InputType(_) => None,
+    };
+    (returned, After::Call)
+}
+
+pub(super) fn start_type<'a>(
+    compiler: &Compiler<'a>,
+    term: &dreammaker::ast::Term,
+) -> (Option<TypeRef<'a>>, After) {
+    use dreammaker::ast::{PropertyAccessKind, Term};
+    match term {
+        Term::Call(name, _) => {
+            let ctx = &compiler.proc;
+            let receiver = match ctx.ty.get_proc(name.as_str()) {
+                Some(_) => ctx.ty,
+                None => ctx.tree.root(),
+            };
+            call_result(compiler, Some(receiver), PropertyAccessKind::Dot, name)
+        }
+        _ => (term_type(compiler, term), After::Typed),
+    }
+}
+
 pub(super) fn colon_var<'a>(
     compiler: &Compiler<'a>,
     ty: Option<TypeRef<'a>>,
@@ -609,19 +702,18 @@ pub(super) fn field_globals(
     compiler: &Compiler,
     expr: &dreammaker::ast::Expression,
 ) -> Vec<Option<String>> {
-    use dreammaker::ast::{Expression, Follow, PropertyAccessKind, Term};
+    use dreammaker::ast::{Expression, Follow, Term};
     let Expression::Base { term, follow } = expr else {
         return vec![];
     };
     let global = matches!(&term.elem, Term::Ident(i) if i.as_str() == "global");
-    let mut ty = match global {
-        true => None,
-        false => term_type(compiler, &term.elem),
+    let (mut ty, mut after) = match global {
+        true => (None, After::Typed),
+        false => start_type(compiler, &term.elem),
     };
     let mut found = vec![];
-    let mut indexed = false;
     for (i, f) in follow.iter().enumerate() {
-        let after_index = std::mem::replace(&mut indexed, matches!(f.elem, Follow::Index(..)));
+        let before = std::mem::replace(&mut after, After::of(&f.elem));
         let (kind, name) = match &f.elem {
             Follow::Field(kind, name) => (kind, name),
             Follow::Index(..) => {
@@ -629,16 +721,20 @@ pub(super) fn field_globals(
                 ty = None;
                 continue;
             }
+            Follow::Call(access, name, _) => {
+                found.push(None);
+                let receiver = match global && i == 0 {
+                    true => Some(compiler.proc.tree.root()),
+                    false => ty,
+                };
+                (ty, after) = call_result(compiler, receiver, *access, name.as_str());
+                continue;
+            }
             _ => break,
         };
         let decl = match kind {
             _ if global && i == 0 => compiler.proc.tree.root().get_var_declaration(name),
-            PropertyAccessKind::Scope => ty.and_then(|t| member_var(t, name.as_str())),
-            _ if after_index => colon_var(compiler, None, name.as_str()),
-            PropertyAccessKind::Colon | PropertyAccessKind::SafeColon => {
-                colon_var(compiler, ty, name.as_str())
-            }
-            _ => ty.and_then(|t| member_var(t, name.as_str())),
+            _ => field_var(compiler, ty, *kind, name.as_str(), before),
         };
         found.push(
             decl.filter(|d| !d.ty().is_root() && is_global_member(d))

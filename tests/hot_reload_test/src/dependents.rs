@@ -320,6 +320,39 @@ pub fn dependents(built: Built) {
 		"a proc dmasm can't compile that reads a const through a retyped var isn't refused"
 	);
 	println!("ok: a reload is refused for a proc dmasm can't compile that reads a const through a var declared with another type");
+
+	let read = "\"[dep_safe_index(new /datum/dep_safe_index_holder)] [isnull(dep_safe_index(null))]\"";
+	assert_eq!(eval(&mut client, read), "\"9 1\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"\treturn holder?.items[1].DEP_SAFE_INDEX",
+		"\treturn 0 || holder?.items[1].DEP_SAFE_INDEX"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, read),
+		"\"9 1\"",
+		"recompiled holder?.items[1].name doesn't read the var DreamMaker reads"
+	);
+	println!("ok: recompiled holder?.items[1].name reads the var DreamMaker reads, and null for a null holder");
+
+	assert_eq!(eval(&mut client, "dep_call_colon()"), "5");
+	let refused = refused_edit(
+		&mut source,
+		"dependents.dm",
+		"/datum/dep_call_colon_later\n",
+		"/datum/dep_call_colon_later\n\tvar/const/DEP_CALL_COLON = 9\n"
+	);
+	let shown: Vec<String> = refused.iter().map(|r| format!("{:#}", r)).collect();
+	assert_eq!(
+		shown,
+		[
+			"/dep_call_colon: reads a variable via `x:name` that another type now declares, so it must be recompiled, but it failed to compile: \
+			 unsupported: `type::proc()` targeting a type's second or later override"
+		],
+		"a proc dmasm can't compile that reads make():name from another type after the reload isn't refused"
+	);
+	println!("ok: a reload is refused for a proc dmasm can't compile that reads make():name from another type");
 }
 
 fn refused_edit(source: &mut Source, file: &str, from: &str, to: &str) -> Vec<dmasm::reload::Refusal> {
