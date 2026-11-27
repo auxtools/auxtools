@@ -43,6 +43,7 @@ var/early_global = early_value()
 		if (idle_ticks)
 			var/idle = idle_ticks
 			idle_ticks = 0
+			world.log << "dap: idling"
 			sleep(idle)
 			world.log << "dap: idle over"
 		sleep(world.tick_lag)

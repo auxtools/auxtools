@@ -269,6 +269,10 @@ impl Launcher {
 		self.events.iter().any(|e| e["event"] == name)
 	}
 
+	pub fn drop_earlier_events(&mut self, name: &str) {
+		self.events.retain(|e| e["event"] != name);
+	}
+
 	pub fn drop_events(&mut self, name: &str) {
 		self.has_event(name);
 		self.events.retain(|e| e["event"] != name);
