@@ -314,6 +314,7 @@ pub struct Adapter {
 	breakpoint_texts: HashMap<String, Option<Vec<String>>>,
 	unsaved: HashSet<String>,
 	world_texts: HashMap<String, Option<Vec<String>>>,
+	caught_up: Option<code::Texts>,
 	world_as_of: Option<std::time::SystemTime>,
 	deferred: HashSet<String>,
 	waiting: HashSet<String>,
@@ -402,6 +403,7 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 		reload_seen: None,
 		reloaded_resources: vec![],
 		world_texts: HashMap::new(),
+		caught_up: None,
 		world_as_of: None,
 		said_changed: HashSet::new(),
 		next_breakpoint_id: 1,
@@ -756,13 +758,7 @@ impl Adapter {
 			self.progress_end(READING);
 		}
 		match event {
-			code::Event::Changed(texts) => {
-				self.world_as_of = self.reload_seen.take().or_else(|| Some(std::time::SystemTime::now()));
-				if self.code_read && !self.world.waiting_for_code && self.debuggee.is_some() && self.debugging {
-					self.reapply_breakpoints(texts.as_ref());
-				}
-				self.code_read = true;
-			}
+			code::Event::Changed(texts) => self.code_changed(texts.as_ref()),
 			code::Event::Failed(e) => {
 				self.out.console(format!("Hot reload disabled: could not parse source: {}", e));
 				self.reload_state("off", Some(format!("could not parse source: {}", e)));
@@ -777,6 +773,9 @@ impl Adapter {
 			code::Event::Ready => {
 				if self.world.waiting_for_code {
 					self.world.waiting_for_code = false;
+					if let Some(texts) = self.caught_up.take() {
+						self.reapply_breakpoints(Some(&texts));
+					}
 					self.ready();
 				}
 			}
@@ -793,7 +792,8 @@ impl Adapter {
 				request,
 				summary,
 				notes,
-				world
+				world,
+				texts
 			} => {
 				let applied = if self.debuggee.as_ref().is_some_and(|d| d.generation != world) {
 					self.out.console(format!(
@@ -805,6 +805,9 @@ impl Adapter {
 					self.reload_seen = Some(std::time::SystemTime::now());
 					self.reload(*request, &summary, notes)
 				};
+				if let Some(texts) = texts.filter(|_| applied) {
+					self.code_changed(Some(&texts));
+				}
 				if let Some(code) = &self.code {
 					let _ = code.send(code::Command::Resources(std::mem::take(&mut self.reloaded_resources)));
 					let _ = code.send(code::Command::Reloaded(applied));
@@ -817,7 +820,10 @@ impl Adapter {
 				self.reload_state("failed", Some(summary.clone()));
 				self.journal_reload(false, summary, errors, texts(&warnings));
 			}
-			code::Event::NothingChanged { warnings } => {
+			code::Event::NothingChanged { warnings, texts: read } => {
+				if let Some(read) = read {
+					self.code_changed(Some(&read));
+				}
 				self.reload_state("reloaded", Some("no changes to the running code".to_owned()));
 				self.journal_reload(true, "no runtime changes".to_owned(), vec![], texts(&warnings));
 			}
@@ -852,6 +858,18 @@ impl Adapter {
 				}
 			}
 		}
+	}
+
+	fn code_changed(&mut self, texts: Option<&code::Texts>) {
+		self.world_as_of = self.reload_seen.take().or_else(|| Some(std::time::SystemTime::now()));
+		if self.code_read && self.debuggee.is_some() && self.debugging {
+			match (self.world.waiting_for_code, texts) {
+				(false, _) => self.reapply_breakpoints(texts),
+				(true, Some(texts)) => self.caught_up.get_or_insert_default().extend(texts.clone()),
+				(true, None) => {}
+			}
+		}
+		self.code_read = true;
 	}
 
 	fn give_macros(&mut self) {

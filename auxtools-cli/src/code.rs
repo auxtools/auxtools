@@ -38,6 +38,12 @@ pub struct Options {
 
 pub type Texts = HashMap<PathBuf, Option<Vec<String>>>;
 
+#[derive(Default)]
+struct Read {
+	defines: Option<Vec<(String, Option<String>)>>,
+	texts: Option<Texts>
+}
+
 pub enum Event {
 	Changed(Option<Texts>),
 	Failed(String),
@@ -51,7 +57,8 @@ pub enum Event {
 		request: Box<HotReloadRequest>,
 		summary: Summary,
 		notes: Vec<Diagnostic>,
-		world: u64
+		world: u64,
+		texts: Option<Texts>
 	},
 	NotReloaded {
 		summary: String,
@@ -60,7 +67,8 @@ pub enum Event {
 		warnings: Vec<Diagnostic>
 	},
 	NothingChanged {
-		warnings: Vec<Diagnostic>
+		warnings: Vec<Diagnostic>,
+		texts: Option<Texts>
 	},
 	Macros(Vec<Macro>),
 	Skin {
@@ -339,7 +347,10 @@ impl Code {
 			if let Ok(reload) = current.reload_files(&self.root, &files) {
 				let texts = self.still_read(read);
 				watching.edited_since_built.extend(changed);
-				return match self.reload(&reload.changes, current, vec![], false, true, None) {
+				return match self.reload(&reload.changes, current, vec![], false, true, Read {
+					defines: None,
+					texts: Some(texts)
+				}) {
 					None => false,
 					Some(true) => {
 						let current = match watching.applied.as_mut() {
@@ -348,7 +359,6 @@ impl Code {
 						};
 						current.keep(reload);
 						self.watch_named(watching);
-						self.send(Event::Changed(Some(texts)));
 						true
 					}
 					Some(false) => true
@@ -384,12 +394,14 @@ impl Code {
 			vec![],
 			false,
 			true,
-			read_with
+			Read {
+				defines: read_with,
+				texts: Some(texts)
+			}
 		) {
 			None => false,
 			Some(true) => {
 				self.watch_named(watching);
-				self.send(Event::Changed(Some(texts)));
 				let given = self.give_macros(Some(&new));
 				watching.applied = Some(new);
 				watching.applied_as = Some(selected);
@@ -492,11 +504,13 @@ impl Code {
 		}
 
 		let looked_at = watching.files.unchanged(&self.root);
+		let read = self.read_texts(&watching.edited_since_built);
 		if looked_at && !other_defines && watching.edited_since_built.len() <= MOST_ALONE {
 			let mut files: Vec<&Path> = watching.edited_since_built.iter().map(PathBuf::as_path).collect();
 			files.sort();
 			if let Ok(reload) = watching.built.reload_files(&self.root, &files) {
-				let Some(applied) = self.reload(&reload.changes, &watching.built, vec![], true, true, None) else {
+				let texts = Some(self.still_read(read));
+				let Some(applied) = self.reload(&reload.changes, &watching.built, vec![], true, true, Read { defines: None, texts }) else {
 					return false;
 				};
 				if applied {
@@ -526,7 +540,8 @@ impl Code {
 		refuse_hidden(&watching.built, &current, &mut changes);
 		refuse_other_maps(&watching.built, &current, &mut changes);
 		let read_with = other_defines.then(|| selected.clone());
-		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, true, read_with) else {
+		let texts = Some(self.still_read(read));
+		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, true, Read { defines: read_with, texts }) else {
 			return false;
 		};
 		if applied {
@@ -587,7 +602,10 @@ impl Code {
 			});
 		}
 		self.reloaded_resources.borrow_mut().clear();
-		match self.reload(&changes, current, resources, false, false, None) {
+		match self.reload(&changes, current, resources, false, false, Read {
+			defines: None,
+			texts: Some(Texts::new())
+		}) {
 			None => false,
 			Some(true) => {
 				let reloaded = self.reloaded_resources.take();
@@ -598,7 +616,7 @@ impl Code {
 						None => watching.resources.shown(path, *crc)
 					}
 				}
-				self.send(Event::Changed(Some(Texts::new())))
+				true
 			}
 			Some(false) => true
 		}
@@ -701,8 +719,9 @@ impl Code {
 		resources: Vec<HotReloadResource>,
 		restarted: bool,
 		whole: bool,
-		read_with: Option<Vec<(String, Option<String>)>>
+		read: Read
 	) -> Option<bool> {
+		let Read { defines: read_with, texts } = read;
 		let applies_now = |deferred: &&Refusal| restarted && deferred.until == Until::Reboot;
 		let changes_nothing = changes.refused.is_empty()
 			&& changes.deferred.is_empty()
@@ -757,7 +776,8 @@ impl Code {
 				*self.running_defines.borrow_mut() = defines;
 			}
 			let sent = self.send(Event::NothingChanged {
-				warnings: changes.warnings.clone()
+				warnings: changes.warnings.clone(),
+				texts
 			});
 			return (sent && self.refused_by(vec![], whole)).then_some(true);
 		}
@@ -766,7 +786,8 @@ impl Code {
 			request: Box::new(request),
 			summary: Summary::of(changes).with_resources(files),
 			notes,
-			world: self.world.get()
+			world: self.world.get(),
+			texts
 		}) {
 			return None;
 		}
@@ -1286,7 +1307,8 @@ mod tests {
 	struct Prepared {
 		summary: String,
 		plan: String,
-		world: u64
+		world: u64,
+		texts: Option<Texts>
 	}
 
 	const BYOND: (u32, u32) = (516, 1689);
@@ -1358,10 +1380,17 @@ mod tests {
 
 		fn prepared(&self) -> Prepared {
 			self.next("reload", |event| match event {
-				Event::Reload { request, summary, world, .. } => Some(Prepared {
+				Event::Reload {
+					request,
+					summary,
+					world,
+					texts,
+					..
+				} => Some(Prepared {
 					summary: summary.text(&[]),
 					plan: format!("{:#?}", request.plan),
-					world: *world
+					world: *world,
+					texts: texts.clone()
 				}),
 				Event::NotReloaded { summary, refused, .. } => panic!("not reloaded: {summary}: {refused:?}"),
 				Event::NothingChanged { .. } => panic!("nothing changed"),
@@ -1378,23 +1407,15 @@ mod tests {
 			}
 		}
 
-		fn changed(&self) -> Texts {
-			self.commands.send(Command::Reloaded(true)).unwrap();
-			self.next("changed", |event| match event {
-				Event::Changed(Some(texts)) => Some(texts.clone()),
-				Event::Changed(None) => panic!("changed without the texts reloaded"),
-				_ => None
-			})
-		}
-
-		fn nothing_changed(&self) {
-			self.next("no changes", |event| match event {
-				Event::NothingChanged { .. } => Some(()),
+		fn nothing_changed(&self) -> Option<Texts> {
+			let texts = self.next("no changes", |event| match event {
+				Event::NothingChanged { texts, .. } => Some(texts.clone()),
 				Event::Reload { summary, .. } => panic!("reloaded: {}", summary.text(&[])),
 				Event::NotReloaded { summary, refused, .. } => panic!("not reloaded: {summary}: {refused:?}"),
 				_ => None
 			});
 			self.next("looked", |event| matches!(event, Event::Looked).then_some(()));
+			texts
 		}
 
 		fn write(&self, file: &str, text: &str) {
@@ -1530,12 +1551,22 @@ mod tests {
 		let lines = |text: &str| Some(text.lines().map(str::to_owned).collect::<Vec<_>>());
 		let read = body("a", "world.log << 2\n\treturn 2");
 		worker.write("a", &read);
-		worker.prepared();
+		let first = worker.prepared();
 		let again = body("a", "world.log << 3\n\tworld.log << 3\n\treturn 3");
 		worker.write("a", &again);
-		assert_eq!(worker.changed(), Texts::from([(path.clone(), lines(&read))]));
-		worker.prepared();
-		assert_eq!(worker.changed(), Texts::from([(path, lines(&again))]));
+		assert_eq!(first.texts, Some(Texts::from([(path.clone(), lines(&read))])));
+		worker.applied(false);
+		assert_eq!(worker.prepared().texts, Some(Texts::from([(path, lines(&again))])));
+	}
+
+	#[test]
+	fn a_save_with_nothing_to_reload_says_what_text_it_read() {
+		let worker = Worker::start("texts-unchanged");
+		let path = worker.project.root.join("code/a.dm");
+		let text = body("a", "return 1 // one");
+		worker.write("a", &text);
+		let lines = Some(text.lines().map(str::to_owned).collect::<Vec<_>>());
+		assert_eq!(worker.nothing_changed(), Some(Texts::from([(path, lines)])));
 	}
 
 	#[test]

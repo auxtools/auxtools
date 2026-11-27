@@ -405,6 +405,36 @@ fn starting_at_world_new() {
 	world.end();
 }
 
+fn edited_during_a_reboot() {
+	let (mut world, _dir) = watched_world("edited_during_a_reboot");
+	let at = world.marks.clone();
+	world.break_on(&["leaf_2"]);
+	let before = at.line("leaf_2");
+	edit(
+		&mut world,
+		"main.dm",
+		"/proc/sc_reboot()\n",
+		"/proc/sc_edit_and_reboot()\n\tvar/text = file2text(\"stepping.dm\")\n\tfdel(\"stepping.dm\")\n\ttext2file(replacetext(text, \
+		 \"/proc/leaf(x)\\n\", \"/proc/above()\\n\\treturn 1\\n\\n/proc/leaf(x)\\n\"), \
+		 \"stepping.dm\")\n\ttext2file(\"\\n/proc/appended()\\n\\treturn 1\\n\", \"main.dm\")\n\tworld.Reboot()\n\n/proc/sc_reboot()\n"
+	);
+	let restarts = world.output.matches("Reconnected to the world").count();
+	world.run("edit_and_reboot");
+	rebooted(&mut world, 2, restarts);
+	assert_eq!(at.line("leaf_2"), before + 3);
+	assert_eq!(moved(&mut world), (before + 3, true));
+	let set = world.try_break_if(&[("leaf_2", ""), ("early_value", "")]);
+	assert_eq!((&set[0]["line"], &set[0]["verified"]), (&json!(before + 3), &json!(true)), "{}", set[0]);
+	assert_eq!(set[1]["verified"], true, "{}", set[1]);
+	world.run("middle");
+	world.stop_on("breakpoint", "/leaf", "leaf_2");
+	world.resume();
+	world.stop_on("breakpoint", "/leaf", "leaf_2");
+	world.resume_through("middle");
+	ok("breakpoints follow an edit read after a reboot");
+	world.end();
+}
+
 fn types_changed_before_reboot() {
 	let (mut world, _dir) = watched_world("types_changed_before_reboot");
 	edit(
@@ -1449,11 +1479,50 @@ fn nothing_to_run() {
 	world.end();
 }
 
+fn saved(world: &mut World, file: &str, old: &str, new: &str, outcome: &str) {
+	let before = world.count(outcome);
+	world.marks.edit(file, old, new);
+	world.wait_until(outcome, |output| output.matches(outcome).count() > before);
+}
+
+const NOTHING: &str = "Hot reload: no changes to the running code";
+const REFUSED: &str = "Hot reload requires a rebuild";
+
+fn saves_with_nothing_to_reload() {
+	let (mut world, _dir) = watched_world("nothing_to_reload");
+	world.break_on(&["leaf_1"]);
+	saved(&mut world, "stepping.dm", "/proc/leaf(x)\n", "/proc/leaf(x) // doubles x + 1\n", NOTHING);
+	world.break_on(&["leaf_2"]);
+	world.run("middle");
+	world.stop_on("breakpoint", "/leaf", "leaf_2");
+	world.break_on(&[]);
+	world.resume_through("middle");
+	ok("breakpoint set after a save that changes only a comment");
+
+	saved(
+		&mut world,
+		"errors.dm",
+		"\tvar/zero = 0\n",
+		"\tvar/zero = 0\n\tvar/list/broken = (\n",
+		REFUSED
+	);
+	saved(&mut world, "errors.dm", "\tvar/list/broken = (\n", "", NOTHING);
+	world.break_on(&["fail_caught_here"]);
+	world.run("fail_caught_here");
+	world.stop_on("breakpoint", "/fail_caught_here", "fail_caught_here");
+	world.break_on(&[]);
+	world.resume_through("fail_caught_here");
+	ok("breakpoint set after a refused save is undone");
+	world.end();
+}
+
 pub fn edits() {
 	saved_without_reloading();
 	behind_the_clients_back();
 	starting_at_world_new();
 	types_changed_before_reboot();
+	saves_with_nothing_to_reload();
+	edited_during_a_reboot();
 }
 
 const STARTS_AT_AN_AREA: &str = "/area
