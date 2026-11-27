@@ -121,16 +121,19 @@ Exit codes:
 		usage: "auxtools [--pid PID] stop [--timeout SECONDS] [--kill [--kill-timeout SECONDS]] [--json]",
 		arguments: "",
 		sections: "Behavior:
-  Calls world.Del(). A world started by launch also shuts down its launcher.
-  If world.Del() returns without ending the world, the debugger still shuts
-  down. In a launched world, a runtime error in world.Del() leaves the debugger
-  running, and stop reports the failure.
-  Pass --kill with the first stop command. After world.Del() runs, the
-  debugger may be gone, and a second stop may not reach the world.
-  With --kill, the command terminates the process when --timeout passes, or at
-  once when world.Del() fails. If the debug library could not start,
-  world.Del() cannot run, and the command terminates the process at once.
-  After termination, the process must exit within --kill-timeout.
+  Calls world.Del(), which also shuts down the launcher if the world was
+  started by launch. If world.Del() returns without ending the world, the
+  debug server still shuts down. In a launched world, an uncaught runtime
+  error in world.Del() leaves the debug server running and stop reports the
+  failure.
+
+  Pass --kill to terminate the process if --timeout expires or world.Del()
+  fails with a runtime error. You can also retry with --kill as long as the
+  debug server remains reachable.
+
+  If the debug library could not start, world.Del() cannot run, so stop
+  terminates the process immediately even without --kill. After termination,
+  the process must exit within --kill-timeout (5 seconds by default).
 
 Output:
   JSON contains pid, stopped, and killed (true when the process was forcibly
