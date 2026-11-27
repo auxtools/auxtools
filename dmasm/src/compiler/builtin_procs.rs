@@ -1,334 +1,56 @@
 use dreammaker::ast::{AssignOp, Expression, Term};
 
+use super::builtins::{self, Param, Value};
 use crate::{
     compiler::{args, CompileError, Compiler, EvalKind},
     operands::{self, DMString, Label, Variable},
     Instruction,
 };
 
-#[allow(non_camel_case_types)]
-enum DefaultValue {
-    null,
-    Number(f32),
-}
-
-impl DefaultValue {
-    fn into_value(self) -> operands::Value {
-        match self {
-            Self::null => operands::Value::Null,
-            Self::Number(val) => operands::Value::Number(val),
-        }
-    }
-}
-
-impl From<i32> for DefaultValue {
-    fn from(val: i32) -> Self {
-        Self::Number(val as f32)
-    }
-}
-
-impl From<f32> for DefaultValue {
-    fn from(val: f32) -> Self {
-        Self::Number(val)
-    }
-}
-
-macro_rules! simple_stack_procs {
-    (
-        $(
-            /proc/$proc_name:ident
-            (
-                $(
-                    $param_name:ident
-                    $(
-                        = $param_default:tt
-                    )?
-                ),* $(,)?
-            ) => $instruction:expr
-        ),* $(,)?
-    ) => {
-        fn eval_simple_stack_procs(
-            compiler: &mut Compiler<'_>,
-            name: &str,
-            args: &Vec<Expression>,
-        ) -> Result<Option<EvalKind>, CompileError> {
-            match name {
-                $(
-                    stringify!($proc_name) => {
-                        #[allow(unused_mut)]
-                        let mut arg_idx = 0;
-                        let arg_count = args.len();
-
-                        args::emit_normal(compiler, args::ArgsContext::Proc, args.to_owned())?;
-
-                        $(
-                            arg_idx += 1;
-
-                            if arg_count < arg_idx {
-                                #[allow(unused)]
-                                let mut default: Option<DefaultValue> = None;
-
-                                $(
-                                    #[allow(unused_imports)]
-                                    use DefaultValue::null;
-                                    default = Some(DefaultValue::from($param_default));
-                                )?
-
-                                match default {
-                                    Some(DefaultValue::Number(n)) if n.fract() == 0.0 && n.abs() < 1e9 => {
-                                        compiler.emit_ins(Instruction::PushInt(n as i32));
-                                    }
-                                    Some(default) => {
-                                        compiler.emit_ins(Instruction::PushVal(default.into_value()));
-                                    }
-
-                                    None => {
-                                        return Err(CompileError::MissingArgument {
-                                            proc: stringify!($proc_name).to_owned(),
-                                            index: arg_idx as u32,
-                                        });
-                                    }
-                                }
-                            }
-                        )*
-
-                        if arg_count > arg_idx {
-                            return Err(CompileError::TooManyArguments {
-                                proc: stringify!($proc_name).to_owned(),
-                                expected: arg_idx as u32,
-                            });
-                        }
-
-                        compiler.emit_ins(super::versions::instruction(compiler.byond, $instruction));
-                        Ok(Some(EvalKind::Stack))
-                    }
-                )*
-
-                _ => Ok(None),
+fn emit_stack(
+    compiler: &mut Compiler<'_>,
+    name: &str,
+    params: &[Param],
+    ins: &Instruction,
+    args: &[Expression],
+) -> Result<(), CompileError> {
+    push_args(compiler, args)?;
+    for (at, param) in params.iter().enumerate().skip(args.len()) {
+        match param {
+            Param::Int(default) => compiler.emit_ins(Instruction::PushInt(*default)),
+            Param::Null => push_null(compiler),
+            Param::Required => {
+                return Err(CompileError::MissingArgument {
+                    proc: name.to_owned(),
+                    index: at as u32 + 1,
+                })
             }
         }
     }
-}
-
-simple_stack_procs! {
-    /proc/abs(val) => Instruction::Abs,
-    /proc/alert(param_1, param_2 = null, param_3 = null, param_4 = null, param_5 = null, param_6 = null) => Instruction::Alert,
-    /proc/arccos(val) => Instruction::ArcCos,
-    /proc/arcsin(val) => Instruction::ArcSin,
-    /proc/ascii2text(val) => Instruction::Ascii2Text,
-    /proc/bounds_dist(ref, target) => Instruction::BoundsDist,
-    /proc/ckey(text) => Instruction::CKey,
-    /proc/cKey(text) => Instruction::CKeyEx,
-    /proc/ckeyEx(text) => Instruction::CKeyEx,
-    /proc/clamp(val, low, high) => Instruction::Clamp,
-    /proc/floor(val) => Instruction::Round,
-    /proc/ceil(val) => Instruction::Ceil,
-    /proc/trunc(val) => Instruction::Trunc,
-    /proc/fract(val) => Instruction::Fract,
-    /proc/sign(val) => Instruction::Sign,
-    /proc/trimtext(text) => Instruction::TrimText,
-    /proc/refcount(val) => Instruction::RefCount,
-    /proc/lerp(a, b, t) => Instruction::Lerp,
-    /proc/ftime(file, local = null) => Instruction::FTime,
-    /proc/get_steps_to(ref, target, min = null) => Instruction::GetStepsTo,
-    /proc/viewers(depth = null, center = null) => Instruction::Viewers,
-    /proc/copytext(text, start, end = null) => Instruction::CopyText,
-    /proc/copytext_char(text, start, end = null) => Instruction::CopyTextChar,
-    /proc/cos(val) => Instruction::Cos2,
-    /proc/fcopy(src, dst) => Instruction::FCopy,
-    /proc/fcopy_rsc(path) => Instruction::FCopyRsc,
-    /proc/fdel(path) => Instruction::FDel,
-    /proc/fexists(path) => Instruction::FExists,
-    /proc/file2text(path) => Instruction::File2Text,
-    /proc/findlasttext(haystack, needle, start = 0, end = 1) => Instruction::FindLastText,
-    /proc/findlasttextEx(haystack, needle, start = 0, end = 1) => Instruction::FindLastTextEx,
-    /proc/findlasttext_char(haystack, needle, start = 0, end = 1) => Instruction::FindLastTextChar,
-    /proc/findlasttextEx_char(haystack, needle, start = 0, end = 1) => Instruction::FindLastTextExChar,
-    /proc/findtext(haystack, needle, start = 1, end = null) => Instruction::FindText,
-    /proc/findtext_char(haystack, needle, start = 1, end = null) => Instruction::FindTextChar,
-    /proc/findtextEx(haystack, needle, start = 1, end = null) => Instruction::FindTextEx,
-    /proc/findtextEx_char(haystack, needle, start = 1, end = null) => Instruction::FindTextExChar,
-    /proc/flist(path) => Instruction::FList,
-    /proc/get_dir(loc1, loc2) => Instruction::GetDir,
-    /proc/get_dist(loc1, loc2) => Instruction::GetDist,
-    /proc/get_step(ref, dir) => Instruction::GetStep,
-    /proc/get_step_away(ref, dir, max = null) => Instruction::GetStepAway,
-    /proc/get_step_rand(ref) => Instruction::GetStepRand,
-    /proc/get_step_to(ref, target, min = null) => Instruction::GetStepTo,
-    /proc/get_step_towards(ref, target) => Instruction::GetStepTowards,
-    /proc/hascall(obj, proc_name) => Instruction::HasCall,
-    /proc/ispointer(val) => Instruction::IsPointer,
-    /proc/hearers(depth = null, center = null) => Instruction::Hearers,
-    /proc/html_decode(text) => Instruction::HtmlDecode,
-    /proc/html_encode(text) => Instruction::HtmlEncode,
-    /proc/isfile(val) => Instruction::IsFile,
-    /proc/isicon(val) => Instruction::IsIcon,
-    /proc/islist(val) => Instruction::IsList,
-    /proc/isnull(val) => Instruction::IsNull,
-    /proc/isnum(val) => Instruction::IsNum,
-    /proc/istext(val) => Instruction::IsText,
-    /proc/jointext(list, glue, start = 1, end = null) => Instruction::JoinText,
-    /proc/length(val) => Instruction::Length,
-    /proc/length_char(val) => Instruction::LengthChar,
-    /proc/load_ext(library, function) => Instruction::LoadExt,
-    /proc/lentext(text) => Instruction::Length,
-    /proc/list2params(list) => Instruction::List2Params,
-    /proc/lowertext(text) => Instruction::LowerText,
-    /proc/missile(type, start, end) => Instruction::Missile,
-    /proc/md5(text) => Instruction::Md5,
-    /proc/nonspantext(haystack, needles, start = 1) => Instruction::NonSpanText,
-    /proc/nonspantext_char(haystack, needles, start = 1) => Instruction::NonSpanTextChar,
-    /proc/ohearers(depth = null, center = null) => Instruction::OHearers,
-    /proc/orange(dist = null, center = null) => Instruction::ORange,
-    /proc/oview(dist = null, center = null) => Instruction::OView,
-    /proc/oviewers(depth = null, center = null) => Instruction::OViewers,
-    /proc/params2list(params) => Instruction::Params2List,
-    /proc/prob(val) => Instruction::Prob,
-    /proc/range(dist = null, center = null) => Instruction::Range,
-    /proc/ref(val) => Instruction::Ref,
-    /proc/replacetext(haystack, needle, replacement, start = 1, end = null) => Instruction::ReplaceText,
-    /proc/replacetext_char(haystack, needle, replacement, start = 1, end = null) => Instruction::ReplaceTextChar,
-    /proc/replacetextEx(haystack, needle, replacement, start = 1, end = null) => Instruction::ReplaceTextEx,
-    /proc/replacetextEx_char(haystack, needle, replacement, start = 1, end = null) => Instruction::ReplaceTextExChar,
-    /proc/rgb2num(color, space = 0) => Instruction::Rgb2Num,
-    /proc/sha1(arg) => Instruction::Sha1,
-    /proc/sin(val) => Instruction::Sin2,
-    /proc/spantext(haystack, needles, start = 1) => Instruction::SpanText,
-    /proc/spantext_char(haystack, needles, start = 1) => Instruction::SpanTextChar,
-    /proc/splicetext(text, start, end = null, insert = null) => Instruction::SpliceText,
-    /proc/splicetext_char(text, start, end = null, insert = null) => Instruction::SpliceTextChar,
-    /proc/splittext(text, delimiter, start = 1, end = null, include_delimiters = null) => Instruction::SplitText,
-    /proc/splittext_char(text, delimiter, start = 1, end = null, include_delimiters = null) => Instruction::SplitTextChar,
-    /proc/sqrt(val) => Instruction::Sqrt,
-    /proc/tan(val) => Instruction::Tan2,
-    /proc/text2ascii(text, pos = null) => Instruction::Text2Ascii,
-    /proc/text2ascii_char(text, pos = null) => Instruction::Text2AsciiChar,
-    /proc/text2file(text, file) => Instruction::Text2File,
-    /proc/text2path(text) => Instruction::Text2Path,
-    /proc/turn(var, angle) => Instruction::Turn,
-    /proc/uppertext(text) => Instruction::UpperText,
-    /proc/url_decode(text) => Instruction::UrlDecode,
-    /proc/url_encode(text, format = null) => Instruction::UrlEncode,
-    /proc/view(dist = null, center = null) => Instruction::View,
-    /proc/winexists(player, control_id) => Instruction::WinExists,
-    /proc/winget(player, control_id, params) => Instruction::WinGet,
-    /proc/values_sum(list) => Instruction::ValuesSum,
-    /proc/values_product(list) => Instruction::ValuesProduct,
-    /proc/values_dot(a, b) => Instruction::ValuesDot,
-    /proc/values_cut_under(list, min, inclusive = null) => Instruction::ValuesCutUnder,
-    /proc/values_cut_over(list, max, inclusive = null) => Instruction::ValuesCutOver,
-    /proc/bound_pixloc(atom, dir) => Instruction::BoundPixloc,
-    /proc/_dm_db_new_query() => Instruction::DbNewQuery,
-    /proc/_dm_db_execute(a, b, c, d, e) => Instruction::DbExecute,
-    /proc/_dm_db_next_row(a, b, c) => Instruction::DbNextRow,
-    /proc/_dm_db_rows_affected(a) => Instruction::DbRowsAffected,
-    /proc/_dm_db_row_count(a) => Instruction::DbRowCount,
-    /proc/_dm_db_error_msg(a) => Instruction::DbErrorMsg,
-    /proc/_dm_db_columns(a, b) => Instruction::DbColumns,
-    /proc/_dm_db_close(a) => Instruction::DbClose,
-    /proc/_dm_db_new_con() => Instruction::DbNewConnection,
-    /proc/_dm_db_connect(a, b, c, d, e, f) => Instruction::DbConnect,
-    /proc/_dm_db_quote(a, b) => Instruction::DbQuote,
-    /proc/_dm_db_is_connected(a) => Instruction::DbIsConnected,
-}
-
-macro_rules! simple_vararg_procs {
-    (
-        $(
-            /proc/$proc_name:ident
-            (
-                $($min_args:literal)?
-                $(..= $max_args:literal)?
-            ) => $instruction:expr
-        ),* $(,)?
-    ) => {
-        fn eval_simple_vararg_procs(
-            compiler: &mut Compiler<'_>,
-            name: &str,
-            args: &[Expression],
-        ) -> Result<Option<EvalKind>, CompileError> {
-            let args_len = args.len() as u32;
-
-            match name {
-                $(
-                    stringify!($proc_name) => {
-                        $(
-                            if args_len < $min_args {
-                                return Err(CompileError::IncorrectArgCount(name.to_owned()));
-                            }
-                        )?
-
-                        $(
-                            if args_len > $max_args {
-                                return Err(CompileError::IncorrectArgCount(name.to_owned()));
-                            }
-                        )?
-
-                        args::emit_normal(compiler, args::ArgsContext::Proc, args.to_vec())?;
-                        compiler.emit_ins($instruction(args_len));
-                        Ok(Some(EvalKind::Stack))
-                    }
-                )*
-
-                _ => Ok(None),
-            }
-        }
+    if args.len() > params.len() {
+        return Err(CompileError::TooManyArguments {
+            proc: name.to_owned(),
+            expected: params.len() as u32,
+        });
     }
+    compiler.emit_ins(super::versions::instruction(compiler.byond, ins.clone()));
+    Ok(())
 }
 
-simple_vararg_procs! {
-    /proc/addtext(2) => Instruction::AddText,
-    /proc/bounds(..=5) => Instruction::Bounds,
-    /proc/matrix(..=6) => Instruction::MatrixNew,
-    /proc/max(2) => Instruction::Max,
-    /proc/min(2) => Instruction::Min,
-    /proc/obounds(..=5) => Instruction::OBounds,
-    /proc/regex() => Instruction::RegexNew,
-    /proc/sorttext(2) => Instruction::SortText,
-    /proc/sortText(2) => Instruction::SortTextEx,
-    /proc/sorttextEx(2) => Instruction::SortTextEx,
-    /proc/noise_hash(1) => Instruction::NoiseHash,
-    /proc/startup(1) => Instruction::Startup,
-    /proc/typesof(1) => Instruction::TypesOf,
-}
-
-macro_rules! unsupported_procs {
-    (
-        $(
-            /proc/$proc_name:ident
-        ),* $(,)?
-    ) => {
-        fn is_unsupported_proc(
-            name: &str,
-        ) -> bool {
-            match name {
-                $(
-                    stringify!($proc_name) => true,
-                )*
-
-                _ => false,
-            }
-        }
+fn emit_counted(
+    compiler: &mut Compiler<'_>,
+    name: &str,
+    (min, max): (u32, u32),
+    ins: fn(u32) -> Instruction,
+    args: &[Expression],
+) -> Result<(), CompileError> {
+    let count = args.len() as u32;
+    if count < min || count > max {
+        return Err(CompileError::IncorrectArgCount(name.to_owned()));
     }
-}
-
-unsupported_procs! {
-    /proc/list,
-    /proc/locate,
-    /proc/pick,
-    /proc/input,
-
-    /proc/shutdown,
-
-    /proc/browse,
-    /proc/browse_rsc,
-    /proc/ftp,
-    /proc/link,
-    /proc/load_resource,
-    /proc/output,
-    /proc/rand_seed,
-    /proc/run,
-    /proc/CRASH,
+    push_args(compiler, args)?;
+    compiler.emit_ins(ins(count));
+    Ok(())
 }
 
 pub(super) fn emit(
@@ -336,161 +58,84 @@ pub(super) fn emit(
     name: &str,
     args: &Vec<Expression>,
 ) -> Result<Option<EvalKind>, CompileError> {
-    if !super::versions::has_builtin(compiler.byond, name) {
+    let Some(builtin) = builtins::find(name).filter(|builtin| builtin.is_in(compiler.byond)) else {
         return Ok(None);
-    }
-    if matches!(name, "browse" | "browse_rsc" | "output" | "load_resource") && !args.is_empty() {
-        push_args(compiler, &args[..1])?;
-        for arg in &args[1..] {
-            push_args(compiler, std::slice::from_ref(arg))?;
-            compiler.emit_ins(Instruction::Pop);
-        }
-        return Ok(Some(EvalKind::Stack));
-    }
-    if name == "shutdown" && matches!(args.len(), 1 | 2) {
-        push_args(compiler, args)?;
-        for _ in args.len()..2 {
-            push_null(compiler);
-        }
-        compiler.emit_ins(Instruction::ShutdownArgs);
-        return Ok(Some(EvalKind::Stack));
-    }
-    if name == "animate" && !args.is_empty() {
-        if emit_statement_builtin(compiler, name, args)? {
-            let dropped = compiler.nodes.pop();
-            debug_assert!(matches!(
-                dropped,
-                Some(crate::Node::Instruction(Instruction::Pop, _))
-            ));
-            return Ok(Some(EvalKind::Stack));
+    };
+    if builtin.code {
+        if let Some(kind) = emit_code(compiler, name, args)? {
+            return Ok(Some(kind));
         }
     }
-    if name == "statpanel" && args.len() == 1 {
-        push_args(compiler, args)?;
-        compiler.emit_ins(Instruction::StatPanelCheck);
-        compiler.emit_ins(Instruction::GetFlag);
-        return Ok(Some(EvalKind::Stack));
-    }
-    if is_unsupported_proc(name) {
-        return Err(CompileError::UnsupportedBuiltin {
-            proc: name.to_owned(),
-        });
-    }
-
-    if name == "block" && (3..=5).contains(&args.len()) {
-        push_args(compiler, args)?;
-        for _ in args.len()..6 {
-            compiler.emit_ins(Instruction::PushVal(operands::Value::Null));
-        }
-        compiler.emit_ins(Instruction::BlockXYZ);
-        return Ok(Some(EvalKind::Stack));
-    }
-    if (name == "time2text" || name == "round") && args.is_empty() {
-        push_null(compiler);
-        if name == "time2text" {
-            push_null(compiler);
-        }
-        compiler.emit_ins(if name == "time2text" {
-            Instruction::Time2Text
-        } else {
-            Instruction::Round
-        });
-        return Ok(Some(EvalKind::Stack));
-    }
-
-    if name == "rgb2num" {
-        if let Some(channels) = rgb2num_const(compiler, args) {
-            for c in &channels {
-                compiler.emit_ins(Instruction::PushInt(*c as i32));
+    let n = args.len();
+    match &builtin.value {
+        Value::Stack { params, ins } => {
+            emit_stack(compiler, name, params, ins, args)?;
+            if matches!(name, "range" | "orange") {
+                compiler.emit_ins(Instruction::CopyList);
             }
-            compiler.emit_ins(Instruction::NewList(channels.len() as u32));
-            return Ok(Some(EvalKind::Stack));
         }
-    }
-
-    if let Some(res) = eval_simple_stack_procs(compiler, name, args)? {
-        if matches!(name, "range" | "orange") {
-            compiler.emit_ins(Instruction::CopyList);
-        }
-
-        return Ok(Some(res));
-    }
-
-    if matches!(name, "min" | "max") && args.len() == 1 {
-        let list = arglist_inner(&args[0]).unwrap_or(&args[0]).clone();
-        args::emit_normal(compiler, args::ArgsContext::Proc, vec![list])?;
-        compiler.emit_ins(if name == "min" {
-            Instruction::MinList
-        } else {
-            Instruction::MaxList
-        });
-        return Ok(Some(EvalKind::Stack));
-    }
-
-    if let Some(res) = eval_simple_vararg_procs(compiler, name, args)? {
-        return Ok(Some(res));
-    }
-
-    let arg_count = args.len() as u32;
-
-    if let Some(kind) = emit_overloaded(compiler, name, args)? {
-        return Ok(Some(kind));
-    }
-
-    match name {
-        "arglist" => {
-            if arg_count != 1 {
-                return Err(CompileError::IncorrectArgCount(name.to_owned()));
-            }
-
-            args::emit_single_normal(compiler, args::ArgsContext::Proc, args[0].clone())?;
-            Ok(Some(EvalKind::ArgList))
-        }
-
-        "initial" => {
-            if arg_count != 1 {
-                return Err(CompileError::IncorrectArgCount(name.to_owned()));
-            }
-
-            if let Some(var) = initial_static_field(compiler, &args[0])? {
-                compiler.emit_ins(Instruction::GetVar(var));
-                return Ok(Some(EvalKind::Stack));
-            }
-            if let Some(var) = initial_safe(compiler, &args[0])? {
-                compiler.emit_ins(Instruction::GetVar(var));
-                return Ok(Some(EvalKind::Stack));
-            }
-            let arg = args[0].clone();
-            let var = match compiler.emit_expr(arg)? {
-                EvalKind::Field(builder, field) => {
-                    builder.get_initial_field(DMString(field.into()))
-                }
-
-                EvalKind::Var(global @ Variable::Global(_)) => Variable::Initial(Box::new(global)),
-
-                EvalKind::Var(
-                    var @ (Variable::Local(_)
-                    | Variable::Arg(_)
-                    | Variable::Src
-                    | Variable::Usr
-                    | Variable::Dot),
-                ) => Variable::Initial(Box::new(var)),
-
-                EvalKind::ListRef => {
-                    compiler.emit_ins(Instruction::SetVar(Variable::CacheKey));
-                    compiler.emit_ins(Instruction::SetVar(Variable::Cache));
-                    Variable::Initial(Box::new(Variable::CacheIndex))
-                }
-
-                _ => return Err(CompileError::ExpectedFieldReference),
+        Value::Counted { min, max, ins } => emit_counted(compiler, name, (*min, *max), *ins, args)?,
+        Value::ByCount { forms } => {
+            let form = forms
+                .iter()
+                .find(|(fewest, most, _)| (*fewest..=*most).contains(&n));
+            let Some((_, most, ins)) = form else {
+                return Ok(None);
             };
-
-            compiler.emit_ins(Instruction::GetVar(var));
-            Ok(Some(EvalKind::Stack))
+            push_args(compiler, args)?;
+            for _ in n..*most {
+                push_null(compiler);
+            }
+            compiler.emit_ins(ins.clone());
         }
-
-        _ => Ok(None),
+        Value::Test { ins } if n >= 1 => emit_tests(compiler, name, ins, args)?,
+        Value::Test { .. } | Value::Code => return Ok(None),
+        Value::None => {
+            return Err(CompileError::UnsupportedBuiltin {
+                proc: name.to_owned(),
+            })
+        }
     }
+    Ok(Some(EvalKind::Stack))
+}
+
+fn emit_tests(
+    compiler: &mut Compiler<'_>,
+    name: &str,
+    test: &Instruction,
+    args: &[Expression],
+) -> Result<(), CompileError> {
+    let n = args.len();
+    if n == 1 && super::versions::folds(compiler.byond, name) {
+        let known = super::fold::number(compiler, &args[0])
+            .and_then(|x| super::versions::nan_test(name, x));
+        if let Some(result) = known {
+            compiler.emit_ins(Instruction::PushInt(result as i32));
+            if !compiler.byond.folds_nan_tests_cleanly() {
+                compiler.warn_bug(
+                    &format!(
+                        "`{name}()` on a constant returns the previous test flag on this build"
+                    ),
+                    ", and dmasm reproduces this behavior",
+                );
+                compiler.emit_ins(Instruction::GetFlag);
+            }
+            return Ok(());
+        }
+    }
+    let end = compiler.new_label();
+    for arg in args {
+        push_args(compiler, std::slice::from_ref(arg))?;
+        compiler.emit_ins(test.clone());
+        if n > 1 {
+            compiler.emit_ins(Instruction::Jz(Label::Named(end.clone())));
+        }
+    }
+    if n > 1 {
+        compiler.emit_label(end);
+    }
+    compiler.emit_ins(Instruction::GetFlag);
+    Ok(())
 }
 
 fn rgb_slots(args: &[Expression]) -> Option<([Option<Expression>; 5], Option<f32>)> {
@@ -639,112 +284,59 @@ fn push_null(compiler: &mut Compiler<'_>) {
     compiler.emit_ins(Instruction::PushVal(operands::Value::Null));
 }
 
-fn emit_overloaded(
+fn emit_code(
     compiler: &mut Compiler<'_>,
     name: &str,
     args: &[Expression],
 ) -> Result<Option<EvalKind>, CompileError> {
     let n = args.len();
-    let by_count =
-        |ins: &[(usize, Instruction)]| ins.iter().find(|(c, _)| *c == n).map(|(_, i)| i.clone());
-    let simple = match name {
-        "round" => by_count(&[(1, Instruction::Round), (2, Instruction::RoundN)]),
-        "text2num" => by_count(&[(1, Instruction::Text2Num), (2, Instruction::Text2NumRadix)]),
-        "num2text" => by_count(&[
-            (1, Instruction::Num2Text),
-            (2, Instruction::Num2TextSigFigs),
-            (3, Instruction::Num2TextRadix),
-        ]),
-        "log" => by_count(&[(1, Instruction::Log10), (2, Instruction::Log)]),
-        "arctan" => by_count(&[(1, Instruction::ArcTan), (2, Instruction::ArcTan2)]),
-        "ispath" => by_count(&[(1, Instruction::IsPath), (2, Instruction::IsSubPath)]),
-        "roll" => by_count(&[(1, Instruction::RollStr), (2, Instruction::Roll)]),
-        "block" => by_count(&[(2, Instruction::Block), (6, Instruction::BlockXYZ)]),
-        "shell" => by_count(&[(1, Instruction::Shell)]),
-        "icon_states" => by_count(&[
-            (1, Instruction::IconStates),
-            (2, Instruction::IconStatesMode),
-        ]),
-        "json_encode" => by_count(&[
-            (1, Instruction::JsonEncode),
-            (2, Instruction::JsonEncodeFlags(2)),
-        ]),
-        "json_decode" => by_count(&[
-            (1, Instruction::JsonDecode),
-            (2, Instruction::JsonDecodeFlags(2)),
-        ]),
-        "astype" => by_count(&[(2, Instruction::AsType)]),
-        "time2text" if n == 3 => Some(Instruction::Time2TextTZ(3)),
-        "istype" if n == 2 => Some(Instruction::IsType),
-        _ => None,
-    };
-    if let Some(ins) = simple {
-        push_args(compiler, args)?;
-        compiler.emit_ins(ins);
-        return Ok(Some(EvalKind::Stack));
-    }
-
     match name {
-        "time2text" if n == 1 || n == 2 => {
+        "browse" | "browse_rsc" | "output" | "load_resource" if n >= 1 => {
+            push_args(compiler, &args[..1])?;
+            for arg in &args[1..] {
+                push_args(compiler, std::slice::from_ref(arg))?;
+                compiler.emit_ins(Instruction::Pop);
+            }
+        }
+        "shutdown" if matches!(n, 1 | 2) => {
             push_args(compiler, args)?;
-            if n == 1 {
+            for _ in n..2 {
                 push_null(compiler);
             }
-            compiler.emit_ins(Instruction::Time2Text);
+            compiler.emit_ins(Instruction::ShutdownArgs);
         }
-        "rand" if n <= 2 => {
+        "animate" if n >= 1 => {
+            if !emit_statement_builtin(compiler, name, args)? {
+                return Ok(None);
+            }
+            let dropped = compiler.nodes.pop();
+            debug_assert!(matches!(
+                dropped,
+                Some(crate::Node::Instruction(Instruction::Pop, _))
+            ));
+        }
+        "statpanel" if n == 1 => {
             push_args(compiler, args)?;
-            match n {
-                0 => {
-                    push_null(compiler);
-                    compiler.emit_ins(Instruction::Rand);
-                }
-                1 => compiler.emit_ins(Instruction::Rand),
-                _ => compiler.emit_ins(Instruction::RandRange),
-            }
-        }
-        "isturf" | "ismob" | "isarea" | "isobj" | "ismovable" | "isloc" | "isnan" | "isinf"
-            if n >= 1 =>
-        {
-            let test = match name {
-                "isturf" => Instruction::IsTurf,
-                "ismob" => Instruction::IsMob,
-                "isarea" => Instruction::IsArea,
-                "isobj" => Instruction::IsObj,
-                "ismovable" => Instruction::IsMovable,
-                "isloc" => Instruction::IsLoc,
-                "isnan" => Instruction::IsNaN,
-                _ => Instruction::IsInf,
-            };
-            if n == 1 && super::versions::folds(compiler.byond, name) {
-                let known = super::fold::number(compiler, &args[0])
-                    .and_then(|x| super::versions::nan_test(name, x));
-                if let Some(result) = known {
-                    compiler.emit_ins(Instruction::PushInt(result as i32));
-                    if !compiler.byond.folds_nan_tests_cleanly() {
-                        compiler.warn_bug(
-                            &format!(
-                                "{name}() of a constant returns the previous test flag on this build"
-                            ),
-                            ", matching DreamMaker",
-                        );
-                        compiler.emit_ins(Instruction::GetFlag);
-                    }
-                    return Ok(Some(EvalKind::Stack));
-                }
-            }
-            let end = compiler.new_label();
-            for arg in args {
-                push_args(compiler, std::slice::from_ref(arg))?;
-                compiler.emit_ins(test.clone());
-                if n > 1 {
-                    compiler.emit_ins(Instruction::Jz(Label::Named(end.clone())));
-                }
-            }
-            if n > 1 {
-                compiler.emit_label(end);
-            }
+            compiler.emit_ins(Instruction::StatPanelCheck);
             compiler.emit_ins(Instruction::GetFlag);
+        }
+        "rgb2num" => {
+            let Some(channels) = rgb2num_const(compiler, args) else {
+                return Ok(None);
+            };
+            for c in &channels {
+                compiler.emit_ins(Instruction::PushInt(*c as i32));
+            }
+            compiler.emit_ins(Instruction::NewList(channels.len() as u32));
+        }
+        "min" | "max" if n == 1 => {
+            let list = arglist_inner(&args[0]).unwrap_or(&args[0]).clone();
+            args::emit_normal(compiler, args::ArgsContext::Proc, vec![list])?;
+            compiler.emit_ins(if name == "min" {
+                Instruction::MinList
+            } else {
+                Instruction::MaxList
+            });
         }
         "text"
             if n == 1
@@ -821,7 +413,6 @@ fn emit_overloaded(
             compiler.emit_ins(Instruction::PushVal(operands::Value::Path(path)));
             compiler.emit_ins(Instruction::AsType);
         }
-        "shell" if n == 0 => compiler.emit_ins(Instruction::ShellAllowed),
         "issaved" if n == 1 => {
             let var = match compiler.emit_inner_expr(args[0].clone())? {
                 EvalKind::ListRef => {
@@ -1002,6 +593,55 @@ fn emit_overloaded(
             push_args(compiler, args)?;
             compiler.emit_ins(Instruction::PushVal(operands::Value::Path(path)));
             compiler.emit_ins(Instruction::IsType);
+        }
+        "arglist" => {
+            if n != 1 {
+                return Err(CompileError::IncorrectArgCount(name.to_owned()));
+            }
+
+            args::emit_single_normal(compiler, args::ArgsContext::Proc, args[0].clone())?;
+            return Ok(Some(EvalKind::ArgList));
+        }
+
+        "initial" => {
+            if n != 1 {
+                return Err(CompileError::IncorrectArgCount(name.to_owned()));
+            }
+
+            if let Some(var) = initial_static_field(compiler, &args[0])? {
+                compiler.emit_ins(Instruction::GetVar(var));
+                return Ok(Some(EvalKind::Stack));
+            }
+            if let Some(var) = initial_safe(compiler, &args[0])? {
+                compiler.emit_ins(Instruction::GetVar(var));
+                return Ok(Some(EvalKind::Stack));
+            }
+            let arg = args[0].clone();
+            let var = match compiler.emit_expr(arg)? {
+                EvalKind::Field(builder, field) => {
+                    builder.get_initial_field(DMString(field.into()))
+                }
+
+                EvalKind::Var(global @ Variable::Global(_)) => Variable::Initial(Box::new(global)),
+
+                EvalKind::Var(
+                    var @ (Variable::Local(_)
+                    | Variable::Arg(_)
+                    | Variable::Src
+                    | Variable::Usr
+                    | Variable::Dot),
+                ) => Variable::Initial(Box::new(var)),
+
+                EvalKind::ListRef => {
+                    compiler.emit_ins(Instruction::SetVar(Variable::CacheKey));
+                    compiler.emit_ins(Instruction::SetVar(Variable::Cache));
+                    Variable::Initial(Box::new(Variable::CacheIndex))
+                }
+
+                _ => return Err(CompileError::ExpectedFieldReference),
+            };
+
+            compiler.emit_ins(Instruction::GetVar(var));
         }
         _ => return Ok(None),
     }
