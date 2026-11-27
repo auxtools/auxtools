@@ -2026,6 +2026,16 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
                     })
                 {
                     "reads a variable through another variable whose declared type changed"
+                } else if !retyped.is_empty()
+                    && chain_rebinds(old, new, path, new_value, |term, follow| {
+                        matches!(term, Term::Call(name, _) if retyped.contains(name.as_str()))
+                            || follow.iter().any(|f| {
+                                matches!(&f.elem, Follow::Call(_, name, _)
+                                    if retyped.contains(name.as_str()))
+                            })
+                    })
+                {
+                    "reads a variable through a proc whose declared return type changed"
                 } else {
                     continue;
                 };
@@ -2571,8 +2581,14 @@ struct FileContents<'a> {
         ),
     >,
     var_lines: BTreeMap<(String, String), u32>,
-    declarations:
-        BTreeMap<(String, String), (dreammaker::ast::ProcDeclKind, dreammaker::ast::ProcFlags)>,
+    declarations: BTreeMap<
+        (String, String),
+        (
+            dreammaker::ast::ProcDeclKind,
+            dreammaker::ast::ProcFlags,
+            dreammaker::ast::ProcReturnType,
+        ),
+    >,
     procs: BTreeMap<(String, String), Vec<(Option<ProcKey>, &'a ProcValue)>>,
 }
 
@@ -2601,8 +2617,10 @@ impl<'a> FileContents<'a> {
                 .as_ref()
                 .filter(|d| d.location.file == file)
             {
-                self.declarations
-                    .insert((path.clone(), name.to_string()), (d.kind, d.flags));
+                self.declarations.insert(
+                    (path.clone(), name.to_string()),
+                    (d.kind, d.flags, d.return_type.clone()),
+                );
             }
             let values: Vec<(Option<ProcKey>, &ProcValue)> = proc
                 .value
@@ -3513,6 +3531,15 @@ fn compare_types(
                 Some(o) => pair(old, new, (o, &old_values), (n, &new_values), name.as_str()),
                 None => vec![None; new_count],
             };
+            let returns = |p: Option<&dreammaker::objtree::TypeProc>| {
+                p.and_then(|p| p.declaration.as_ref())
+                    .map(|d| d.return_type.clone())
+            };
+            if let (Some(before), Some(after)) = (returns(op.get(name)), returns(Some(proc))) {
+                if before != after && !changes.retyped.iter().any(|r| r == name.as_str()) {
+                    changes.retyped.push(name.to_string());
+                }
+            }
             if !map.iter().flatten().is_sorted() {
                 let at = proc
                     .declaration
