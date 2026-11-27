@@ -255,6 +255,160 @@ fn a_var_after_a_call_is_found_by_the_procs_return_type() {
     }
 }
 
+fn global_scopes(src: &str) -> Vec<String> {
+    let ctx = dreammaker::Context::default();
+    let pp = dreammaker::Preprocessor::from_buffer(&ctx, "test.dm".into(), src.to_owned());
+    let mut parser = dreammaker::Parser::new(&ctx, pp);
+    parser.enable_procs();
+    let tree = parser.parse_object_tree();
+    let value = tree
+        .root()
+        .get()
+        .procs
+        .get("f")
+        .unwrap()
+        .value
+        .last()
+        .unwrap();
+    let source = ProcSource {
+        tree: &tree,
+        ty: tree.root(),
+        name: "f",
+        value,
+        file: "test.dm",
+        debug_info: false,
+        index: None,
+        byond: dmasm_compiler::ByondVersion::LATEST,
+        file_names: None,
+    };
+    let nodes = compile_proc(&source).expect("compiles").nodes;
+    let mut scopes = vec![];
+    for node in &nodes {
+        let Node::Instruction(ins, _) = node else {
+            continue;
+        };
+        for var in ins.variables() {
+            if let Variable::Global(g) = var {
+                let scope = format!("{:?}", g.scope);
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
+        }
+    }
+    scopes
+}
+
+#[test]
+fn a_safe_write_after_a_call_finds_its_static_as_a_read_does() {
+    let types = "/datum/a\n\tvar/static/S = 1\n/datum/b\n\tvar/static/S = 2\n\
+                 /datum/factory/proc/make()\n\treturn new /datum/a\n\
+                 /datum/factory/proc/typed() as /datum/a\n\treturn new /datum/a\n\
+                 /proc/gmake()\n\treturn new /datum/a\n\
+                 /proc/gtyped() as /datum/a\n\treturn new /datum/a\n";
+    for (body, scope) in [
+        ("factory.make()?.S = 3", "/datum/b"),
+        ("factory.typed()?.S = 3", "/datum/a"),
+        ("gmake()?.S = 3", "/datum/b"),
+        ("gtyped()?.S = 3", "/datum/a"),
+        ("factory?.make().S = 3", "/datum/b"),
+        ("factory?.typed().S = 3", "/datum/a"),
+        ("factory.make()?.S += 3", "/datum/b"),
+        ("factory.typed()?.S++", "/datum/a"),
+        ("factory.make()?.S--", "/datum/b"),
+        ("factory.make()?.S ||= 3", "/datum/b"),
+        ("return (factory.typed()?.S = 4)", "/datum/a"),
+        ("return factory.make()?.S++", "/datum/b"),
+    ] {
+        let src = format!("{types}/proc/f(datum/factory/factory)\n\t{body}\n");
+        assert_eq!(
+            global_scopes(&src),
+            [format!("Some(Type(\"{}\"))", scope)],
+            "{}",
+            body
+        );
+    }
+}
+
+#[test]
+fn a_safe_colon_call_finds_its_proc_and_value_as_a_colon_call_does() {
+    let types = "/datum/a\n\tvar/const/LIMIT = 5\n\tvar/static/S = 1\n\
+                 /datum/b\n\tvar/const/LIMIT = 9\n\tvar/static/S = 2\n\
+                 /datum/base\n\
+                 /datum/base/sub/proc/make() as /datum/a\n\treturn new /datum/a\n\
+                 /datum/base/sub/proc/plain()\n\treturn new /datum/a\n\
+                 /datum/base/sub/proc/named()\n\tset name = \"build\"\n\treturn new /datum/a\n\
+                 /datum/base/sub/verb/vmake()\n\treturn new /datum/a\n";
+    for (body, scope) in [
+        ("return base?:make().LIMIT", "/datum/a"),
+        ("return base?:plain().LIMIT", "/datum/b"),
+        ("return base?:make().S", "/datum/a"),
+        ("return base?:make()?.LIMIT", "/datum/a"),
+        ("base?:make().S = 3", "/datum/a"),
+    ] {
+        let src = format!("{types}/proc/f(datum/base/base)\n\t{body}\n");
+        assert_eq!(
+            global_scopes(&src),
+            [format!("Some(Type(\"{}\"))", scope)],
+            "{}",
+            body
+        );
+    }
+    for (body, call) in [
+        ("return base?:named()", "Call dynamic_proc(\"build\") 0"),
+        (
+            "return base?:vmake().LIMIT",
+            "Call dynamic_verb(\"vmake\") 0",
+        ),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(datum/base/base)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert_has(&code, &[call]);
+    }
+}
+
+#[test]
+fn a_safe_place_after_a_call_is_typed_as_a_read_finds_it() {
+    let types = "/datum/child\n/datum/child/special\n\
+                 /datum/holder\n\tvar/datum/child/child\n\tvar/datum/holder/inner\n\
+                 /datum/other\n\tvar/datum/child/special/child\n\
+                 /datum/maker/proc/untyped_holder()\n\treturn new /datum/holder\n\
+                 /proc/get_holder() as /datum/holder\n\treturn new /datum/holder\n";
+    for (body, made) in [
+        ("get_holder()?.child = new", "/datum/child"),
+        (
+            "maker.untyped_holder()?.child = new",
+            "/datum/child/special",
+        ),
+        ("get_holder()?:child = new", "/datum/child/special"),
+        ("get_holder().inner?.child = new", "/datum/child"),
+        ("get_holder()?.child = astype(x)", "/datum/child"),
+        ("return astype(get_holder().child)", "/datum/child"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(datum/maker/maker, x)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert_has(&code, &[&format!("PushVal {made}")]);
+    }
+    for body in [
+        "get_holder().child = new",
+        "get_holder().inner.child = new",
+        "maker?.untyped_holder().child = new",
+    ] {
+        assert_eq!(
+            compile_error(&format!("{types}/proc/g(datum/maker/maker)\n\t{body}\n")),
+            "line 13: implicit new() calls are not supported",
+            "{}",
+            body
+        );
+    }
+}
+
 #[test]
 fn a_var_after_an_index_is_found_as_untyped_colon_finds_it() {
     let types = "/datum/a\n\tvar/const/LIMIT = 5\n\tvar/datum/a/link\n\

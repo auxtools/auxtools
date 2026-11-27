@@ -267,3 +267,63 @@ var/datum/dep_retype_alone_first/dep_retype_alone_target
 
 /proc/dep_returned_make()
 	return new /datum/dep_returned_first
+
+/datum/dep_bare_call_first
+	var/const/DEP_BARE_CALL = 5
+
+/datum/dep_bare_call_later
+
+/proc/dep_bare_make()
+	return new /datum/dep_bare_call_first
+
+/datum/dep_safe_write_a
+	var/static/DEP_SAFE_WRITE = 1
+
+/datum/dep_safe_write_b
+	var/static/DEP_SAFE_WRITE = 2
+
+/datum/dep_safe_write_factory/proc/make()
+	return new /datum/dep_safe_write_a
+
+/proc/dep_safe_write(value)
+	var/datum/dep_safe_write_factory/factory = new
+	factory.make()?.DEP_SAFE_WRITE = value
+	var/datum/dep_safe_write_a/a = new
+	var/datum/dep_safe_write_b/b = new
+	return "[a.DEP_SAFE_WRITE] [b.DEP_SAFE_WRITE]"
+
+/datum/dep_safe_colon_a
+	var/const/DEP_SAFE_COLON = 5
+
+/datum/dep_safe_colon_b
+	var/const/DEP_SAFE_COLON = 9
+
+/datum/dep_safe_colon_base
+
+/datum/dep_safe_colon_base/sub/proc/make() as /datum/dep_safe_colon_a
+	return new /datum/dep_safe_colon_b
+
+/proc/dep_safe_colon(datum/dep_safe_colon_base/base)
+	return base?:make().DEP_SAFE_COLON
+
+/datum/dep_new_child
+/datum/dep_new_child/special
+
+/datum/dep_new_holder
+	var/datum/dep_new_child/dep_new_made
+
+/datum/dep_new_other
+	var/datum/dep_new_child/special/dep_new_made
+
+/datum/dep_new_holder/proc/me() as /datum/dep_new_holder
+	return src
+
+/datum/dep_new_holder/proc/untyped_me()
+	return src
+
+/proc/dep_implicit_new()
+	var/datum/dep_new_holder/typed = new
+	var/datum/dep_new_holder/untyped = new
+	typed.me()?.dep_new_made = new
+	untyped.untyped_me()?.dep_new_made = new
+	return "[typed.dep_new_made.type] [untyped.dep_new_made.type]"

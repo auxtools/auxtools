@@ -1315,6 +1315,9 @@ fn is_list_path(ty: &str) -> bool {
 }
 
 fn list_type_of(compiler: &Compiler, expr: &Expression) -> Option<String> {
+    if !super::procs::place_typed(expr) {
+        return None;
+    }
     super::procs::declared_type_path(compiler, expr)
         .filter(|p| is_list_path(p))
         .map(|_| "/list".to_owned())
@@ -1622,7 +1625,7 @@ pub(super) fn emit_safe_chain_write(
             restore_receiver(compiler, call);
         }
     }
-    let implicit = place.and_then(|p| compiler.static_type_name(p));
+    let implicit = place.and_then(|p| compiler.place_type_name(p));
     let value_start = compiler.nodes.len();
     if let (Some(value), false) = (value, matches!(write, SafeWrite::Logical { .. })) {
         compiler.implicit_type = implicit.clone();
@@ -1872,13 +1875,17 @@ pub(super) fn static_place(
         follow: Default::default(),
     };
     let follow: Vec<Follow> = follow.iter().map(|f| f.elem.clone()).collect();
-    static_member(
-        compiler,
-        super::procs::expr_type(compiler, &base),
-        &follow,
-        indexed,
-        super::procs::After::Typed,
-    )
+    let (ty, after) = match &term.elem {
+        Term::Call(..) => super::procs::start_type(compiler, &term.elem),
+        Term::Ident(name) if name.as_str() == "global" => {
+            (Some(compiler.proc.tree.root()), super::procs::After::Typed)
+        }
+        _ => (
+            super::procs::expr_type(compiler, &base),
+            super::procs::After::Typed,
+        ),
+    };
+    static_member(compiler, ty, &follow, indexed, after)
 }
 
 pub(super) fn static_member(
@@ -1900,6 +1907,10 @@ pub(super) fn static_member(
             }
             Follow::Index(..) => {
                 (ty, after, decl) = (None, super::procs::After::Index, None);
+            }
+            Follow::Call(access, name, _) => {
+                (ty, after) = super::procs::call_result(compiler, ty, *access, name.as_str());
+                decl = None;
             }
             _ => return None,
         }
@@ -2071,7 +2082,7 @@ fn emit_expr_statement_inner(
         {
             if *op == AssignOp::Assign {
                 compiler.implicit_type = compiler
-                    .static_type_name(lhs)
+                    .place_type_name(lhs)
                     .or_else(|| list_type_of(compiler, lhs));
             }
             emit_value(compiler, rhs)?;
@@ -2142,7 +2153,7 @@ fn emit_expr_statement_inner(
                 }
             };
             let implicit = compiler
-                .static_type_name(lhs)
+                .place_type_name(lhs)
                 .or_else(|| list_type_of(compiler, lhs));
             let kind = compiler.emit_inner_expr((**lhs).clone())?;
             if matches!(kind, EvalKind::ListRef | EvalKind::Field(..)) {
@@ -2420,7 +2431,7 @@ pub(super) fn emit_safe_logical_assign(
         Instruction::JmpAnd(Label::Named(end.clone()))
     });
     let start = compiler.nodes.len();
-    compiler.implicit_type = compiler.static_type_name(place);
+    compiler.implicit_type = compiler.place_type_name(place);
     emit_value(compiler, rhs)?;
     compiler.implicit_type = None;
     if compiler.nodes[start..]

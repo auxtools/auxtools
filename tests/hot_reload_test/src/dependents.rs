@@ -367,6 +367,64 @@ pub fn dependents(built: Built) {
 		"an unchanged proc that reads make().name doesn't follow make()'s new return type"
 	);
 	println!("ok: an unchanged proc that reads make().name follows make()'s new return type");
+
+	assert_eq!(eval(&mut client, "dep_bare_call()"), "5");
+	let changes = source.edit(
+		"dependents.dm",
+		"/datum/dep_bare_call_later\n",
+		"/datum/dep_bare_call_later\n\tvar/const/DEP_BARE_CALL = 9\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "dep_bare_call()"),
+		"9",
+		"an unchanged proc that reads make().name doesn't read the var that untyped lookup finds now"
+	);
+	println!("ok: an unchanged proc that reads make().name reads the var that untyped lookup finds now");
+
+	assert_eq!(eval(&mut client, "dep_safe_write(3)"), "\"1 3\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"factory.make()?.DEP_SAFE_WRITE = value\n",
+		"factory.make()?.DEP_SAFE_WRITE = value + 1\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "dep_safe_write(5)"),
+		"\"1 6\"",
+		"recompiled make()?.name = value doesn't write the static that DreamMaker writes"
+	);
+	println!("ok: recompiled make()?.name = value writes the static that DreamMaker writes");
+
+	let read = "\"[dep_safe_colon(new /datum/dep_safe_colon_base/sub)] [isnull(dep_safe_colon(null))]\"";
+	assert_eq!(eval(&mut client, read), "\"5 1\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"\treturn base?:make().DEP_SAFE_COLON",
+		"\treturn 0 || base?:make().DEP_SAFE_COLON"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, read),
+		"\"5 1\"",
+		"recompiled base?:make().name doesn't read the var DreamMaker reads"
+	);
+	println!("ok: recompiled base?:make().name reads the var DreamMaker reads, and null for a null base");
+
+	const MADE_AFTER_CALL: &str = "\"/datum/dep_new_child /datum/dep_new_child/special\"";
+	assert_eq!(eval(&mut client, "dep_implicit_new()"), MADE_AFTER_CALL);
+	let changes = source.edit(
+		"dependents.dm",
+		"\ttyped.me()?.dep_new_made = new\n",
+		"\ttyped.me()?.dep_new_made = new()\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "dep_implicit_new()"),
+		MADE_AFTER_CALL,
+		"recompiled make()?.name = new doesn't make the type DreamMaker makes"
+	);
+	println!("ok: recompiled make()?.name = new makes the type DreamMaker makes");
 }
 
 fn refused_edit(source: &mut Source, file: &str, from: &str, to: &str) -> Vec<dmasm::reload::Refusal> {

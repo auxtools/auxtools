@@ -834,6 +834,151 @@ var/const/LIMIT = 10
 	return factory.make()?.LIMIT
 /proc/f16(datum/factory/factory)
 	return factory.make():LIMIT + 1
+// Guards: a_safe_write_after_a_call_finds_its_static_as_a_read_does (compile_proc.rs)
+// Known -516.1672: /proc/f10  before 516.1673 DreamMaker leaves out the null tests of `a?.b ||= v` and `&&=`; dmasm keeps them
+/datum/a
+	var/static/S = 1
+/datum/b
+	var/static/S = 2
+/datum/factory/proc/make()
+	return new /datum/a
+/datum/factory/proc/typed() as /datum/a
+	return new /datum/a
+/proc/gmake()
+	return new /datum/a
+/proc/gtyped() as /datum/a
+	return new /datum/a
+/proc/f1(datum/factory/factory)
+	factory.make()?.S = 3
+/proc/f2(datum/factory/factory)
+	factory.typed()?.S = 3
+/proc/f3()
+	gmake()?.S = 3
+/proc/f4()
+	gtyped()?.S = 3
+/proc/f5(datum/factory/factory)
+	factory?.make().S = 3
+/proc/f6(datum/factory/factory)
+	factory?.typed().S = 3
+/proc/f7(datum/factory/factory)
+	factory.make()?.S += 3
+/proc/f8(datum/factory/factory)
+	factory.typed()?.S++
+/proc/f9(datum/factory/factory)
+	factory.make()?.S--
+/proc/f10(datum/factory/factory)
+	factory.make()?.S ||= 3
+/proc/f11(datum/factory/factory)
+	return (factory.typed()?.S = 4)
+/proc/f12(datum/factory/factory)
+	return factory.make()?.S++
+// Guards: a_safe_colon_call_finds_its_proc_and_value_as_a_colon_call_does (compile_proc.rs)
+/datum/a
+	var/const/LIMIT = 5
+	var/static/S = 1
+/datum/b
+	var/const/LIMIT = 9
+	var/static/S = 2
+/datum/base
+/datum/base/sub/proc/make() as /datum/a
+	return new /datum/a
+/datum/base/sub/proc/plain()
+	return new /datum/a
+/datum/base/sub/proc/named()
+	set name = "build"
+	return new /datum/a
+/datum/base/sub/verb/vmake()
+	return new /datum/a
+/proc/f1(datum/base/base)
+	return base?:make().LIMIT
+/proc/f2(datum/base/base)
+	return base:make().LIMIT
+/proc/f3(datum/base/base)
+	return base?:plain().LIMIT
+/proc/f4(datum/base/base)
+	return base?:named()
+/proc/f5(datum/base/base)
+	return base?:named().LIMIT
+/proc/f6(datum/base/base)
+	return base?:vmake().LIMIT
+/proc/f7(datum/base/base)
+	return base?:make().S
+/proc/f8(datum/base/base)
+	return base?:make()
+/proc/f9(datum/base/base)
+	base?:make().S = 3
+/proc/f10(datum/base/base)
+	return base?:make()?.LIMIT
+/proc/f11(datum/base/base)
+	base?:named().S = 3
+/proc/f12(datum/base/base)
+	base?:vmake().S = 3
+/proc/f16(datum/base/base)
+	base?:named()?.S = 3
+/proc/f17(datum/base/base)
+	return base?:make():LIMIT
+// Guards: a_safe_place_after_a_call_is_typed_as_a_read_finds_it (compile_proc.rs)
+/datum/child
+	var/datum/child/next
+/datum/child/special
+/datum/holder
+	var/datum/holder/inner
+	var/datum/child/child
+	var/list/items
+/datum/other
+	var/datum/child/special/child
+/datum/holder/proc/me() as /datum/holder
+	return src
+/datum/maker/proc/get_holder() as /datum/holder
+	return new /datum/holder
+/datum/maker/proc/untyped_holder()
+	return new /datum/holder
+/proc/get_holder() as /datum/holder
+	return new /datum/holder
+/proc/f1()
+	get_holder()?.child = new
+/proc/f2(datum/maker/maker)
+	maker.get_holder()?.child = new
+/proc/f3(datum/maker/maker)
+	maker.untyped_holder()?.child = new
+/proc/f4(datum/maker/maker)
+	maker.get_holder()?:child = new
+/proc/f5(datum/maker/maker)
+	maker?.get_holder()?.child = new
+/proc/f6()
+	get_holder()?.child.next = new
+/proc/f7()
+	get_holder().inner?.child = new
+/proc/f8()
+	get_holder()?.inner.child = new
+/proc/f9(datum/holder/h)
+	h.me()?.child = new
+/proc/f10()
+	get_holder()?.items = new
+/proc/f11()
+	get_holder()?.child = new()
+/proc/f12()
+	return (get_holder()?.child = new)
+/proc/f13(datum/holder/h)
+	h.inner.child = new
+// Guards: a_safe_place_after_a_call_is_typed_as_a_read_finds_it (compile_proc.rs)
+// Builds: 516.1648-
+/datum/child
+/datum/child/special
+/datum/holder
+	var/datum/child/child
+/datum/other
+	var/datum/child/special/child
+/datum/maker/proc/untyped_holder()
+	return new /datum/holder
+/proc/get_holder() as /datum/holder
+	return new /datum/holder
+/proc/f1(x)
+	get_holder()?.child = astype(x)
+/proc/f2()
+	return astype(get_holder().child)
+/proc/f3(datum/maker/maker)
+	return astype(maker.untyped_holder().child)
 // Guards: static_after_double_colon_chain (compile_proc.rs)
 /datum/a
 	var/datum/b/b
