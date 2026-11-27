@@ -1,4 +1,5 @@
 mod check;
+mod coverage;
 mod inspect;
 mod journal;
 mod profile;
@@ -151,7 +152,10 @@ fn main() {
 				journal::reboot(world.pid, &world.dir);
 			}
 			("edited", _) => edited_after_build(&server),
-			("foreground", _) => foreground(&server),
+			("foreground", _) => {
+				foreground(&server);
+				whole_run_coverage(&server);
+			}
 			("detached", _) => detached(&server),
 			("reboots", _) => reboots(&server),
 			("stops", _) => stops(&server),
@@ -1501,7 +1505,8 @@ fn attach_host_copy(name: &str) -> (TempDir, PathBuf) {
 		"fail_del",
 		"slow_del",
 		"slow_reboot",
-		"refuse_reboot"
+		"refuse_reboot",
+		"end_in_reboot"
 	] {
 		let _ = std::fs::remove_file(dir.join(left));
 		assert!(
@@ -1620,7 +1625,11 @@ fn launch_args(dmb: &Path, server: &str, more: &[&str]) -> Vec<String> {
 }
 
 fn launch_here(dmb: &Path, server: &str, started: &mut Started) -> Arc<Mutex<String>> {
-	let mut child = auxtools(launch_args(dmb, server, &[]))
+	launch_here_with(dmb, server, &[], started)
+}
+
+fn launch_here_with(dmb: &Path, server: &str, more: &[&str], started: &mut Started) -> Arc<Mutex<String>> {
+	let mut child = auxtools(launch_args(dmb, server, more))
 		.stdin(Stdio::null())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -1814,6 +1823,151 @@ fn foreground(server: &str) {
 		);
 		println!("ok: interrupt requests graceful shutdown");
 	}
+}
+
+fn whole_run_coverage(server: &str) {
+	let (dir, dme) = attach_host_copy("coverage");
+	let dmb = dme.with_extension("dmb");
+	let code = dir.join("attach_host.dm");
+	let line = |text: &str| line_of(&code, text);
+	let (lcov, xml) = (dir.join("run.info"), dir.join("run.xml"));
+
+	let mut started = Started::default();
+	let recorded = ["--no-hot-reload", "--lcov", lcov.to_str().unwrap(), "--cobertura", xml.to_str().unwrap()];
+	let output = launch_here_with(&dmb, server, &recorded, &mut started);
+	let read = || output.lock().unwrap().clone();
+	wait_for_text("launch", "attach test: 1", read);
+	started.pids.push(started_pid(&read()));
+	std::fs::write(dir.join("reboot"), "yes").unwrap();
+	wait_for_text("launch", "Reconnected to the world", read);
+	let rounds = |printed: &str| printed.matches("attach test: 1").count();
+	let before = rounds(&read());
+	let until = Instant::now() + Duration::from_secs(60);
+	while rounds(&read()) < before + 2 {
+		assert!(Instant::now() < until, "the rebooted world didn't run:\n{}", read());
+		std::thread::sleep(Duration::from_millis(50));
+	}
+	std::fs::write(dir.join("stop"), "yes").unwrap();
+	let exit = launcher_exit(&mut started, &output);
+	let printed = read();
+	assert_eq!(exit, 0, "launch exited with {}:\n{}", exit, printed);
+	let written = std::fs::read_to_string(&lcov).unwrap_or_else(|e| panic!("{}: {}\n{}", lcov.display(), e, printed));
+	let hits = coverage::hits_in(&written, "attach_host.dm");
+	let ran = hits.values().filter(|hits| **hits != 0).count();
+	assert!(
+		printed.contains(&format!("Coverage: {} of {} lines covered (", ran, hits.len())),
+		"launch said:\n{}",
+		printed
+	);
+	assert_eq!(
+		(
+			hits[&line("var/datum/held/held = new")],
+			hits[&line("\tdoze()")],
+			hits[&line("\t\t\t\tworld.Reboot()")],
+			hits[&line("\tworld.log << \"attach test: done\"")],
+			hits[&line("\treturn L[1]")]
+		),
+		(2, 2, 1, 1, 0),
+		"unexpected hit counts over a run with a reboot: {:?}",
+		hits
+	);
+	let page = std::fs::read_to_string(&xml).unwrap();
+	assert!(
+		page.contains(&format!(" lines-covered=\"{}\" lines-valid=\"{}\" ", ran, hits.len())),
+		"unexpected Cobertura report:\n{}",
+		page
+	);
+	drop(started);
+	println!("ok: coverage of a whole run across a reboot");
+
+	std::fs::remove_file(dir.join("stop")).unwrap();
+	std::fs::remove_file(&lcov).unwrap();
+	let mut started = Started::default();
+	let args = launch_args(&dmb, server, &["--detach", "--json", "--lcov", lcov.to_str().unwrap()]);
+	let (got, printed) = launcher_command(&args.iter().map(String::as_str).collect::<Vec<_>>());
+	assert_eq!(got, 0, "unexpected launch --detach output: {}", printed);
+	let up: serde_json::Value = serde_json::from_str(&printed).unwrap_or_else(|_| panic!("unexpected launch --detach --json output: {}", printed));
+	let pid = up["pid"].as_u64().unwrap();
+	started.pids.extend([pid, up["launcher"].as_u64().unwrap()]);
+	Cli::new(pid).run(&["stop", "--timeout", "15"], 0);
+	let until = Instant::now() + Duration::from_secs(20);
+	while !lcov.exists() {
+		let log = std::fs::read_to_string(up["log"].as_str().unwrap()).unwrap_or_default();
+		assert!(Instant::now() < until, "the detached launcher wrote no coverage:\n{}", log);
+		std::thread::sleep(Duration::from_millis(100));
+	}
+	std::thread::sleep(Duration::from_millis(200));
+	let hits = coverage::hits_in(&std::fs::read_to_string(&lcov).unwrap(), "attach_host.dm");
+	assert_eq!(
+		(
+			hits[&line("var/datum/held/held = new")],
+			hits[&line("\tworld.log << \"attach test: world/Del\"")]
+		),
+		(1, 1),
+		"{:?}",
+		hits
+	);
+	drop(started);
+	println!("ok: coverage written by a detached launcher");
+
+	std::fs::remove_file(&lcov).unwrap();
+	let mut started = Started::default();
+	let recorded = ["--no-hot-reload", "--lcov", lcov.to_str().unwrap()];
+	let output = launch_here_with(&dmb, server, &recorded, &mut started);
+	let read = || output.lock().unwrap().clone();
+	wait_for_text("launch", "attach test: 1", read);
+	started.pids.push(started_pid(&read()));
+	std::fs::write(dir.join("end_in_reboot"), "yes").unwrap();
+	std::fs::write(dir.join("reboot"), "yes").unwrap();
+	let exit = launcher_exit(&mut started, &output);
+	let printed = read();
+	assert_eq!(exit, 0, "launch exited with {}:\n{}", exit, printed);
+	let written = std::fs::read_to_string(&lcov).unwrap_or_else(|e| panic!("{}: {}\n{}", lcov.display(), e, printed));
+	let hits = coverage::hits_in(&written, "attach_host.dm");
+	assert_eq!(
+		(
+			hits[&line("\tworld.log << \"attach test: ending in reboot")],
+			hits[&line("\t\t\t\tworld.Reboot()")]
+		),
+		(1, 1),
+		"{:?}",
+		hits
+	);
+	println!("ok: coverage of a world that ends inside world/Reboot");
+
+	assert_eq!(
+		(
+			hits[&line("\t\ttotal += i // first loop")],
+			hits[&line("\t\ttotal += i // second loop")],
+			hits[&line("\treturn L[n]")]
+		),
+		(3, 2, 0),
+		"{:?}",
+		hits
+	);
+	assert_eq!(hits.get(&line("/proc/two_loops()")), None, "a line without code isn't listed");
+	assert_eq!(written.matches("SF:").count(), 1, "only the world's own code is listed:\n{}", written);
+	assert_eq!(hits[&(line("/proc/last_in_file()") + 1)], 1, "{:?}", hits);
+	drop(started);
+	println!("ok: exact line counts, and the last proc of a file counted once");
+
+	std::fs::remove_file(&lcov).unwrap();
+	std::fs::remove_file(dir.join("end_in_reboot")).unwrap();
+	let mut started = Started::default();
+	let output = launch_here_with(&dmb, server, &recorded, &mut started);
+	let read = || output.lock().unwrap().clone();
+	wait_for_text("launch", "attach test: 1", read);
+	started.pids.push(started_pid(&read()));
+	std::fs::write(dir.join("fail_del"), "yes").unwrap();
+	std::fs::write(dir.join("stop"), "yes").unwrap();
+	let exit = launcher_exit(&mut started, &output);
+	let printed = read();
+	assert_eq!(exit, 0, "launch exited with {}:\n{}", exit, printed);
+	let written = std::fs::read_to_string(&lcov).unwrap_or_else(|e| panic!("{}: {}\n{}", lcov.display(), e, printed));
+	let hits = coverage::hits_in(&written, "attach_host.dm");
+	assert_eq!(hits[&line("\t\tCRASH(\"attach test: world/Del failed\")")], 1, "{:?}", hits);
+	drop(started);
+	println!("ok: coverage of a deleted world whose world/Del fails");
 }
 
 fn detached(server: &str) {
@@ -2161,13 +2315,23 @@ fn without_debug_info(server: &str) {
 	let dmb = dme.with_extension("dmb");
 
 	let mut started = Started::default();
-	let args = launch_args(&dmb, server, &["--detach", "--no-hot-reload", "--json"]);
+	let lcov = dir.join("run.info");
+	let args = launch_args(&dmb, server, &["--detach", "--no-hot-reload", "--json", "--lcov", lcov.to_str().unwrap()]);
 	let (got, printed) = launcher_command(&args.iter().map(String::as_str).collect::<Vec<_>>());
 	assert_eq!(got, 0, "unexpected launch --detach output: {}", printed);
 	let launched: serde_json::Value = serde_json::from_str(printed.lines().next().unwrap_or_default())
 		.unwrap_or_else(|_| panic!("unexpected launch --detach --json output: {}", printed));
 	let pid = launched["pid"].as_u64().unwrap();
 	started.pids.extend([pid, launched["launcher"].as_u64().unwrap()]);
+	let log = std::fs::read_to_string(launched["log"].as_str().unwrap()).unwrap();
+	assert!(
+		log.contains(
+			"Coverage disabled: the world has no line numbers because it was compiled without debug information. Add #define DEBUG to the .dme and \
+			 rebuild\n"
+		),
+		"the launcher's log has:\n{}",
+		log
+	);
 	let pid_text = pid.to_string();
 	let line = line_of(&dir.join("attach_host.dm"), "\ttick(1)").to_string();
 	let place = format!("attach_host.dm:{}", line);
@@ -2181,7 +2345,7 @@ fn without_debug_info(server: &str) {
 	let (got, printed) = launcher_command(&["--pid", &pid_text, "stop", "--timeout", "10", "--kill"]);
 	assert_eq!(got, 0, "stop gave {}: {}", got, printed);
 	drop(started);
-	println!("ok: line breakpoints in a world without debug info");
+	println!("ok: line breakpoints and coverage in a world without debug info");
 }
 
 fn unread_statics(server: &str) {

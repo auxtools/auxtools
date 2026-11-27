@@ -50,6 +50,7 @@ pub enum Note {
 	Process(u32),
 	Ready,
 	Unavailable(String),
+	Coverage(auxtools_protocol::Coverage),
 	Exited(i64)
 }
 
@@ -179,6 +180,12 @@ impl Output {
 	pub fn unavailable(&self, reason: &str) {
 		if let To::Plain(to) = &self.to {
 			to(Note::Unavailable(reason.to_owned()));
+		}
+	}
+
+	pub fn coverage(&self, recorded: auxtools_protocol::Coverage) {
+		if let To::Plain(to) = &self.to {
+			to(Note::Coverage(recorded));
 		}
 	}
 

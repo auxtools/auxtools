@@ -179,6 +179,11 @@ impl ToAdapter {
 
 			Response::Resumed => Input::Resumed { generation },
 
+			Response::CoverageEnded(recorded) => {
+				self.out.coverage(recorded);
+				return ControlFlow::Continue(None);
+			}
+
 			Response::StepEnded => return ControlFlow::Continue(None),
 
 			_ => return ControlFlow::Continue(None)

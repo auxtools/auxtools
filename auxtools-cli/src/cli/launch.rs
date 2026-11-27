@@ -16,6 +16,7 @@ use serde_json::json;
 use super::{args, Failure, Result, TIMED_OUT};
 use crate::{
 	adapter::{self, Ask, CommandLine, Input},
+	coverage::Report,
 	dap::{Note, Output}
 };
 
@@ -32,7 +33,9 @@ struct Options {
 	defines: Vec<String>,
 	byond: Option<PathBuf>,
 	args: Option<Vec<String>>,
-	log: Option<PathBuf>
+	log: Option<PathBuf>,
+	lcov: Option<PathBuf>,
+	cobertura: Option<PathBuf>
 }
 
 pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
@@ -66,7 +69,9 @@ pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
 		defines: args.defines.clone(),
 		byond: args.byond.as_deref().map(absolute).transpose()?,
 		args: replaces_args.then(|| args.args.clone()),
-		log: args.log.as_deref().map(absolute).transpose()?
+		log: args.log.as_deref().map(absolute).transpose()?,
+		lcov: args.lcov.as_deref().map(absolute).transpose()?,
+		cobertura: args.cobertura.as_deref().map(absolute).transpose()?
 	};
 
 	if args.detached {
@@ -114,7 +119,8 @@ struct Outcome {
 	pid: Option<u32>,
 	failed: Option<String>,
 	exit_code: Option<i64>,
-	ready: bool
+	ready: bool,
+	coverage: Option<Report>
 }
 
 fn run(options: &Options, detached: bool) -> Result<()> {
@@ -150,6 +156,7 @@ fn run(options: &Options, detached: bool) -> Result<()> {
 				}
 				outcome.ready = true;
 			}
+			Note::Coverage(recorded) => outcome.coverage.get_or_insert_default().add(recorded),
 			Note::LaunchFailed(message) => {
 				if detached {
 					say_to_starter(&format!("failed {}", message));
@@ -180,7 +187,8 @@ fn run(options: &Options, detached: bool) -> Result<()> {
 		hot_reload: options.hot_reload,
 		defines: options.defines.clone(),
 		byond: options.byond.clone(),
-		args
+		args,
+		coverage: options.lcov.is_some() || options.cobertura.is_some()
 	})));
 
 	interrupts::listen(inputs.clone(), printer.clone());
@@ -191,11 +199,22 @@ fn run(options: &Options, detached: bool) -> Result<()> {
 	if let Some(why) = &outcome.failed {
 		return Err(why.clone().into());
 	}
+	let covered = report_coverage(options, outcome.coverage.as_ref(), &printer);
 	match outcome.exit_code {
-		Some(0) => Ok(()),
+		Some(0) => covered,
 		Some(code) if code >= 0 => Err(Failure(WORLD_FAILED, format!("the world exited with code {}", code))),
 		_ => Err(Failure(WORLD_FAILED, "the world was terminated".to_owned()))
 	}
+}
+
+fn report_coverage(options: &Options, recorded: Option<&Report>, printer: &Printer) -> Result<()> {
+	if options.lcov.is_none() && options.cobertura.is_none() {
+		return Ok(());
+	}
+	let report = recorded.ok_or("no coverage report written: world exited without reporting coverage")?;
+	report.write(options.lcov.as_deref(), options.cobertura.as_deref())?;
+	printer.line(&format!("Coverage: {}", report.summary()));
+	Ok(())
 }
 
 fn say_to_starter(line: &str) {
@@ -228,6 +247,8 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 	flag("--port", options.port.map(|port| port.to_string().into()));
 	flag("--byond", options.byond.clone().map(Into::into));
 	flag("--log", Some(log.clone().into()));
+	flag("--lcov", options.lcov.clone().map(Into::into));
+	flag("--cobertura", options.cobertura.clone().map(Into::into));
 	for define in &options.defines {
 		flag("-D", Some(define.into()));
 	}

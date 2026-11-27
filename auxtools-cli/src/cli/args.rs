@@ -183,6 +183,18 @@ pub struct Launch {
 		help = "Use the BYOND installation at PATH.\n[default: BYOND_SYSTEM, then standard install locations]"
 	)]
 	pub byond: Option<PathBuf>,
+	#[arg(
+		long,
+		value_name = "FILE",
+		help = "Record line coverage for the entire run and write\nan LCOV tracefile to FILE when the world exits."
+	)]
+	pub lcov: Option<PathBuf>,
+	#[arg(
+		long,
+		value_name = "FILE",
+		help = "Record line coverage for the entire run and write\na Cobertura XML report to FILE when the world exits."
+	)]
+	pub cobertura: Option<PathBuf>,
 	#[arg(long, hide = true)]
 	pub detached: bool,
 	#[arg(last = true, value_name = "ARGS")]

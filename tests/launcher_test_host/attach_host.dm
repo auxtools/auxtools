@@ -53,7 +53,16 @@ var/datum/held/held = new
 	if (fexists("refuse_reboot"))
 		world.log << "attach test: reboot refused"
 		return
+	if (fexists("end_in_reboot"))
+		end_soon()
+		return
 	return ..()
+
+/proc/end_soon()
+	set waitfor = FALSE
+	sleep(0)
+	world.log << "attach test: ending in reboot [two_loops()] [last_in_file()]"
+	del(world)
 
 /proc/run_until_stopped()
 	var/said = 0

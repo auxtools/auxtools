@@ -1,6 +1,7 @@
 mod adapter;
 mod cli;
 mod code;
+mod coverage;
 mod dap;
 mod debuggee;
 mod lines;

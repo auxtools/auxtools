@@ -121,6 +121,7 @@ the notes that apply to each source file.
 - [Detecting changed source files by modification time](cli/0030-detecting-changed-files.md)
 - [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md)
 - [Process and pipe behavior of world test stand-ins](cli/0032-the-test-stand-in-behaves-like-a-world.md)
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md)
 
 ## dmasm compiler and bytecode
 

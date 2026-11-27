@@ -69,7 +69,8 @@ pub struct CommandLine {
 	pub hot_reload: bool,
 	pub defines: Vec<String>,
 	pub byond: Option<PathBuf>,
-	pub args: Vec<String>
+	pub args: Vec<String>,
+	pub coverage: bool
 }
 
 impl From<CommandLine> for LaunchArguments {
@@ -87,7 +88,8 @@ impl From<CommandLine> for LaunchArguments {
 			args: Some(line.args),
 			env: HashMap::new(),
 			debug_library: None,
-			sleeping_threads: None
+			sleeping_threads: None,
+			coverage: line.coverage
 		}
 	}
 }
@@ -153,7 +155,7 @@ impl Adapter {
 			dmb: &prepared.dmb,
 			args: &prepared.args,
 			env: &args.env,
-			debug: Some((prepared.library, self.debugging || args.hot_reload))
+			debug: Some((prepared.library, self.debugging || args.hot_reload || args.coverage))
 		};
 		let (out, inputs, files) = (self.out.clone(), self.inputs.clone(), self.files.clone());
 		let batch = journal::batch_output(self.inputs.clone());
@@ -298,6 +300,7 @@ impl Adapter {
 		};
 		self.world.shutting_down = false;
 		self.world.rebooting = false;
+		self.record_coverage();
 		self.send_output();
 		self.give_macros();
 		self.follow_reloads();
@@ -337,6 +340,15 @@ impl Adapter {
 		};
 		if !self.world.waiting_for_code {
 			self.ready();
+		}
+	}
+
+	fn record_coverage(&mut self) {
+		if !self.world.launched.as_ref().is_some_and(|launched| launched.coverage) {
+			return;
+		}
+		if let Ok(AuxResponse::Coverage(Err(why))) = self.request(&AuxRequest::Coverage) {
+			self.out.console(format!("Coverage disabled: {}", why));
 		}
 	}
 

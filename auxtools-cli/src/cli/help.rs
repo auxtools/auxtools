@@ -58,6 +58,12 @@ ARGS  Arguments for the BYOND host program, replacing the defaults
   build), the launcher reports the reason and the world continues running
   without debugging until you stop it.
 
+  With --lcov or --cobertura, records line coverage from the world's first
+  line until it exits, combining reboots into one report written on exit.
+  The world must be compiled with debug information (#define DEBUG). If the
+  world crashes or is terminated instead of shutting down, no report is
+  written, and the launcher exits with code 1 if the world's exit code was 0.
+
 Output:
   In detached mode, prints the world PID, the launcher PID, and the launcher
   log file. JSON contains pid, launcher, log, and unavailable (the reason the

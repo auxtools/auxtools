@@ -77,6 +77,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Adapter main-thread loop, prompt disconnects, and launched-world shutdown](cli/0021-the-adapter-disconnects-promptly-and-ends-its-own-world.md): `disconnect`
 - [How the launcher starts a world](cli/0028-how-the-launcher-starts-a-world.md): `Prepared::of`
 - [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `same_code` check in `start`
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `Adapter::record_coverage`, `Adapter::connected`, `Adapter::start`
 - [Reboots during execution and the shutdown notification](tests/0044-reboots-during-execution-and-the-shutdown-notification.md): `connection_closed`
 
 ### `auxtools-cli/src/byond.rs`
@@ -97,6 +98,7 @@ file after adding a note or changing an `## Applies to` list.
 
 - [The detached launcher reports one status line and outlives its parent](cli/0025-the-detached-launcher.md): `DETACHED`, `COMING_UP`, both `spawn` functions, `catch`, and detached launcher startup
 - [Routing Ctrl+C to the launcher instead of the world](cli/0026-ctrl-c-goes-to-the-launcher.md): `catch`
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `report_coverage`, `run`, `detach`
 
 ### `auxtools-cli/src/cli/log.rs`
 
@@ -130,12 +132,21 @@ file after adding a note or changing an `## Applies to` list.
 - [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `Code::run`, `MOST_ALONE`, `give_back_memory`
 - [Detecting changed source files by modification time](cli/0030-detecting-changed-files.md): `STAMP_LAG`, `Watched`, `unless_saved_since`, `listed_times`, `listed`
 
+### `auxtools-cli/src/coverage.rs`
+
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `Report`, `Report::add`, `Report::lcov`, `Report::cobertura`
+
+### `auxtools-cli/src/dap.rs`
+
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `Note::Coverage`, `Output::coverage`
+
 ### `auxtools-cli/src/debuggee.rs`
 
 - [Stopping and rebooting a world through DM evaluation](cli/0010-ending-and-rebooting-a-world.md): `Debuggee::end`
 - [Connecting to worlds over local sockets](cli/0018-connecting-to-worlds.md): `RESPONSE_TIMEOUT`
 - [Adapter main-thread loop, prompt disconnects, and launched-world shutdown](cli/0021-the-adapter-disconnects-promptly-and-ends-its-own-world.md): `Debuggee::request`, `RESPONSE_TIMEOUT`, `LEAVING_TIMEOUT`, `LEAVING_LOOK`
 - [Ordering stop events after resume responses](cli/0022-report-stops-after-the-response-that-resumed.md): `ToAdapter::input`, `Debuggee`
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `ToAdapter::input`
 
 ### `auxtools-cli/src/game.rs`
 
@@ -228,6 +239,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Profiler instruction timing and HTML report escaping](cli/0017-profiler-timing-and-report.md): `ProfiledInstruction`, `ProfiledTotal`
 - [Connecting to worlds over local sockets](cli/0018-connecting-to-worlds.md): `Response::Unavailable`
 - [Ordering stop events after resume responses](cli/0022-report-stops-after-the-response-that-resumed.md): `Response::StepEnded`
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `Response::CoverageEnded`
 - [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Request::Coverage`, `Response::Coverage`, `Coverage`, `CoveredFile`, `CoveredLine`
 
 ### `auxtools-protocol/src/plan_format.rs`
@@ -526,6 +538,7 @@ file after adding a note or changing an `## Applies to` list.
 
 - [Restoring hot reloads, skins, and resources across a reboot](cli/0003-reloads-across-a-reboot.md): `world_new`
 - [Stopping and rebooting a world through DM evaluation](cli/0010-ending-and-rebooting-a-world.md): `world_del`
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `world_del`, `start`
 - [Attaching to a launched DreamDaemon](debug-server/0021-attaching-to-a-launched-dreamdaemon.md): `on_load`, `auxtools_debug_attach`, `COMMAND_LINE`, `attach`, `start`
 - [The launcher's helper procs](debug-server/0022-the-launchers-helper-procs.md): `HELPER_PROCS`, `HELPER_OVERRIDES`, `helper_procs`, `add_helper_procs`, `start`, `world_del`, `world_reboot`, `world_reboot_declined`, `spawn_inbox`, `spawn_next`
 - [Holding closed socket handles in DreamDaemon on Windows](debug-server/0024-hold-closed-socket-handles-on-windows.md): `auxtools_debug_attach`
@@ -589,6 +602,7 @@ file after adding a note or changing an `## Applies to` list.
 
 ### `debug_server/src/server/coverage.rs`
 
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `Server::coverage_ended`, `Server::world_may_end`
 - [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Server::coverage`
 
 ### `debug_server/src/server/eval.rs`
@@ -636,6 +650,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Breakpoints as separate, client-owned instruction claims](cli/0008-breakpoints-are-separate-claims-owned-by-a-client.md): `remove_client`
 - [Stopping and rebooting a world through DM evaluation](cli/0010-ending-and-rebooting-a-world.md): `world_shutting_down`
 - [Connecting to worlds over local sockets](cli/0018-connecting-to-worlds.md): `Acceptor`, `refuse_on`
+- [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `world_shutting_down`, `wait_until_sent`, `hang_up`, `COVERAGE_PATIENCE`, `Client::queued`, `Client::written`, `Sessions::post`, `Sessions::writer`
 - [Debug server client connections and writer threads](debug-server/0017-client-connections.md): `Acceptor`, `ACCEPTOR`, `OUTBOX`, `serve`, `post`, `writer`
 - [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Sessions::covering`, `remove_client`
 - [Reboots during execution and the shutdown notification](tests/0044-reboots-during-execution-and-the-shutdown-notification.md): `world_shutting_down`

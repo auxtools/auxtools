@@ -140,7 +140,9 @@ struct LaunchArguments {
 	#[serde(default)]
 	env: HashMap<String, String>,
 	debug_library: Option<PathBuf>,
-	sleeping_threads: Option<u32>
+	sleeping_threads: Option<u32>,
+	#[serde(skip)]
+	coverage: bool
 }
 
 #[derive(Deserialize)]
