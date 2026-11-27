@@ -28,7 +28,6 @@ pub struct GlobalInit {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StaticOwner {
     pub proc: super::ProcKey,
-    pub statics: BTreeMap<String, usize>,
 }
 
 fn owners<'a>(
@@ -37,11 +36,7 @@ fn owners<'a>(
 ) -> Vec<Option<StaticOwner>> {
     set.map(|init| {
         let proc = world_key(init.proc.as_ref()?)?;
-        let mut statics = BTreeMap::new();
-        for name in &init.proc_static_names {
-            *statics.entry(name.clone()).or_default() += 1;
-        }
-        Some(StaticOwner { proc, statics })
+        Some(StaticOwner { proc })
     })
     .collect()
 }
@@ -94,7 +89,7 @@ impl Initializer<'_> {
         super::constructed_type(&self.declared, self.expression?)
     }
 
-    fn bound(&self) -> Vec<(&str, u32)> {
+    fn bound(&self) -> Vec<Binding<'_>> {
         bound_statics(self.expression, &self.visible)
     }
 
@@ -106,7 +101,7 @@ impl Initializer<'_> {
         &str,
         &str,
         Option<&Expression>,
-        Vec<(&str, u32)>,
+        Vec<Binding<'_>>,
     )> {
         if self.constant.is_some() {
             return None;
@@ -121,19 +116,23 @@ impl Initializer<'_> {
     }
 }
 
+type Binding<'a> = (&'a str, u32, &'a str);
+
 fn bound_statics<'v>(
     expression: Option<&Expression>,
     visible: &'v [(String, u32, String)],
-) -> Vec<(&'v str, u32)> {
+) -> Vec<Binding<'v>> {
     let mut bound = vec![];
     if let Some(expression) = expression {
         syntax::walk_expression(expression, &mut |node| {
-            let syntax::Node::Term(Term::Ident(name)) = node else {
-                return;
+            let name = match node {
+                syntax::Node::Term(Term::Ident(name)) => name,
+                syntax::Node::Term(Term::NewMiniExpr { expr, .. }) => &expr.ident,
+                _ => return,
             };
             let found = visible.iter().rev().find(|(had, ..)| had == name.as_str());
-            if let Some((had, nth, _)) = found {
-                bound.push((had.as_str(), *nth));
+            if let Some((had, nth, declared)) = found {
+                bound.push((had.as_str(), *nth, declared.as_str()));
             }
         });
     }
@@ -1505,7 +1504,7 @@ pub(super) fn static_initializers(
     &str,
     Option<String>,
     Option<&Expression>,
-    Vec<(String, u32)>,
+    Vec<(String, u32, String)>,
 )> {
     let mut found = vec![];
     static_statements(code, None, &mut found);
@@ -1524,7 +1523,7 @@ pub(super) fn static_initializers(
             let visible = super::visible_statics(&declared, name, nth);
             let bound = bound_statics(var.value.as_ref(), &visible)
                 .into_iter()
-                .map(|(name, nth)| (name.to_owned(), nth))
+                .map(|(name, nth, ty)| (name.to_owned(), nth, ty.to_owned()))
                 .collect();
             (name, made, var.value.as_ref(), bound)
         })

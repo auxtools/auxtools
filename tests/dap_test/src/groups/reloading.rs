@@ -998,6 +998,137 @@ fn statics_of_two_overrides_with_the_same_name() {
 	world.end();
 }
 
+const STATIC_GAINED: &str = "var/list/rb_gained_cache = list(5)
+
+/proc/rb_gained()
+	return rb_gained_cache[1]
+";
+
+fn static_gained_beside_a_global_of_its_name() {
+	let dir = copy_of_the_world("static_gained_beside_a_global_of_its_name");
+	std::fs::write(dir.join("static_gained.dm"), STATIC_GAINED).unwrap();
+	let dme = dir.join("dap_test_host.dme");
+	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"static_gained.dm\"\n";
+	std::fs::write(&dme, text).unwrap();
+	paths::compile(&dme);
+
+	let mut world = World::launch_in(dir.to_path_buf(), json!({ "hotReload": true }));
+	world.catch_runtimes(false);
+	world.configure();
+	world.wait_output("Hot reload active");
+	let both = "\"[rb_gained_cache[1]] [rb_gained()]\"";
+	assert_eq!(world.eval_global(both), "\"5 5\"");
+	edit(
+		&mut world,
+		"static_gained.dm",
+		"\treturn rb_gained_cache[1]",
+		"\tvar/static/list/rb_gained_cache = list(1)\n\treturn rb_gained_cache[1]"
+	);
+	assert_eq!(world.eval_global(both), "\"5 1\"", "{}", world.output);
+	reboot(&mut world, 2);
+	assert_eq!(
+		world.eval_global(both),
+		"\"5 1\"",
+		"the global's value and the new static's after reboot:\n{}",
+		world.output
+	);
+	ok("proc static added beside a global of its name that the proc read, after reboot");
+	world.end();
+}
+
+const STATIC_CONFIGS: &str = "/datum/rb_static_config_a
+	var/const/RB_CONFIG_LIMIT = 5
+
+/datum/rb_static_config_b
+	var/const/RB_CONFIG_LIMIT = 9
+
+/proc/rb_static_config_limits()
+	var/static/datum/rb_static_config_a/config
+	var/static/list/limits = list(config.RB_CONFIG_LIMIT)
+	return limits
+";
+
+fn static_reading_through_a_retyped_static() {
+	let dir = copy_of_the_world("static_reading_through_a_retyped_static");
+	std::fs::write(dir.join("static_configs.dm"), STATIC_CONFIGS).unwrap();
+	let dme = dir.join("dap_test_host.dme");
+	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"static_configs.dm\"\n";
+	std::fs::write(&dme, text).unwrap();
+	paths::compile(&dme);
+
+	let mut world = World::launch_in(dir.to_path_buf(), json!({ "hotReload": true }));
+	world.catch_runtimes(false);
+	world.configure();
+	world.wait_output("Hot reload active");
+	assert_eq!(world.eval_global("json_encode(rb_static_config_limits())"), "\"[5]\"");
+	let held = |output: &str| output.matches("Hot reload requires a reboot:").count();
+	let unchanged = |output: &str| output.matches("Hot reload: no changes to the running code").count();
+	let settled = |output: &str| reloads(output) + held(output) + unchanged(output);
+	let before = settled(&world.output);
+	world.marks.edit(
+		"static_configs.dm",
+		"var/static/datum/rb_static_config_a/config",
+		"var/static/datum/rb_static_config_b/config"
+	);
+	world.wait_until("the edit's reload", |output| settled(output) > before);
+	reboot(&mut world, 2);
+	assert_eq!(
+		world.eval_global("json_encode(rb_static_config_limits())"),
+		"\"[9]\"",
+		"the const read through the static's new type after reboot:\n{}",
+		world.output
+	);
+	ok("proc static reading a const through a static of its proc declared with another type now, after reboot");
+	world.end();
+}
+
+const STATIC_KINDS: &str = "var/rb_static_kind = /datum/rb_static_kind_b
+
+/datum/rb_static_kind_a
+
+/datum/rb_static_kind_b
+
+/proc/rb_static_kinded(x)
+	var/static/rb_static_kind = /datum/rb_static_kind_a
+	if (x)
+		rb_static_kind = null
+	var/static/datum/item = new rb_static_kind()
+	return item.type
+";
+
+fn static_made_by_new_of_a_static_moved_into_a_block() {
+	let dir = copy_of_the_world("static_made_by_new_of_a_static_moved_into_a_block");
+	std::fs::write(dir.join("static_kinds.dm"), STATIC_KINDS).unwrap();
+	let dme = dir.join("dap_test_host.dme");
+	let text = std::fs::read_to_string(&dme).unwrap() + "#include \"static_kinds.dm\"\n";
+	std::fs::write(&dme, text).unwrap();
+	paths::compile(&dme);
+
+	let mut world = World::launch_in(dir.to_path_buf(), json!({ "hotReload": true }));
+	world.catch_runtimes(false);
+	world.configure();
+	world.wait_output("Hot reload active");
+	assert_eq!(world.eval_global("\"[rb_static_kinded(0)]\""), "\"/datum/rb_static_kind_a\"");
+	let held = |output: &str| output.matches("Hot reload requires a reboot:").count();
+	let settled = |output: &str| reloads(output) + held(output);
+	let before = settled(&world.output);
+	world.marks.edit(
+		"static_kinds.dm",
+		"\tvar/static/rb_static_kind = /datum/rb_static_kind_a\n\tif (x)\n\t\trb_static_kind = null",
+		"\tif (x)\n\t\tvar/static/rb_static_kind = /datum/rb_static_kind_a\n\t\trb_static_kind = null"
+	);
+	world.wait_until("the edit's reload", |output| settled(output) > before);
+	reboot(&mut world, 2);
+	assert_eq!(
+		world.eval_global("\"[rb_static_kinded(0)]\""),
+		"\"/datum/rb_static_kind_b\"",
+		"the type that `new` made from the global after reboot:\n{}",
+		world.output
+	);
+	ok("proc static made by new of a global once a static of its name moves into a block, after reboot");
+	world.end();
+}
+
 const LOCAL_LIMIT: &str = "/proc/rb_local_limit()
 	var/const/LIMIT = 5
 	return \"[LIMIT] [LIMIT + 1]\"
@@ -1272,6 +1403,9 @@ pub fn files() {
 	static_reading_through_a_typed_static();
 	static_read_by_an_initializer_moved_into_a_block();
 	statics_of_two_overrides_with_the_same_name();
+	static_gained_beside_a_global_of_its_name();
+	static_reading_through_a_retyped_static();
+	static_made_by_new_of_a_static_moved_into_a_block();
 	local_const_changed();
 	file_named_by_a_reload();
 	resource_files();
