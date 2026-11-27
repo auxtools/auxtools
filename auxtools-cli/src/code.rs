@@ -39,9 +39,10 @@ pub struct Options {
 pub type Texts = HashMap<PathBuf, Option<Vec<String>>>;
 
 #[derive(Default)]
-struct Read {
+struct Read<'a> {
 	defines: Option<Vec<(String, Option<String>)>>,
-	texts: Option<Texts>
+	texts: Option<Texts>,
+	source: Option<&'a Snapshot>
 }
 
 pub enum Event {
@@ -58,7 +59,8 @@ pub enum Event {
 		summary: Summary,
 		notes: Vec<Diagnostic>,
 		world: u64,
-		texts: Option<Texts>
+		texts: Option<Texts>,
+		macros: Option<Vec<Macro>>
 	},
 	NotReloaded {
 		summary: String,
@@ -69,7 +71,8 @@ pub enum Event {
 	},
 	NothingChanged {
 		warnings: Vec<Diagnostic>,
-		texts: Option<Texts>
+		texts: Option<Texts>,
+		macros: Option<Vec<Macro>>
 	},
 	Macros(Vec<Macro>),
 	Skin {
@@ -352,10 +355,12 @@ impl Code {
 			if let Ok(reload) = current.reload_files(&self.root, &files) {
 				let texts = self.still_read(read);
 				watching.edited_since_built.extend(changed);
-				return match self.reload(&reload.changes, current, vec![], false, true, Read {
+				let read = Read {
 					defines: None,
-					texts: Some(texts)
-				}) {
+					texts: Some(texts),
+					source: None
+				};
+				return match self.reload(&reload.changes, current, vec![], false, true, read) {
 					None => false,
 					Some(true) => {
 						let current = match watching.applied.as_mut() {
@@ -402,7 +407,8 @@ impl Code {
 			true,
 			Read {
 				defines: read_with,
-				texts: Some(texts)
+				texts: Some(texts),
+				source: Some(&new)
 			}
 		) {
 			None => false,
@@ -519,7 +525,11 @@ impl Code {
 			files.sort();
 			if let Ok(reload) = watching.built.reload_files(&self.root, &files) {
 				let texts = Some(self.still_read(read));
-				let Some(applied) = self.reload(&reload.changes, &watching.built, vec![], true, true, Read { defines: None, texts }) else {
+				let Some(applied) = self.reload(&reload.changes, &watching.built, vec![], true, true, Read {
+					defines: None,
+					texts,
+					source: Some(&watching.built)
+				}) else {
 					return false;
 				};
 				if applied {
@@ -552,7 +562,12 @@ impl Code {
 		refuse_other_maps(&watching.built, &current, &mut changes);
 		let read_with = other_defines.then(|| selected.clone());
 		let texts = Some(self.still_read(read));
-		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, true, Read { defines: read_with, texts }) else {
+		let read = Read {
+			defines: read_with,
+			texts,
+			source: Some(&current)
+		};
+		let Some(applied) = self.reload(&changes, &watching.built, vec![], true, true, read) else {
 			return false;
 		};
 		if applied {
@@ -614,10 +629,12 @@ impl Code {
 			});
 		}
 		self.reloaded_resources.borrow_mut().clear();
-		match self.reload(&changes, current, resources, false, false, Read {
+		let read = Read {
 			defines: None,
-			texts: Some(Texts::new())
-		}) {
+			texts: Some(Texts::new()),
+			source: None
+		};
+		match self.reload(&changes, current, resources, false, false, read) {
 			None => false,
 			Some(true) => {
 				let reloaded = self.reloaded_resources.take();
@@ -691,6 +708,11 @@ impl Code {
 		self.reconnected.get() || self.send(Event::Ready)
 	}
 
+	fn changed_macros(&self, source: Option<&Snapshot>) -> Option<Vec<Macro>> {
+		let macros = source_macros(source?.macro_history()?);
+		(self.given_macros.borrow().as_ref() != Some(&macros)).then_some(macros)
+	}
+
 	fn give_macros(&self, parsed: Option<&Snapshot>) -> AdapterConnected {
 		let macros = match parsed.and_then(Snapshot::macro_history) {
 			Some(history) => source_macros(history),
@@ -734,7 +756,11 @@ impl Code {
 		whole: bool,
 		read: Read
 	) -> Option<bool> {
-		let Read { defines: read_with, texts } = read;
+		let Read {
+			defines: read_with,
+			texts,
+			source
+		} = read;
 		let applies_now = |deferred: &&Refusal| restarted && deferred.until == Until::Reboot;
 		let changes_nothing = changes.refused.is_empty()
 			&& changes.deferred.is_empty()
@@ -792,19 +818,26 @@ impl Code {
 			if let Some(defines) = read_with {
 				*self.running_defines.borrow_mut() = defines;
 			}
+			let macros = self.changed_macros(source);
 			let sent = self.send(Event::NothingChanged {
 				warnings: changes.warnings.clone(),
-				texts
+				texts,
+				macros: macros.clone()
 			});
+			if sent && macros.is_some() {
+				*self.given_macros.borrow_mut() = macros;
+			}
 			return (sent && self.refused_by(vec![], whole)).then_some(true);
 		}
 
+		let macros = self.changed_macros(source);
 		if !self.send(Event::Reload {
 			request: Box::new(request),
 			summary: Summary::of(changes).with_resources(files),
 			notes,
 			world: self.world.get(),
-			texts
+			texts,
+			macros: macros.clone()
 		}) {
 			return None;
 		}
@@ -818,6 +851,9 @@ impl Code {
 			}
 		};
 		if applied {
+			if macros.is_some() {
+				*self.given_macros.borrow_mut() = macros;
+			}
 			if let Some(defines) = read_with {
 				*self.running_defines.borrow_mut() = defines;
 			}
@@ -1325,7 +1361,12 @@ mod tests {
 		summary: String,
 		plan: String,
 		world: u64,
-		texts: Option<Texts>
+		texts: Option<Texts>,
+		macros: Option<Vec<String>>
+	}
+
+	fn names(macros: &[Macro]) -> Vec<String> {
+		macros.iter().map(|define| define.name.clone()).collect()
 	}
 
 	const BYOND: (u32, u32) = (516, 1689);
@@ -1402,12 +1443,14 @@ mod tests {
 					summary,
 					world,
 					texts,
+					macros,
 					..
 				} => Some(Prepared {
 					summary: summary.text(&[]),
 					plan: format!("{:#?}", request.plan),
 					world: *world,
-					texts: texts.clone()
+					texts: texts.clone(),
+					macros: macros.as_deref().map(names)
 				}),
 				Event::NotReloaded { summary, refused, .. } => panic!("not reloaded: {summary}: {refused:?}"),
 				Event::NothingChanged { .. } => panic!("nothing changed"),
@@ -1545,7 +1588,7 @@ mod tests {
 		worker.commands.send(Command::Defines(vec![("FLAG".to_owned(), None)])).unwrap();
 		worker.applied(false);
 		let macros = worker.next("macros", |event| match event {
-			Event::Macros(macros) => Some(macros.iter().map(|define| define.name.clone()).collect::<Vec<_>>()),
+			Event::Reload { macros: Some(macros), .. } | Event::NothingChanged { macros: Some(macros), .. } => Some(names(macros)),
 			_ => None
 		});
 		assert_eq!(macros, ["FLAG"]);
@@ -1559,6 +1602,24 @@ mod tests {
 		assert_eq!(worker.prepared().summary, "reloaded /b, /c");
 		worker.applied(false);
 		assert_eq!(worker.parses(), 6);
+	}
+
+	#[test]
+	fn a_reload_brings_the_macros_its_source_changed() {
+		let worker = Worker::start("reload-macros");
+		worker.write("a", &format!("#define ADDED 2\n{}", body("a", "return ADDED")));
+		assert_eq!(worker.prepared().macros, Some(vec!["ADDED".to_owned()]));
+		worker.applied(false);
+		worker.write("a", &format!("#define ADDED 2\n{}", body("a", "return ADDED + 1")));
+		assert_eq!(worker.prepared().macros, None);
+		worker.applied(false);
+		worker.write("b", &format!("{}#define UNUSED 3\n", body("b", "return 1")));
+		let unused = worker.next("no changes", |event| match event {
+			Event::NothingChanged { macros, .. } => Some(macros.as_deref().map(names)),
+			Event::Reload { summary, .. } => panic!("reloaded: {}", summary.text(&[])),
+			_ => None
+		});
+		assert_eq!(unused, Some(vec!["ADDED".to_owned(), "UNUSED".to_owned()]));
 	}
 
 	#[test]

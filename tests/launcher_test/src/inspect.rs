@@ -615,16 +615,13 @@ fn on_an_object(pid: &str) {
 }
 
 #[track_caller]
-fn eval_becomes(pid: &str, expression: &str, wanted: &str) {
-	let mut got = String::new();
-	for _ in 0..100 {
-		got = Cli::new(pid).ran(&["eval", expression], None).out;
-		if got.trim() == wanted {
-			return;
-		}
-		std::thread::sleep(std::time::Duration::from_millis(100));
-	}
-	panic!("eval {} gave {}, not {}", expression, got, wanted);
+fn newest_entry(pid: &str) -> String {
+	let printed = run(pid, &["log", "--last", "1", "--json"], 0).out;
+	let number = printed
+		.lines()
+		.last()
+		.map_or(0, |line| serde_json::from_str::<Value>(line).unwrap()["number"].as_u64().unwrap());
+	number.to_string()
 }
 
 fn macros(pid: &str, code: &Path) {
@@ -674,10 +671,14 @@ fn macros(pid: &str, code: &Path) {
 	println!("ok: macros in conditions, logpoints and frame evaluation");
 
 	let source = std::fs::read_to_string(code).unwrap();
+	let since = newest_entry(pid);
 	std::fs::write(code, source.replace("#define ANSWER 42", "#define ANSWER 43\n#define GONE 2")).unwrap();
-	eval_becomes(pid, "ANSWER + GONE", "45");
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	assert_eq!(run(pid, &["eval", "ANSWER + GONE"], 0).out, "45\n");
+	let since = newest_entry(pid);
 	std::fs::write(code, &source).unwrap();
-	eval_becomes(pid, "ANSWER", "42");
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	assert_eq!(run(pid, &["eval", "ANSWER"], 0).out, "42\n");
 	assert!(fails(pid, &["eval", "GONE"]).starts_with("undefined variable: GONE"));
 	println!("ok: macro updates after reload");
 }

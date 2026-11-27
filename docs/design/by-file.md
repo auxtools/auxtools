@@ -57,6 +57,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Ordering stop events after resume responses](cli/0022-report-stops-after-the-response-that-resumed.md): `Input::Stopped` arm of the adapter loop
 - [DAP and VS Code display rules for frames, variables, and disassembly](cli/0023-dap-and-vs-code-display-rules.md): `stack_trace`, `variables`, `disassemble`
 - [Resolving breakpoint lines under hot reload](cli/0024-breakpoint-lines-under-hot-reload.md): `UnsavedArguments`, `unsaved_changed`, `set_breakpoints`, `code_changed`, and the `code::Event::Reload` arm of `code_event`
+- [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `Adapter::take_macros`
 - [Evaluation limits for hover, completion, and watch expressions](tests/0034-what-hover-completion-and-watches-evaluate.md): `hover_refuses`
 - [Deferring breakpoints sent on save until hot reload](tests/0051-breakpoints-sent-on-save-wait-for-the-reload.md): `sourceModified` handling
 
@@ -134,7 +135,7 @@ file after adding a note or changing an `## Applies to` list.
 
 - [Restoring hot reloads, skins, and resources across a reboot](cli/0003-reloads-across-a-reboot.md): `catch_up`, `restore_resources`, `reload_resources`, and the wait for `Command::Reloaded` in `reload`
 - [Refused reloads, partial failures, and removed definitions](cli/0015-what-a-reload-refuses-and-leaves-behind.md): removed-variable filter in the reload path
-- [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `Code::run`, `MOST_ALONE`, `give_back_memory`
+- [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `Code::run`, `MOST_ALONE`, `give_back_memory`, `Code::changed_macros`, `Code::give_macros`
 - [Detecting changed source files by modification time](cli/0030-detecting-changed-files.md): `STAMP_LAG`, `Watched`, `unless_saved_since`, `listed_times`, `listed`
 
 ### `auxtools-cli/src/coverage.rs`

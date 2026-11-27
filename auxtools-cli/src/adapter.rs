@@ -801,7 +801,8 @@ impl Adapter {
 				summary,
 				notes,
 				world,
-				texts
+				texts,
+				macros
 			} => {
 				let applied = if self.debuggee.as_ref().is_some_and(|d| d.generation != world) {
 					self.out.console(format!(
@@ -811,7 +812,7 @@ impl Adapter {
 					false
 				} else {
 					self.reload_seen = Some(std::time::SystemTime::now());
-					self.reload(*request, &summary, notes)
+					self.reload(*request, &summary, notes, macros)
 				};
 				if let Some(texts) = texts.filter(|_| applied) {
 					self.code_changed(Some(&texts));
@@ -838,17 +839,19 @@ impl Adapter {
 				self.reload_state("failed", Some(summary.clone()));
 				self.journal_reload(false, summary, errors, texts(&warnings));
 			}
-			code::Event::NothingChanged { warnings, texts: read } => {
+			code::Event::NothingChanged {
+				warnings,
+				texts: read,
+				macros
+			} => {
 				if let Some(read) = read {
 					self.code_changed(Some(&read));
 				}
+				self.take_macros(macros);
 				self.reload_state("reloaded", Some("no changes to the running code".to_owned()));
 				self.journal_reload(true, "no runtime changes".to_owned(), vec![], texts(&warnings));
 			}
-			code::Event::Macros(macros) => {
-				self.macros = Some(macros);
-				self.give_macros();
-			}
+			code::Event::Macros(macros) => self.take_macros(Some(macros)),
 			code::Event::Skin {
 				request,
 				file,
@@ -894,13 +897,20 @@ impl Adapter {
 		self.code_read = true;
 	}
 
+	fn take_macros(&mut self, macros: Option<Vec<aux::Macro>>) {
+		if macros.is_some() {
+			self.macros = macros;
+			self.give_macros();
+		}
+	}
+
 	fn give_macros(&mut self) {
 		if let (Some(macros), Some(debuggee)) = (&self.macros, &mut self.debuggee) {
 			let _ = debuggee.send(&AuxRequest::Defines(macros.clone()));
 		}
 	}
 
-	fn reload(&mut self, request: aux::HotReloadRequest, summary: &code::Summary, notes: Vec<Diagnostic>) -> bool {
+	fn reload(&mut self, request: aux::HotReloadRequest, summary: &code::Summary, notes: Vec<Diagnostic>, macros: Option<Vec<aux::Macro>>) -> bool {
 		self.reload_started = Some(Instant::now());
 		let unlinked: Vec<String> = request
 			.plan
@@ -931,6 +941,7 @@ impl Adapter {
 		};
 		if result.applied {
 			self.follow_reloaded_breakpoints();
+			self.take_macros(macros);
 		}
 		self.reloaded_resources = result.resources.clone();
 		let summary = summary.text(&result.skipped);
