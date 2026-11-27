@@ -62,6 +62,7 @@ struct CallSite {
     args: usize,
     call: usize,
     receiver_in_cache: bool,
+    depth: usize,
 }
 
 #[derive(Clone)]
@@ -1449,7 +1450,12 @@ impl<'a> Compiler<'a> {
             args,
             call: self.nodes.len() - 1,
             receiver_in_cache,
+            depth: self.expression_depth(),
         });
+    }
+
+    fn expression_depth(&self) -> usize {
+        self.short_circuit_labels.len()
     }
 
     fn speculate<T>(&mut self, look: impl FnOnce(&mut Self, usize) -> T) -> T {
