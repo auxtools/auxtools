@@ -1120,6 +1120,34 @@ fn new_vars_and_their_overrides() {
 }
 
 #[test]
+fn a_new_var_names_the_proc_dreammaker_gives_for_type_proc() {
+    let before = "/datum/t/proc/f()\n/datum/t/f()\n/datum/t/c\n/datum/u\n";
+    let after = "/datum/t/proc/f()\n/datum/t/f()\n/datum/t/c\n/datum/u\n\tvar/handler = /datum/t::f()\n\tvar/child = /datum/t/c::f()\n";
+    let changes = changes("new-var-proc-reference", before, after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let mut values: Vec<(String, ConstValue)> = changes
+        .plan
+        .new_vars
+        .iter()
+        .map(|v| (v.var.clone(), v.value.clone()))
+        .collect();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        values,
+        [
+            (
+                "child".to_owned(),
+                ConstValue::Path("/datum/t/f".to_owned())
+            ),
+            (
+                "handler".to_owned(),
+                ConstValue::Path("/datum/t/f".to_owned())
+            ),
+        ]
+    );
+}
+
+#[test]
 fn removing_an_override_goes_back_to_the_inherited_default() {
     let before = "/datum/a\n\tvar/x = 1\n/datum/a/b\n\tx = 2\n";
     let after = "/datum/a\n\tvar/x = 1\n/datum/a/b\n";
@@ -1222,59 +1250,90 @@ fn definitions_are_numbered_in_the_order_dreammaker_gives_them() {
             "/datum/p/f()\n\treturn 1\n/datum/p/proc/f()\n\treturn 2\n",
             "/datum/p/f",
             1,
+            Some("/datum/p/proc/f"),
         ),
         (
             "after-a-declared-proc",
             "/datum/p/proc/g()\n/datum/p/f()\n\treturn 1\n/datum/p/proc/f()\n\treturn 2\n",
             "/datum/p/f",
             0,
+            Some("/datum/p/f"),
         ),
         (
             "between-overrides",
             "/datum/p/f()\n\treturn 1\n/datum/p/proc/g()\n/datum/p/f()\n\treturn 3\n/datum/p/proc/f()\n\treturn 2\n",
             "/datum/p/f",
             1,
+            None,
         ),
         (
             "after-a-declared-verb",
             "/datum/p/verb/g()\n/datum/p/f()\n\treturn 1\n/datum/p/proc/f()\n\treturn 2\n",
             "/datum/p/f",
             1,
+            Some("/datum/p/proc/f"),
         ),
         (
             "verb-after-a-declared-verb",
             "/datum/p/verb/g()\n/datum/p/f()\n\treturn 1\n/datum/p/verb/f()\n\treturn 2\n",
             "/datum/p/f",
             0,
+            Some("/datum/p/f"),
         ),
         (
             "after-a-parent-proc",
             "/datum/proc/g()\n/datum/p/f()\n\treturn 1\n/datum/p/proc/f()\n\treturn 2\n",
             "/datum/p/f",
             1,
+            Some("/datum/p/proc/f"),
         ),
         (
             "global",
             "/g()\n\treturn 1\n/proc/g()\n\treturn 2\n",
             "/g",
             1,
+            None,
         ),
         (
             "type-with-procs-in-stddef",
             "/icon/f()\n\treturn 1\n/icon/proc/f()\n\treturn 2\n",
             "/icon/f",
             0,
+            Some("/icon/f"),
         ),
         (
             "type-without-procs-in-stddef",
             "/mob/f()\n\treturn 1\n/mob/proc/f()\n\treturn 2\n",
             "/mob/f",
             1,
+            Some("/mob/proc/f"),
         ),
     ];
-    for (name, code, path, declaration) in cases {
+    for (name, code, path, declaration, target) in cases {
         let changes = changes_of(name, code, &code.replace("return 2", "return 5"));
         assert_eq!(reloaded(&changes), [key(path, declaration)], "{name}");
+        let Some(target) = target else { continue };
+        let ty = &path[..path.rfind('/').unwrap()];
+        let after = format!(
+            "{}/proc/calls()\n\treturn {}::f()\n",
+            code.replace("return 2", "return 5"),
+            ty
+        );
+        let changes = changes_of(name, code, &after);
+        let calls = changes
+            .plan
+            .new_procs
+            .iter()
+            .find(|p| p.code.proc == key("/calls", 0))
+            .unwrap_or_else(|| panic!("{}: no new /calls in {:?}", name, changes.refused));
+        let code = dmasm_bytecode::format(&calls.code.nodes);
+        assert!(
+            code.contains(&format!("PushVal {}\n", target)),
+            "{}: expected PushVal {} in\n{}",
+            name,
+            target,
+            code
+        );
     }
 }
 
@@ -3714,4 +3773,187 @@ fn changed_initializers_are_deferred_to_a_reboot() {
 
     let changes = changes_of("deferred-moved", before, &format!("\n\n{}", before));
     assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+}
+
+#[test]
+fn unchanged_code_naming_a_retargeted_proc_path_is_compiled_again() {
+    let before =
+        "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+                  /proc/calls()\n\treturn call(new /datum/t, /datum/t/f)()\n\n\
+                  /proc/declared()\n\treturn call(new /datum/t, /datum/t/proc/f)()\n\n\
+                  /datum/names\n\tvar/said = /datum/t/f\n\tvar/list/all_said = list(/datum/t/f)\n\n\
+                  /datum/names/more\n";
+    let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
+    let changes = changes("retargeted-removed", before, &removed);
+    assert_eq!(reloaded(&changes), [key("/calls", 0)]);
+    let defaults: Vec<(&str, &[String])> = changes
+        .plan
+        .var_defaults
+        .iter()
+        .map(|d| (d.var.as_str(), d.types.as_slice()))
+        .collect();
+    assert_eq!(
+        defaults,
+        [(
+            "said",
+            &["/datum/names".to_owned(), "/datum/names/more".to_owned()][..]
+        )]
+    );
+    let inits: Vec<&str> = changes
+        .plan
+        .init_procs
+        .iter()
+        .map(|i| i.type_path.as_str())
+        .collect();
+    assert_eq!(inits, ["/datum/names", "/datum/names/more"]);
+
+    let inserted = before.replace(
+        "/datum/t/f()\n\treturn 1\n",
+        "/datum/t/f()\n\treturn 3\n\n/datum/t/f()\n\treturn 1\n",
+    );
+    let changes = changes_of("retargeted-inserted", before, &inserted);
+    assert_eq!(reloaded(&changes), [key("/calls", 0)]);
+    assert_eq!(
+        changes.plan.var_defaults.len(),
+        1,
+        "{:?}",
+        changes.plan.var_defaults
+    );
+
+    let appended = format!("{before}\n/datum/t/f()\n\treturn 4\n");
+    let changes = changes_of("retargeted-appended", before, &appended);
+    assert_eq!(reloaded(&changes), []);
+    assert!(
+        changes.plan.var_defaults.is_empty(),
+        "{:?}",
+        changes.plan.var_defaults
+    );
+    assert!(changes.plan.init_procs.is_empty());
+}
+
+#[test]
+fn uncompiled_code_naming_a_retargeted_proc_path_is_refused() {
+    let before = "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+                  /proc/calls(x)\n\tswitch(x)\n\t\tif(x)\n\t\t\treturn call(new /datum/t, /datum/t/f)()\n";
+    let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
+    let changes = changes("retargeted-uncompiled", before, &removed);
+    let refused: Vec<String> = changes.refused.iter().map(|r| format!("{r:#}")).collect();
+    assert_eq!(
+        refused,
+        [
+            "/calls: references a proc whose definitions changed, so it must be recompiled, but it \
+          failed to compile: unsupported: `switch` case that is not a simple constant"
+        ]
+    );
+}
+
+#[test]
+fn unchanged_code_naming_a_child_path_follows_its_first_override() {
+    let before = "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/middle/f()\n\treturn 1\n\n\
+                  /datum/t/middle/child\n\n\
+                  /proc/calls()\n\treturn call(new /datum/t/middle/child, /datum/t/middle/child::f())()\n";
+    let added = format!("{before}\n/datum/t/middle/child/f()\n\treturn 2\n");
+    let changes = changes("retargeted-child-added", before, &added);
+    assert_eq!(reloaded(&changes), [key("/calls", 0)]);
+
+    let changes = changes_of("retargeted-child-removed", &added, before);
+    assert_eq!(reloaded(&changes), [key("/calls", 0)]);
+}
+
+#[test]
+fn unchanged_code_reading_a_default_that_names_a_retargeted_path_is_compiled_again() {
+    let before =
+        "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+                  /datum/config\n\tvar/handler = /datum/t/f\n\n\
+                  /proc/reads()\n\treturn /datum/config::handler\n\n\
+                  /proc/unrelated()\n\treturn 3\n\n\
+                  /datum/holder\n\tvar/list/handlers = list(/datum/config::handler)\n";
+    let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
+    let changes = changes("retargeted-folded", before, &removed);
+    assert_eq!(reloaded(&changes), [key("/reads", 0)]);
+    let inits: Vec<&str> = changes
+        .plan
+        .init_procs
+        .iter()
+        .map(|i| i.type_path.as_str())
+        .collect();
+    assert_eq!(inits, ["/datum/holder"]);
+}
+
+#[test]
+fn a_verbs_unchanged_in_list_naming_a_retargeted_path_is_compiled_again() {
+    let before = "/datum/t/proc/f()\n\treturn list(0)\n\n/datum/t/f()\n\treturn list(1)\n\n\
+                  /datum/t/f()\n\treturn list(2)\n\n\
+                  /mob/verb/choose(x in call(new /datum/t, /datum/t/f)())\n\treturn x\n";
+    for (name, body) in [
+        ("retargeted-in-list", "return x"),
+        ("retargeted-in-list-body", "return 1"),
+    ] {
+        let after = before
+            .replace("/datum/t/f()\n\treturn list(1)\n\n", "")
+            .replace("return x", body);
+        let changes = changes_of(name, before, &after);
+        assert_eq!(reloaded(&changes), [key("/mob/choose", 0)], "{}", name);
+        let in_list = &changes.plan.reloads[0].params[0].in_list;
+        assert!(matches!(in_list, InList::New(_)), "{}: {:?}", name, in_list);
+    }
+}
+
+#[test]
+fn uncompiled_code_naming_another_types_path_of_the_same_name_is_not_refused() {
+    let before = "/datum/a/proc/f()\n\treturn 0\n\n/datum/a/f()\n\treturn 1\n\n/datum/a/f()\n\treturn 2\n\n\
+                  /datum/b/proc/f()\n\treturn 0\n\n/datum/b/f()\n\treturn 3\n\n\
+                  /proc/other(x)\n\tswitch(x)\n\t\tif(x)\n\t\t\treturn call(new /datum/b, /datum/b/f)()\n";
+    let removed = before.replace("/datum/a/f()\n\treturn 1\n\n", "");
+    let changes = changes("retargeted-other-uncompiled", before, &removed);
+    assert_eq!(reloaded(&changes), []);
+}
+
+#[test]
+fn unchanged_code_naming_a_types_last_definition_follows_it() {
+    let before =
+        "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+                  /proc/calls()\n\treturn call(new /datum/t, /datum/t::f())()\n\n\
+                  /datum/names\n\tvar/said = /datum/t::f()\n";
+    let removed = before.replace("/datum/t/f()\n\treturn 2\n\n", "");
+    let changes = changes("last-removed", before, &removed);
+    assert_eq!(reloaded(&changes), [key("/calls", 0)]);
+    let code = dmasm_bytecode::format(&changes.plan.reloads[0].nodes);
+    assert!(code.contains("PushVal /datum/t/f\n"), "{}", code);
+    let defaults: Vec<(&str, &ConstValue, &[String])> = changes
+        .plan
+        .var_defaults
+        .iter()
+        .map(|d| (d.var.as_str(), &d.value, d.types.as_slice()))
+        .collect();
+    assert_eq!(
+        defaults,
+        [(
+            "said",
+            &ConstValue::Path("/datum/t/f".to_owned()),
+            &["/datum/names".to_owned()][..]
+        )]
+    );
+
+    let changes = changes_of("last-appended", &removed, before);
+    let refused: Vec<String> = changes.refused.iter().map(|r| format!("{r:#}")).collect();
+    assert_eq!(
+        refused,
+        [
+            "/datum/names: failed to compile initializer: line 14: unsupported: `type::proc()` \
+          targeting a type's second or later override",
+            "/calls: references a proc whose definitions changed, so it must be recompiled, but it \
+          failed to compile: unsupported: `type::proc()` targeting a type's second or \
+          later override"
+        ]
+    );
+}
+
+#[test]
+fn uncompiled_code_naming_a_declaration_that_stays_is_not_refused() {
+    let before = "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+                  /proc/declared(x)\n\tswitch(x)\n\t\tif(x)\n\t\t\treturn call(new /datum/t, /datum/t/proc/f)()\n";
+    let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
+    let changes = changes("declared-uncompiled", before, &removed);
+    assert_eq!(reloaded(&changes), []);
 }

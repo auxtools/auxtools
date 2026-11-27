@@ -6,7 +6,9 @@ use dreammaker::objtree::{ObjectTree, ProcValue, TypeRef};
 use dreammaker::preprocessor::DefineHistory;
 use dreammaker::{Context, FileId, Severity};
 
-use crate::compiler::{compile_proc, CompiledProc, ProcSource};
+use crate::compiler::{
+    compile_proc, definition_order, definition_order_at, CompiledProc, ProcSource,
+};
 use crate::diagnostic::{Diagnostic, Id};
 use crate::syntax;
 
@@ -14,6 +16,8 @@ use crate::syntax;
 mod moved;
 #[path = "reload_reparent.rs"]
 mod reparent;
+#[path = "reload_retargeted.rs"]
+mod retargeted;
 use crate::{ByondVersion, Instruction, Node, StaticScope};
 pub use reparent::{Reparented, ReparentedType};
 
@@ -985,8 +989,9 @@ impl Snapshot {
         Ok(contents)
     }
 
-    pub fn from_tree(ctx: Context, tree: ObjectTree) -> Snapshot {
+    pub fn from_tree(ctx: Context, mut tree: ObjectTree) -> Snapshot {
         crate::compiler::new_tree();
+        crate::compiler::resolve_proc_references(&mut tree);
         let mut procs = BTreeMap::new();
         for ty in tree.iter_types() {
             for name in ty.get().procs.keys() {
@@ -1704,7 +1709,9 @@ pub fn diff(old: &Snapshot, new: &Snapshot, changed_files: Option<&HashSet<PathB
         .plan
         .new_types
         .sort_by_cached_key(|t| depth(&t.path));
-    compare_inits(old, new, &mut changes);
+    let retargeted = retargeted::retargeted(old, new, &realigned, &changes);
+    compare_inits(old, new, &retargeted, &mut changes);
+    retargeted::path_defaults(&retargeted, &mut changes);
     for (key, type_path, name, declared, verb) in new_procs {
         let code = new.compile_reload(&key).and_then(|mut code| {
             new.compile_in_lists(&key, &mut code, |_, _| true)?;
@@ -1821,6 +1828,7 @@ pub fn diff(old: &Snapshot, new: &Snapshot, changed_files: Option<&HashSet<PathB
     const_users(old, new, &realigned, &mut changes);
     reparent::reparented_users(old, new, &realigned, &mut changes);
     moved::moved_users(old, new, &realigned, &mut changes);
+    retargeted::path_users(&retargeted, &mut changes);
     global_init::compare(old, new, &mut changes);
     changes.collect_warnings();
     changes
@@ -2474,15 +2482,27 @@ fn type_macro_is(expression: &mut dreammaker::ast::Expression, path: &str) {
     }
 }
 
-fn compare_inits(old: &Snapshot, new: &Snapshot, changes: &mut Changes) {
+fn compare_inits(
+    old: &Snapshot,
+    new: &Snapshot,
+    retargeted: &retargeted::Retargeted,
+    changes: &mut Changes,
+) {
     let (mut old_memo, mut new_memo) = (HashMap::new(), HashMap::new());
     for n in new.tree.iter_types() {
         if n.is_root() {
             continue;
         }
         let new_inits = inits(n, &mut new_memo).to_vec();
+        let mut before = None;
         match old.find_type(&n.get().path) {
-            Some(o) if inits(o, &mut old_memo) == new_inits.as_slice() => continue,
+            Some(o) if inits(o, &mut old_memo) == new_inits.as_slice() => {
+                if !retargeted.inits_might_name(&new_inits) {
+                    continue;
+                }
+                let old_inits = inits(o, &mut old_memo).to_vec();
+                before = Some(old.compile_init(o, &old_inits));
+            }
             Some(_) => {}
             None => {
                 let mut at = n.parent_type();
@@ -2503,6 +2523,13 @@ fn compare_inits(old: &Snapshot, new: &Snapshot, changes: &mut Changes) {
             None
         } else {
             match new.compile_init(n, &new_inits) {
+                Ok(code)
+                    if before.is_some_and(|before| {
+                        before.is_ok_and(|before| retargeted.same_targets(&before, &code))
+                    }) =>
+                {
+                    continue
+                }
                 Ok(code) => Some(code),
                 Err(e) => {
                     changes.refused.push(
@@ -2522,56 +2549,6 @@ fn compare_inits(old: &Snapshot, new: &Snapshot, changes: &mut Changes) {
             code,
         });
     }
-}
-
-const STDDEF_PROC_BLOCKS: &[&str] = &[
-    "/sound",
-    "/icon",
-    "/matrix",
-    "/database",
-    "/database/query",
-    "/regex",
-    "/generator",
-];
-
-fn definition_order(ty: TypeRef, name: &str) -> Vec<usize> {
-    definition_order_at(ty, name, |location| location)
-}
-
-fn definition_order_at(
-    ty: TypeRef,
-    name: &str,
-    at: impl Fn(dreammaker::Location) -> dreammaker::Location,
-) -> Vec<usize> {
-    let Some(proc) = ty.get().procs.get(name) else {
-        return vec![];
-    };
-    let declaration = proc
-        .declaration
-        .as_ref()
-        .filter(|d| d.location.file != FileId::BUILTINS);
-    let place = |v: &ProcValue| match declaration {
-        Some(d) if v.location == d.location => {
-            if d.kind == dreammaker::ast::ProcDeclKind::Proc
-                && STDDEF_PROC_BLOCKS.contains(&ty.get().path.as_str())
-            {
-                return None;
-            }
-            ty.get()
-                .procs
-                .values()
-                .filter_map(|p| p.declaration.as_ref())
-                .filter(|other| other.kind == d.kind && other.location.file != FileId::BUILTINS)
-                .map(|other| at(other.location))
-                .min()
-        }
-        _ => Some(at(v.location)),
-    };
-    let mut order: Vec<usize> = (0..proc.value.len())
-        .filter(|&i| proc.value[i].location.file != FileId::BUILTINS)
-        .collect();
-    order.sort_by_key(|&i| place(&proc.value[i]));
-    order
 }
 
 fn real<'a>(ty: TypeRef<'a>, name: &str) -> Vec<&'a ProcValue> {
@@ -2971,7 +2948,10 @@ fn compare_types(
                         var_default(old, new, path, name.as_str(), false, changes);
                     }
                 }
-                Some(old_var) if old_var.value.expression != var.value.expression => {
+                Some(old_var)
+                    if old_var.value.expression != var.value.expression
+                        || old_var.value.constant != var.value.constant =>
+                {
                     var_default(old, new, path, name.as_str(), false, changes);
                 }
                 Some(old_var)
@@ -3694,23 +3674,7 @@ fn var_default(
         }
     }
 
-    let mut types = vec![];
-    for ty in new.tree.iter_types() {
-        let mut at = ty;
-        loop {
-            if at.index() == n.index() {
-                types.push(ty.get().path.clone());
-                break;
-            }
-            if at.get().vars.contains_key(name) {
-                break;
-            }
-            match at.parent_type() {
-                Some(parent) => at = parent,
-                None => break,
-            }
-        }
-    }
+    let types = default_types(new, n, name);
     if builtin {
         if !BUILTIN_VARS.contains(&name) {
             changes.refused.push(
@@ -3745,6 +3709,27 @@ fn var_default(
         value,
         types,
     });
+}
+
+fn default_types(new: &Snapshot, n: TypeRef, name: &str) -> Vec<String> {
+    let mut types = vec![];
+    for ty in new.tree.iter_types() {
+        let mut at = ty;
+        loop {
+            if at.index() == n.index() {
+                types.push(ty.get().path.clone());
+                break;
+            }
+            if at.get().vars.contains_key(name) {
+                break;
+            }
+            match at.parent_type() {
+                Some(parent) => at = parent,
+                None => break,
+            }
+        }
+    }
+    types
 }
 
 const CLIENT_SETTINGS: &[&str] = &[

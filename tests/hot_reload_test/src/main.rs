@@ -6,7 +6,7 @@ use std::{
 };
 
 use auxtools_protocol::*;
-use dmasm::reload::{diff, Changes, ParseOptions, Snapshot};
+use dmasm::reload::{diff, Changes, InList, ParseOptions, Snapshot};
 use test_support::{
 	debug::{breakpoint_id, Client, World},
 	paths,
@@ -2102,9 +2102,136 @@ fn definitions(built: Built) {
 			"/proc/calls_twice()\n\treturn call(new /datum/twice, /datum/twice/speak)()\n\n/proc/first_def()\n"
 		)
 	]);
+	let chooser = changes.plan.reloads.iter().find(|r| r.proc.path == "/mob/chooser/choose_twice");
+	assert!(
+		matches!(chooser.map(|r| &r.params[0].in_list), Some(InList::New(_))),
+		"the verb's unchanged `in` list isn't compiled again: {:?}",
+		chooser
+	);
+	assert_eq!(eval(&mut client, "calls_twice_unchanged()"), "\"first override\"");
 	reload(&mut watcher, &changes);
 	assert_eq!(eval(&mut client, "calls_twice()"), "\"second override\"");
 	println!("ok: new code names the first override left after a removal");
+
+	assert_eq!(eval(&mut client, "calls_twice_unchanged()"), "\"second override\"");
+	assert_eq!(
+		eval(&mut client, "call(new /datum/twice, (new /datum/names_twice).said)()"),
+		"\"second override\""
+	);
+	assert_eq!(
+		eval(&mut client, "call(new /datum/twice, (new /datum/names_twice).all_said[1])()"),
+		"\"second override\""
+	);
+	println!("ok: unchanged code names the first override left after a removal");
+
+	assert_eq!(
+		eval(&mut client, "call(new /datum/twice, reads_twice_default())()"),
+		"\"second override\""
+	);
+	assert_eq!(
+		eval(&mut client, "call(new /datum/twice, (new /datum/reads_names_twice).all[1])()"),
+		"\"second override\""
+	);
+	println!("ok: unchanged code reads a default that names the first override left after a removal");
+
+	assert_eq!(eval(&mut client, "calls_inserted_unchanged()"), "\"old first override\"");
+	let changes = source.edit(
+		"reload.dm",
+		"/datum/inserted/speak()\n\treturn \"old first override\"\n",
+		"/datum/inserted/speak()\n\treturn \"inserted override\"\n\n/datum/inserted/speak()\n\treturn \"old first override\"\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "calls_inserted_unchanged()"), "\"inserted override\"");
+	println!("ok: unchanged code names an override inserted before the first");
+
+	assert_eq!(eval(&mut client, "calls_kin_child()"), "\"parent override\"");
+	let changes = source.edit(
+		"reload.dm",
+		"/datum/kin/middle/child\n",
+		"/datum/kin/middle/child/speak()\n\treturn \"child override\"\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "calls_kin_child()"), "\"child override\"");
+	let changes = source.edit(
+		"reload.dm",
+		"/datum/kin/middle/child/speak()\n\treturn \"child override\"\n",
+		"/datum/kin/middle/child\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "calls_kin_child()"), "\"parent override\"");
+	println!("ok: unchanged code names a child's first override as it is added and removed");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/datum/holder\n",
+		"/datum/holder\n\tvar/handler = /datum/handled::respond()\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "call(new /datum/handled, (new /datum/holder).handler)()"),
+		"\"override\""
+	);
+	println!("ok: a new var's default of type::proc() names the proc DreamMaker gives");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/obj/picker\n",
+		"/obj/picker/pick_one()\n\treturn \"override\"\n\n/obj/picker/verb/pick_one()\n\treturn \"verb\"\n\n/proc/calls_picker()\n\treturn call(new \
+		 /obj/picker, /obj/picker::pick_one())()\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "calls_picker()"), "\"override\"");
+	println!("ok: type::proc() of a verb added with its override names the override");
+
+	assert_eq!(eval(&mut client, "calls_last_unchanged()"), "\"last override\"");
+	let changes = source.edit("reload.dm", "/datum/last/speak()\n\treturn \"last override\"\n", "");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "calls_last_unchanged()"), "\"first override\"");
+	assert_eq!(
+		eval(&mut client, "call(new /datum/last, (new /datum/names_last).said)()"),
+		"\"first override\""
+	);
+	println!("ok: unchanged type::proc() names the last definition left after a removal");
+
+	let changes = source.edit("reload.dm", "/datum/kept/speak()\n\treturn \"kept first override\"\n", "");
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "calls_kept_declaration()"),
+		"\"kept declaration, then kept third override\""
+	);
+	println!("ok: code dmasm can't compile that names a declaration left in place stays");
+
+	let changes = source.edit("reload.dm", "/datum/lone/speak()\n\treturn \"lone override\"\n", "");
+	let result = expect_reload_result(watcher.request(reload_request(&changes)));
+	assert!(
+		!result.applied,
+		"a reload that leaves code naming a removed proc was applied: {:?}",
+		result
+	);
+	assert_eq!(result.errors, [
+		"/calls_lone_unchanged: references /datum/lone/speak, which this reload removes. Keep its definition or update the reference",
+		"variable said: references /datum/lone/speak, which this reload removes. Keep its definition or update the reference"
+	]);
+	assert_eq!(eval(&mut client, "calls_lone_unchanged()"), "\"lone override\"");
+	assert_eq!(
+		eval(&mut client, "call(new /datum/lone, (new /datum/names_lone).said)()"),
+		"\"lone override\""
+	);
+	println!("ok: code that names a removed proc refuses the reload");
+
+	let changes = source.edit("reload.dm", "/datum/gone/proc/speak()\n\treturn \"gone declaration\"\n", "");
+	let result = expect_reload_result(watcher.request(reload_request(&changes)));
+	assert!(
+		!result.applied,
+		"a reload that leaves code naming a removed declaration was applied: {:?}",
+		result
+	);
+	assert_eq!(result.errors, [
+		"/calls_gone_unchanged: references /datum/gone/proc/speak, which this reload removes. Keep its definition or update the reference",
+		"variable gone_said: references /datum/gone/proc/speak, which this reload removes. Keep its definition or update the reference"
+	]);
+	assert_eq!(eval(&mut client, "calls_gone_unchanged()"), "\"gone declaration\"");
+	println!("ok: code that names a removed declaration refuses the reload");
 }
 
 fn types(built: Built) {

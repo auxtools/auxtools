@@ -140,3 +140,49 @@ var/datum/declared/declared_one = new
 
 /datum/early_apart/speak()
 	return "override apart"
+
+/proc/calls_twice_unchanged()
+	return call(new /datum/twice, /datum/twice/speak)()
+
+/datum/names_twice
+	var/said = /datum/twice/speak
+	var/list/all_said = list(/datum/twice/speak)
+
+/proc/calls_inserted_unchanged()
+	return call(new /datum/inserted, /datum/inserted/speak)()
+
+/proc/reads_twice_default()
+	return /datum/names_twice::said
+
+/datum/reads_names_twice
+	var/list/all = list(/datum/names_twice::said)
+
+/mob/chooser/verb/choose_twice(x in list(/datum/twice/speak))
+	return x
+
+/proc/calls_kin_child()
+	return call(new /datum/kin/middle/child, /datum/kin/middle/child::speak())()
+
+/proc/calls_lone_unchanged()
+	return call(new /datum/lone, /datum/lone/speak)()
+
+/datum/names_lone
+	var/said = /datum/lone/speak
+
+/datum/gone
+
+/proc/calls_gone_unchanged()
+	return call(new /datum/gone, /datum/gone/proc/speak)()
+
+/datum/names_gone
+	var/gone_said = /datum/gone/proc/speak
+
+/proc/calls_last_unchanged()
+	return call(new /datum/last, /datum/last::speak())()
+
+/datum/names_last
+	var/said = /datum/last::speak()
+
+/proc/calls_kept_declaration()
+	var/last = /datum/kept::speak()
+	return "[call(new /datum/kept, /datum/kept/proc/speak)()], then [call(new /datum/kept, last)()]"

@@ -204,12 +204,18 @@ struct PendingProc {
 	id: u32
 }
 
+enum Named {
+	Unchanged,
+	Proc(u32),
+	Removed
+}
+
 impl Pending {
-	fn proc_named(&self, path: &str) -> Option<u32> {
+	fn proc_named(&self, path: &str) -> Named {
 		let stripped = strip_path(path);
 		let mut added: Vec<&PendingProc> = self.procs.iter().filter(|new| strip_path(&new.path) == stripped).collect();
 		if added.is_empty() && !self.removed.iter().any(|(removed, _)| *removed == stripped) {
-			return None;
+			return Named::Unchanged;
 		}
 		added.sort_by_key(|new| new.override_id);
 		let mut order: Vec<(String, u32)> = Proc::overrides(path)
@@ -222,8 +228,22 @@ impl Pending {
 			let at = (new.override_id as usize).min(order.len());
 			order.insert(at, (new.path.clone(), new.id));
 		}
-		order.into_iter().find(|(own, _)| own == path).map(|(_, id)| id)
+		match order.into_iter().find(|(own, _)| own == path) {
+			Some((_, id)) => Named::Proc(id),
+			None => Named::Removed
+		}
 	}
+}
+
+fn removed_proc(path: &str) -> String {
+	format!(
+		"references {}, which this reload removes. Keep its definition or update the reference",
+		path
+	)
+}
+
+fn removed_path_type(path: &str) -> Option<(u8, u32)> {
+	AssembleEnv::type_value(path).filter(|(tag, _)| *tag != raw_types::values::ValueTag::ProcRef.0)
 }
 
 fn new_proc_path(new: &NewProc) -> String {
@@ -676,7 +696,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 			));
 		}
 	}
-	let stub = Proc::find("/proc/auxtools_expr_stub").is_some() || pending.proc_named("/proc/auxtools_expr_stub").is_some();
+	let stub = Proc::find("/proc/auxtools_expr_stub").is_some() || matches!(pending.proc_named("/proc/auxtools_expr_stub"), Named::Proc(_));
 	if (prepared.global_init_now.is_some() || !prepared.run_once.is_empty()) && !stub {
 		errors.push("cannot evaluate initial values: /proc/auxtools_expr_stub is missing from the world".to_owned());
 	}
@@ -2187,11 +2207,15 @@ fn const_value(value: &ConstValue, pending: &Pending) -> Result<(u32, u32), Stri
 		ConstValue::Number(n) => (0x2A, n.to_bits()),
 		ConstValue::String(text) => (0x06, leaked_string(text)?),
 		ConstValue::Path(path) => match pending.proc_named(path) {
-			Some(id) => (raw_types::values::ValueTag::ProcRef.0 as u32, id),
-			None => {
+			Named::Proc(id) => (raw_types::values::ValueTag::ProcRef.0 as u32, id),
+			Named::Unchanged => {
 				let (tag, data) = AssembleEnv
 					.get_type(path)
 					.ok_or_else(|| format!("type {} not found in the running world", path))?;
+				(tag as u32, data)
+			}
+			Named::Removed => {
+				let (tag, data) = removed_path_type(path).ok_or_else(|| removed_proc(path))?;
 				(tag as u32, data)
 			}
 		},
@@ -3658,17 +3682,28 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 	}
 
 	fn get_proc_index(&mut self, path: &str) -> Option<u32> {
-		if let Some(id) = self.pending.proc_named(path) {
-			return Some(id);
+		match self.pending.proc_named(path) {
+			Named::Proc(id) => Some(id),
+			Named::Unchanged => AssembleEnv.get_proc_index(path),
+			Named::Removed => {
+				self.error = Some(removed_proc(path));
+				None
+			}
 		}
-		AssembleEnv.get_proc_index(path)
 	}
 
 	fn get_type(&mut self, path: &str) -> Option<(u8, u32)> {
-		if let Some(id) = self.pending.proc_named(path) {
-			return Some((raw_types::values::ValueTag::ProcRef.0, id));
+		match self.pending.proc_named(path) {
+			Named::Proc(id) => Some((raw_types::values::ValueTag::ProcRef.0, id)),
+			Named::Unchanged => AssembleEnv.get_type(path),
+			Named::Removed => {
+				let found = removed_path_type(path);
+				if found.is_none() {
+					self.error = Some(removed_proc(path));
+				}
+				found
+			}
 		}
-		AssembleEnv.get_type(path)
 	}
 
 	fn get_resource_index(&mut self, path: &str) -> Option<u32> {

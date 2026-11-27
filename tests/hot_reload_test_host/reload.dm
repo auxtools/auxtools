@@ -249,3 +249,57 @@ var/mob/helper/small/old_helper = new
 
 /datum/twice/speak()
 	return "second override"
+
+/datum/inserted/proc/speak()
+	return "declaration"
+
+/datum/inserted/speak()
+	return "old first override"
+
+/datum/kin/proc/speak()
+	return "declaration"
+
+/datum/kin/middle/speak()
+	return "parent override"
+
+/datum/kin/middle/child
+
+/datum/lone/proc/speak()
+	return "declaration"
+
+/datum/lone/speak()
+	return "lone override"
+
+/obj/picker
+
+/datum/handled/proc/respond()
+	return "declaration"
+
+/datum/handled/respond()
+	return "override"
+
+/datum/holder
+
+/datum/gone/proc/speak()
+	return "gone declaration"
+
+/datum/last/proc/speak()
+	return "declaration"
+
+/datum/last/speak()
+	return "first override"
+
+/datum/last/speak()
+	return "last override"
+
+/datum/kept/proc/speak()
+	return "kept declaration"
+
+/datum/kept/speak()
+	return "kept first override"
+
+/datum/kept/speak()
+	return "kept second override"
+
+/datum/kept/speak()
+	return "kept third override"

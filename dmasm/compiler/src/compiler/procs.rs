@@ -906,20 +906,7 @@ pub(super) fn emit_type_scope(
             Ok(EvalKind::Stack)
         }
         Follow::ProcReference(name) => {
-            let mut current = Some(ty);
-            let mut found = None;
-            while let Some(t) = current {
-                if let Some(proc) = t.get().procs.get(name.as_str()) {
-                    if proc.declaration.is_none() && !t.is_root() {
-                        found = Some(format!("{}/{}", t.get().path, name));
-                    }
-                    break;
-                }
-                current = t.parent_type();
-            }
-            let proc_path = found
-                .or_else(|| resolve_proc_path(compiler, &format!("{}.proc/{}", path, name)))
-                .ok_or(CompileError::UnsupportedStatement("::"))?;
+            let proc_path = type_proc_path(ty, name.as_str())?;
             compiler.emit_ins(Instruction::PushVal(crate::operands::Value::Path(
                 proc_path,
             )));
@@ -927,6 +914,182 @@ pub(super) fn emit_type_scope(
         }
         _ => unreachable!(),
     }
+}
+
+pub fn type_proc_path(ty: TypeRef, name: &str) -> Result<String, CompileError> {
+    let mut current = Some(ty);
+    while let Some(t) = current {
+        if t.get().procs.contains_key(name) {
+            if !t.is_root() {
+                if let Some(found) = last_definition(t, name)? {
+                    return Ok(found);
+                }
+            }
+            break;
+        }
+        current = t.parent_type();
+    }
+    let mut current = Some(ty);
+    while let Some(t) = current {
+        if t.get()
+            .procs
+            .get(name)
+            .is_some_and(|p| p.declaration.is_some())
+        {
+            let prefix = if t.is_root() {
+                ""
+            } else {
+                t.get().path.as_str()
+            };
+            return Ok(format!("{}/proc/{}", prefix, name));
+        }
+        current = t.parent_type();
+    }
+    match ty.tree().root().get().procs.contains_key(name) {
+        true => Ok(format!("/proc/{}", name)),
+        false => Err(CompileError::UnsupportedStatement(
+            "`::` with an unknown type or member",
+        )),
+    }
+}
+
+pub fn resolve_proc_references(tree: &mut ObjectTree) {
+    use dreammaker::ast::{Expression, Follow, Term};
+    let mut found = vec![];
+    for ty in tree.iter_types() {
+        for (var_name, var) in ty.get().vars.iter() {
+            let Some(Expression::Base { term, follow }) = &var.value.expression else {
+                continue;
+            };
+            let [follow] = &follow[..] else {
+                continue;
+            };
+            let Follow::ProcReference(name) = &follow.elem else {
+                continue;
+            };
+            let mut term = &term.elem;
+            while let Term::Expr(inner) = term {
+                match &**inner {
+                    Expression::Base {
+                        term: inner,
+                        follow,
+                    } if follow.is_empty() => term = &inner.elem,
+                    _ => break,
+                }
+            }
+            let Term::Prefab(prefab) = term else {
+                continue;
+            };
+            if !prefab.vars.is_empty() {
+                continue;
+            }
+            let Some(on) = tree.find(&prefab.path.to_string()) else {
+                continue;
+            };
+            let constant = type_proc_path(on, name.as_str()).ok().map(|path| {
+                dreammaker::constants::Constant::Prefab(Box::new(
+                    dreammaker::ast::AbsolutePath::from(path.as_str()).into(),
+                ))
+            });
+            found.push((ty.index(), var_name.clone(), constant));
+        }
+    }
+    for (ty, name, constant) in found {
+        if let Some(var) = tree[ty].vars.get_mut(&name) {
+            var.value.constant = constant;
+        }
+    }
+}
+
+fn last_definition(t: TypeRef, name: &str) -> Result<Option<String>, CompileError> {
+    let Some(proc) = t.get().procs.get(name) else {
+        return Ok(None);
+    };
+    let is_declaration = |v: &ProcValue| {
+        proc.declaration
+            .as_ref()
+            .is_some_and(|d| d.location == v.location)
+    };
+    let mut order = definition_order(t, name);
+    if proc
+        .declaration
+        .as_ref()
+        .is_some_and(|d| d.kind == dreammaker::ast::ProcDeclKind::Verb)
+    {
+        order.retain(|&i| !is_declaration(&proc.value[i]));
+        if order.is_empty() {
+            return Err(CompileError::BadProcReference(format!(
+                "`{}` is a verb with no override on `{}`",
+                name,
+                t.get().path
+            )));
+        }
+    }
+    let overrides = order
+        .iter()
+        .filter(|&&i| !is_declaration(&proc.value[i]))
+        .count();
+    match order.last().map(|&i| &proc.value[i]) {
+        Some(last) if !is_declaration(last) => match overrides {
+            1 => Ok(Some(format!("{}/{}", t.get().path, name))),
+            _ => Err(CompileError::UnsupportedStatement(
+                "`type::proc()` targeting a type's second or later override",
+            )),
+        },
+        _ => Ok(None),
+    }
+}
+
+const STDDEF_PROC_BLOCKS: &[&str] = &[
+    "/sound",
+    "/icon",
+    "/matrix",
+    "/database",
+    "/database/query",
+    "/regex",
+    "/generator",
+];
+
+pub fn definition_order(ty: TypeRef, name: &str) -> Vec<usize> {
+    definition_order_at(ty, name, |location| location)
+}
+
+pub fn definition_order_at(
+    ty: TypeRef,
+    name: &str,
+    at: impl Fn(dreammaker::Location) -> dreammaker::Location,
+) -> Vec<usize> {
+    let Some(proc) = ty.get().procs.get(name) else {
+        return vec![];
+    };
+    let declaration = proc
+        .declaration
+        .as_ref()
+        .filter(|d| d.location.file != dreammaker::FileId::BUILTINS);
+    let place = |v: &ProcValue| match declaration {
+        Some(d) if v.location == d.location => {
+            if d.kind == dreammaker::ast::ProcDeclKind::Proc
+                && STDDEF_PROC_BLOCKS.contains(&ty.get().path.as_str())
+            {
+                return None;
+            }
+            ty.get()
+                .procs
+                .values()
+                .filter_map(|p| p.declaration.as_ref())
+                .filter(|other| {
+                    other.kind == d.kind && other.location.file != dreammaker::FileId::BUILTINS
+                })
+                .map(|other| at(other.location))
+                .min()
+        }
+        _ => Some(at(v.location)),
+    };
+    let mut order: Vec<usize> = (0..proc.value.len())
+        .filter(|&i| proc.value[i].location.file != dreammaker::FileId::BUILTINS)
+        .collect();
+    order.sort_by_key(|&i| place(&proc.value[i]));
+    order
 }
 
 pub(super) fn touches_cache(ins: &Instruction) -> bool {
