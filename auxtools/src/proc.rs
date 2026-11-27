@@ -41,7 +41,8 @@ fn entry_by_id(id: raw_types::procs::ProcId) -> *mut raw_types::procs::ProcEntry
 }
 
 impl Proc {
-	/// The override id of a proc set apart (see [`Proc::set_apart`])
+	/// Override ID (`u32::MAX`) assigned to a proc set apart with
+	/// [`Proc::set_apart`].
 	pub const APART: u32 = u32::MAX;
 
 	pub fn overrides<S: Into<String>>(path: S) -> Vec<Self> {
@@ -73,11 +74,20 @@ impl Proc {
 		entry_by_id(self.id)
 	}
 
+	/// Finds the first definition (override ID 0) of the proc at `path`.
+	///
+	/// `path` may be written with or without `/proc/` and `/verb/`. Use
+	/// [`Proc::find_override`] to look up subsequent definitions. Returns
+	/// `None` if no matching proc exists, or if called before initialization,
+	/// after shutdown, or off BYOND's thread.
 	pub fn find<S: Into<String>>(path: S) -> Option<Self> {
 		get_proc(path)
 	}
 
-	/// [`Proc::APART`] finds the one set apart.
+	/// Finds the definition of `path` with the given `override_id`.
+	///
+	/// Override ID `0` matches [`Proc::find`]. Passing [`Proc::APART`] returns
+	/// the proc most recently set apart for `path`.
 	pub fn find_override<S: Into<String>>(path: S, override_id: u32) -> Option<Self> {
 		get_proc_override(path, override_id)
 	}
@@ -182,6 +192,7 @@ impl Proc {
 		std::slice::from_raw_parts(ptr, count as usize)
 	}
 
+	/// Calls the proc with a null `src` and `usr`.
 	pub fn call(&self, args: &[&Value]) -> runtime::DMResult {
 		let mut ret = raw_types::values::Value {
 			tag: raw_types::values::ValueTag::Null,
@@ -203,7 +214,9 @@ impl Proc {
 		Err(runtime!("proc call failed"))
 	}
 
-	/// The helper gets [`Proc::APART`]; source definitions keep their ids.
+	/// Gives this proc the override id [`Proc::APART`]. The other definitions
+	/// keep their ids. A path has only one proc set apart, so this replaces any
+	/// earlier one.
 	pub fn set_apart(&self) {
 		PROC_OVERRIDE_IDS.with(|override_ids| {
 			let mut override_ids = override_ids.borrow_mut();

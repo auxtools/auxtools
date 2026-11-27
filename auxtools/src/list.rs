@@ -29,10 +29,15 @@ impl List {
 		Self::default()
 	}
 
-	pub fn with_size(capacity: u32) -> Self {
+	/// Creates a new DM list of `len` elements, each initialized to `null`.
+	///
+	/// # Panics
+	///
+	/// Panics if BYOND fails to allocate the list.
+	pub fn with_size(len: u32) -> Self {
 		let mut id: raw_types::lists::ListId = raw_types::lists::ListId(0);
 		unsafe {
-			assert_eq!(raw_types::funcs::create_list(&mut id, capacity), 1);
+			assert_eq!(raw_types::funcs::create_list(&mut id, len), 1);
 		}
 
 		let raw = raw_types::values::Value {
