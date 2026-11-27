@@ -49,6 +49,9 @@ const CODE: &str = "\
 \ta?.me().n = b.n
 \ta?.me(b.n).n = 1
 \ta?.me().n = 1
+/datum/num/var/datum/num/next
+/proc/rewritten(datum/num/a, b)
+\ta?.next.n ||= b
 ";
 
 fn checked(byond: ByondVersion) -> KnownBugs {
@@ -102,6 +105,8 @@ const CONTINUED: &str =
      Use a plain `continue` or a `while` loop.";
 const POINTER: &str = "`*p[i]`";
 const RECEIVER: &str = "`?.` chain continuing after a call or list access (`a?.f(b.x).v = b.y`)";
+const REWRITTEN: &str =
+    "`||=` or `&&=` on a `?.` chain ending in two or more variables (such as `a?.b.c ||= x`)";
 
 #[test]
 fn a_codebase_is_checked_by_file_and_line() {
@@ -130,6 +135,7 @@ fn a_codebase_is_checked_by_file_and_line() {
             ),
             row(44, "/receiver", RECEIVER),
             row(45, "/receiver", RECEIVER),
+            row(49, "/rewritten", REWRITTEN),
         ]
     );
     assert_eq!(not_checked.len(), 1, "{:?}", not_checked);
@@ -161,6 +167,7 @@ fn only_the_bugs_of_the_build_are_found() {
             ),
             row(44, "/receiver", RECEIVER),
             row(45, "/receiver", RECEIVER),
+            row(49, "/rewritten", REWRITTEN),
         ]
     );
     let (bugs, _) = found(ByondVersion::new(515, 1647));
@@ -182,6 +189,8 @@ fn only_the_bugs_of_the_build_are_found() {
             ),
             row(44, "/receiver", RECEIVER),
             row(45, "/receiver", RECEIVER),
+            row(49, "/rewritten", "`?.` in `||=` or `&&=`"),
+            row(49, "/rewritten", REWRITTEN),
         ]
     );
 }
@@ -209,6 +218,7 @@ fn findings_have_their_bugs_ids() {
             Id::ByondZeroWeightPick,
             Id::ByondSafeChainReceiver,
             Id::ByondSafeChainReceiver,
+            Id::ByondSafeLogicalWrite,
         ]
     );
 }

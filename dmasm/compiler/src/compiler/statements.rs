@@ -1378,6 +1378,37 @@ fn saves_cache(compiler: &Compiler, start: usize) -> bool {
     })
 }
 
+pub(super) fn keep_cache_across_value(
+    compiler: &mut Compiler,
+    start: usize,
+    value: &Expression,
+    element: bool,
+) {
+    let saves = std::mem::take(&mut compiler.global_field)
+        || saves_cache(compiler, start)
+        || unfolded_saves_cache(compiler, value);
+    if !saves {
+        return;
+    }
+    let key = element
+        && compiler.nodes[start..].iter().any(|n| {
+            matches!(n, Node::Instruction(i, _)
+                if matches!(i, Instruction::ListGet) || touches_cache_key(i))
+        });
+    if key {
+        compiler
+            .nodes
+            .insert(start, Node::Instruction(Instruction::PushCacheKey, ()));
+    }
+    compiler
+        .nodes
+        .insert(start, Node::Instruction(Instruction::PushCache, ()));
+    if key {
+        compiler.emit_ins(Instruction::PopCacheKey);
+    }
+    compiler.emit_ins(Instruction::PopCache);
+}
+
 fn unfolded_saves_cache(compiler: &mut Compiler, value: &Expression) -> bool {
     unfolded_has(compiler, value, |compiler, start| {
         compiler.global_field || saves_cache(compiler, start)
@@ -1475,7 +1506,7 @@ pub(super) enum SafeWrite<'w> {
     Logical { or: bool },
 }
 
-fn is_safe_follow(f: &Follow) -> bool {
+pub(super) fn is_safe_follow(f: &Follow) -> bool {
     use dreammaker::ast::{ListAccessKind as L, PropertyAccessKind as K};
     matches!(
         f,
@@ -1571,11 +1602,11 @@ impl SafeChain {
         (self.last[..split].to_vec(), self.last[split..].to_vec())
     }
 
-    pub fn writable(&self, write: &SafeWrite, value_form: bool) -> bool {
+    pub fn writable(&self, write: &SafeWrite) -> bool {
         match (self.fields(), write) {
             (Some(_), SafeWrite::Assign) => self.index.is_some(),
             (Some(_), SafeWrite::Change(_)) => true,
-            (Some(_), SafeWrite::Logical { .. }) => !value_form,
+            (Some(_), SafeWrite::Logical { .. }) => true,
             (None, SafeWrite::Assign) => self.index.is_some(),
             (None, _) => {
                 self.index.is_some() || matches!(self.last.last(), Some(Follow::Field(..)))
@@ -1585,14 +1616,18 @@ impl SafeChain {
 }
 
 fn call_after_cache_use(compiler: &Compiler, start: usize) -> Option<usize> {
-    let call = start
-        + compiler.nodes[start..]
-            .iter()
-            .position(|n| matches!(n, Node::Instruction(Instruction::Call(..), _)))?;
-    compiler.nodes[start..call]
+    let site = compiler
+        .call_sites
+        .iter()
+        .filter(|site| site.args >= start)
+        .min_by_key(|site| site.args)?;
+    if !site.receiver_in_cache {
+        return None;
+    }
+    compiler.nodes[site.args..site.call]
         .iter()
         .any(|n| matches!(n, Node::Instruction(i, _) if super::procs::touches_cache(i)))
-        .then_some(call)
+        .then_some(site.call)
 }
 
 fn restore_receiver(compiler: &mut Compiler, call: usize) {
@@ -1837,20 +1872,13 @@ pub(super) fn emit_safe_chain_write<'a>(
                 }
                 let start = compiler.nodes.len();
                 emit_value(compiler, value.expect("a value"))?;
-                if compiler.nodes[start..]
-                    .iter()
-                    .any(|n| matches!(n, Node::Instruction(i, _) if super::procs::touches_cache(i)))
-                {
-                    compiler
-                        .nodes
-                        .insert(start, Node::Instruction(Instruction::PushCache, ()));
-                    compiler.emit_ins(Instruction::PopCache);
-                }
+                let written = keep_tested_place(compiler, start, &var);
                 compiler.emit_ins(if value_form {
-                    Instruction::SetVarExpr(var)
+                    Instruction::SetVarExpr(written)
                 } else {
-                    Instruction::SetVar(var)
+                    Instruction::SetVar(written)
                 });
+                super::known_bugs::safe_logical_write(compiler, &var);
                 let Label::Named(end) = end else {
                     unreachable!()
                 };
@@ -1931,25 +1959,29 @@ pub(super) fn emit_safe_chain_write<'a>(
                 var = Variable::CacheIndex;
             }
             compiler.emit_ins(Instruction::GetVar(var.clone()));
-            compiler.emit_ins(Instruction::Test);
             let end = ends.pop().expect("a segment");
-            compiler.emit_ins(if or {
-                Instruction::Jnz(Label::Named(end.clone()))
-            } else {
-                Instruction::Jz(Label::Named(end.clone()))
-            });
+            let label = Label::Named(end.clone());
+            match (value_form, or) {
+                (true, true) => compiler.emit_ins(Instruction::JmpOr(label)),
+                (true, false) => compiler.emit_ins(Instruction::JmpAnd(label)),
+                (false, _) => {
+                    compiler.emit_ins(Instruction::Test);
+                    compiler.emit_ins(if or {
+                        Instruction::Jnz(label)
+                    } else {
+                        Instruction::Jz(label)
+                    });
+                }
+            }
             let start = compiler.nodes.len();
             emit_value(compiler, value.expect("a value"))?;
-            if compiler.nodes[start..]
-                .iter()
-                .any(|n| matches!(n, Node::Instruction(i, _) if super::procs::touches_cache(i)))
-            {
-                compiler
-                    .nodes
-                    .insert(start, Node::Instruction(Instruction::PushCache, ()));
-                compiler.emit_ins(Instruction::PopCache);
-            }
-            compiler.emit_ins(Instruction::SetVar(var));
+            let written = keep_tested_place(compiler, start, &var);
+            compiler.emit_ins(if value_form {
+                Instruction::SetVarExpr(written)
+            } else {
+                Instruction::SetVar(written)
+            });
+            super::known_bugs::safe_logical_write(compiler, &var);
             compiler.emit_label(end);
         }
         _ => unreachable!("not writable"),
@@ -2061,7 +2093,7 @@ pub(super) fn emit_safe_write(
     let Some((base, chain)) = safe_place(place) else {
         return Ok(false);
     };
-    if !chain.writable(&write, value_form) {
+    if !chain.writable(&write) {
         return Ok(false);
     }
     emit_value(compiler, &base)?;
@@ -2093,8 +2125,8 @@ fn emit_expr_statement(compiler: &mut Compiler, expr: &Expression) -> Result<(),
             return Ok(());
         }
     }
-    if let Expression::AssignOp { lhs, .. } = expr {
-        compiler.implicit_type = Some(compiler.destination(lhs));
+    if let Expression::AssignOp { op, lhs, .. } = expr {
+        compiler.implicit_type = Some(compiler.assignment_destination(*op, lhs));
     }
     let emitted = emit_expr_statement_inner(compiler, expr);
     compiler.implicit_type = None;
@@ -2191,9 +2223,7 @@ fn emit_expr_statement_inner(
             op: op @ (AssignOp::OrAssign | AssignOp::AndAssign),
             lhs,
             rhs,
-        } if safe_place(lhs)
-            .is_some_and(|(_, c)| c.writable(&SafeWrite::Logical { or: true }, false)) =>
-        {
+        } if safe_place(lhs).is_some_and(|(_, c)| c.writable(&SafeWrite::Logical { or: true })) => {
             let write = SafeWrite::Logical {
                 or: *op == AssignOp::OrAssign,
             };
@@ -2285,27 +2315,7 @@ fn emit_expr_statement_inner(
                 let start = compiler.nodes.len();
                 compiler.global_field = false;
                 emit_value(compiler, rhs)?;
-                let saves = std::mem::take(&mut compiler.global_field)
-                    || saves_cache(compiler, start)
-                    || unfolded_saves_cache(compiler, rhs);
-                let saves_key = !field
-                    && compiler.nodes[start..]
-                        .iter()
-                        .any(|n| matches!(n, Node::Instruction(Instruction::ListGet, _)));
-                if saves {
-                    if saves_key {
-                        compiler
-                            .nodes
-                            .insert(start, Node::Instruction(Instruction::PushCacheKey, ()));
-                    }
-                    compiler
-                        .nodes
-                        .insert(start, Node::Instruction(Instruction::PushCache, ()));
-                    if saves_key {
-                        compiler.emit_ins(Instruction::PopCacheKey);
-                    }
-                    compiler.emit_ins(Instruction::PopCache);
-                }
+                keep_cache_across_value(compiler, start, rhs, !field);
                 if field {
                     compiler.cache = before;
                     compiler.explicit_src = explicit_src;
@@ -2501,6 +2511,52 @@ pub(super) fn aug_instruction(op: AssignOp, var: Variable) -> Instruction {
     }
 }
 
+fn keep_tested_place(compiler: &mut Compiler, start: usize, var: &Variable) -> Variable {
+    let value = &compiler.nodes[start..];
+    let touches = |f: fn(&Instruction) -> bool| {
+        value
+            .iter()
+            .any(|n| matches!(n, Node::Instruction(i, _) if f(i)))
+    };
+    let key = *var == Variable::CacheIndex && touches(touches_cache_key);
+    if touches(super::procs::touches_cache) {
+        if key {
+            compiler
+                .nodes
+                .insert(start, Node::Instruction(Instruction::PushCacheKey, ()));
+        }
+        compiler
+            .nodes
+            .insert(start, Node::Instruction(Instruction::PushCache, ()));
+        if key {
+            compiler.emit_ins(Instruction::PopCacheKey);
+        }
+        compiler.emit_ins(Instruction::PopCache);
+    }
+    let mut last = var;
+    while let Variable::SetCache(_, rest) = last {
+        last = rest;
+    }
+    last.clone()
+}
+
+fn touches_cache_key(ins: &Instruction) -> bool {
+    fn uses(var: &Variable) -> bool {
+        match var {
+            Variable::CacheKey | Variable::CacheIndex => true,
+            Variable::SetCache(a, b) => uses(a) || uses(b),
+            Variable::Initial(v)
+            | Variable::IsSaved(v)
+            | Variable::PtrRef(v)
+            | Variable::PtrDeref(v) => uses(v),
+            _ => false,
+        }
+    }
+    let mut ins = ins.clone();
+    matches!(ins, Instruction::PushCacheKey | Instruction::PopCacheKey)
+        || super::procs::var_operand(&mut ins).is_some_and(|v| uses(v))
+}
+
 pub(super) fn emit_safe_logical_assign(
     compiler: &mut Compiler,
     place: &Expression,
@@ -2543,16 +2599,9 @@ pub(super) fn emit_safe_logical_assign(
     });
     let start = compiler.nodes.len();
     emit_value(compiler, rhs)?;
-    if compiler.nodes[start..]
-        .iter()
-        .any(|n| matches!(n, Node::Instruction(i, _) if super::procs::touches_cache(i)))
-    {
-        compiler
-            .nodes
-            .insert(start, Node::Instruction(Instruction::PushCache, ()));
-        compiler.emit_ins(Instruction::PopCache);
-    }
-    compiler.emit_ins(Instruction::SetVarExpr(var));
+    let written = keep_tested_place(compiler, start, &var);
+    compiler.emit_ins(Instruction::SetVarExpr(written));
+    super::known_bugs::safe_logical_write(compiler, &var);
     compiler.emit_label(end);
     Ok(true)
 }

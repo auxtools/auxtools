@@ -2067,6 +2067,261 @@ fn reading_a_pointer_it_makes_warns_before_516_1668() {
 }
 
 #[test]
+fn a_logical_assignment_through_a_safe_chain_warns_where_dreammaker_writes_another_var() {
+    let types = "/datum/item\n\tvar/datum/item/a\n\tvar/datum/item/b\n\tvar/datum/item/c\n\
+                 \tvar/list/l\n\tvar/static/S\n/datum/item/proc/f()\n\treturn src\n";
+    let warns = |body: &str, build: u32| {
+        let src = format!("{types}/proc/g(datum/item/i, list/items, datum/item/x)\n\t{body}\n");
+        compiled_of(&src, "", "g", dmasm_compiler::ByondVersion::new(516, build))
+            .byond_bugs
+            .iter()
+            .any(|bug| bug.id == dmasm_compiler::diagnostic::Id::ByondSafeLogicalWrite)
+    };
+    for body in [
+        "i?.a.b ||= x",
+        "i?.a.b &&= x",
+        "i?.a.b.c ||= x",
+        "i?.a:b ||= x",
+        "items?[1]:a:b ||= x",
+        "i?.f().a.b ||= x",
+        "i?.a?.b.c ||= x",
+        "return (i?.a.b ||= x)",
+        "i?.a.b ||= x.c",
+        "i?.a.b ||= i.f()",
+    ] {
+        assert!(warns(body, 1689), "no warning for {}", body);
+        assert!(warns(body, 1637), "no warning before 516.1673 for {}", body);
+    }
+    for body in [
+        "i?.a ||= x",
+        "items?[1].a ||= x",
+        "i.a?.b ||= x",
+        "i?.a?.b ||= x",
+        "i?.a.l[1] ||= x",
+        "i?.a.S ||= x",
+        "i.a.b ||= x",
+        "i?.a.f().b ||= x",
+        "i?.a.b += x",
+    ] {
+        assert!(!warns(body, 1689), "a warning for {}", body);
+    }
+}
+
+#[test]
+fn a_logical_assignment_through_a_safe_chain_writes_the_var_its_test_read() {
+    let types = "/datum/item\n\tvar/datum/item/a\n\tvar/datum/item/b\n\tvar/datum/item/c\n\
+                 /datum/item/proc/f()\n\treturn src\n";
+    for (body, write) in [
+        ("i?.a.b ||= x.c", "SetVar cache[\"b\"]"),
+        ("i?.a.b &&= i.f()", "SetVar cache[\"b\"]"),
+        ("i?.a.b.c ||= x.c", "SetVar cache[\"c\"]"),
+        ("items?[1].a.b ||= x.c", "SetVar cache[\"b\"]"),
+        ("i?.f().a.b &&= x.c", "SetVar cache[\"b\"]"),
+        ("return (i?.a.b ||= x.c)", "SetVarExpr cache[\"b\"]"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/g(datum/item/i, list/items, datum/item/x)\n\t{body}\n"),
+            "",
+            "g",
+        );
+        assert_has(&code, &["PopCache", write]);
+    }
+}
+
+#[test]
+fn a_logical_assignment_through_a_safe_chain_writes_its_last_var_after_a_branching_value() {
+    let types = "/datum/item\n\tvar/datum/item/a\n\tvar/datum/item/b\n\tvar/datum/item/c\n";
+    for (body, write) in [
+        ("i?.a.b ||= (flag ? x : y)", "SetVar cache[\"b\"]"),
+        ("i?.a.b &&= (x || y)", "SetVar cache[\"b\"]"),
+        ("i?.a.b.c ||= (flag ? x : y)", "SetVar cache[\"c\"]"),
+        ("i?.f().a.b ||= (flag ? x : y)", "SetVar cache[\"b\"]"),
+        ("return (i?.a.b &&= (x || y))", "SetVarExpr cache[\"b\"]"),
+        ("i?.a.b ||= (flag ? x.f() : y)", "SetVar cache[\"b\"]"),
+        ("i?.a.b ||= x?.a", "SetVar cache[\"b\"]"),
+        ("i?.a.b ||= (x.a ||= y)", "SetVar cache[\"b\"]"),
+    ] {
+        let code = compile(
+            &format!(
+                "{types}/datum/item/proc/f()\n\treturn src\n\
+                 /proc/g(datum/item/i, flag, datum/item/x, y)\n\t{body}\n"
+            ),
+            "",
+            "g",
+        );
+        let last = code
+            .lines()
+            .filter(|l| l.starts_with("SetVar") || l.starts_with("SetVarExpr"))
+            .last();
+        assert_eq!(last, Some(write), "{}\n{}", body, code);
+    }
+}
+
+#[test]
+fn a_logical_assignment_to_a_safe_element_keeps_its_key_across_the_value() {
+    let types = "/datum/item\n\tvar/datum/item/a\n\tvar/list/items\n\tvar/list/counters\n";
+    for body in [
+        "holder?.items[i] ||= counters[j]++",
+        "holder?.items[i] &&= holder.counters[j]++",
+        "holder?.a.items[i] ||= (counters[j] += 1)",
+        "holder?.items[i] ||= (counters[j] ||= 1)",
+        "holder?.items[i] ||= f(counters[j]++)",
+        "holder?.items[i] ||= holder?.counters[j]++",
+    ] {
+        let code = compile(
+            &format!(
+                "{types}/proc/f(x)\n\treturn x\n\
+                 /proc/g(datum/item/holder, i, j, list/counters)\n\t{body}\n"
+            ),
+            "",
+            "g",
+        );
+        assert_has(&code, &["PushCache", "PushCacheKey"]);
+        assert_has(
+            &code,
+            &["PopCacheKey", "PopCache", "SetVar cache[cache_key]"],
+        );
+    }
+}
+
+#[test]
+fn a_logical_assignment_to_an_element_keeps_its_key_across_the_value() {
+    let types = "/datum/holder\n\tvar/list/items\n";
+    for body in [
+        "items[i] ||= counters[j]++",
+        "return (items[i] ||= counters[j]++)",
+        "items[i] &&= (counters[j] ||= 1)",
+        "h.items[i] ||= counters[j]++",
+        "return (h.items[i] ||= counters[j]++)",
+        "return (items[i] ||= counters[j])",
+    ] {
+        let code = compile(
+            &format!("{types}/proc/g(list/items, i, j, list/counters, datum/holder/h)\n\t{body}\n"),
+            "",
+            "g",
+        );
+        assert_has(&code, &["PushCache", "PushCacheKey"]);
+        assert_has(&code, &["PopCacheKey", "PopCache"]);
+    }
+}
+
+#[test]
+fn a_safe_write_calls_an_indexed_item_on_the_item() {
+    let types =
+        "/datum/item\n\tvar/flag\n\tvar/datum/item/next\n/datum/item/proc/make(x)\n\treturn src\n\
+                 /datum/holder\n\tvar/list/items\n";
+    for (body, call) in [
+        (
+            "holder?.items[1]:make().flag = 1",
+            "Call dynamic_proc(\"make\") 0",
+        ),
+        (
+            "holder?.items[1]:make(other.next).flag = 1",
+            "Call dynamic_proc(\"make\") 1",
+        ),
+        (
+            "holder?.items[1].make().flag ||= 1",
+            "Call dynamic_proc(\"make\") 0",
+        ),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/g(datum/holder/holder, datum/item/other)\n\t{body}\n"),
+            "",
+            "g",
+        );
+        assert_has(&code, &["ListGet", "SetVar cache", "PushCache"]);
+        assert_has(&code, &["PopCache", call]);
+        assert!(
+            !code.contains(&format!("PopCache\nPushCache\n{call}")),
+            "{}\n{}",
+            body,
+            code
+        );
+    }
+}
+
+#[test]
+fn a_logical_assignment_to_a_safe_element_has_a_value() {
+    let types = "/datum/holder\n\tvar/list/items\n\tvar/datum/holder/next\n";
+    for (body, jump) in [
+        ("return (holder?.items[i] ||= fallback)", "JmpOr"),
+        ("return (holder?.next.items[i] &&= fallback)", "JmpAnd"),
+        ("return (holder?.next?.items[i] ||= fallback)", "JmpOr"),
+        ("return (items?[i] ||= fallback)", "JmpOr"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/g(datum/holder/holder, list/items, i, fallback)\n\t{body}\n"),
+            "",
+            "g",
+        );
+        assert_has(
+            &code,
+            &[
+                "SetVar cache_key",
+                "SetVar cache",
+                "GetVar cache[cache_key]",
+                jump,
+            ],
+        );
+        assert_has(&code, &["GetVar arg(3)", "SetVarExpr cache[cache_key]"]);
+        assert!(code.starts_with("GetVar arg"), "{}\n{}", body, code);
+        assert!(code.contains("SetCacheJmpIfNull"), "{}\n{}", body, code);
+    }
+}
+
+#[test]
+fn a_safe_write_calls_on_the_receiver_when_the_arguments_move_the_cache() {
+    let types = "/datum/holder\n\tvar/flag\n\tvar/datum/holder/child\n\
+                 /datum/holder/proc/make(x)\n\treturn src\n";
+    for (body, call) in [
+        (
+            "holder?.make(counters[i]++).flag = 1",
+            "Call dynamic_proc(\"make\") 1",
+        ),
+        (
+            "holder?.child.make(counters[i]++).flag = 1",
+            "Call cache = cache[\"child\"]; dynamic_proc(\"make\") 1",
+        ),
+        (
+            "holder?.make(o.flag).flag = 1",
+            "Call dynamic_proc(\"make\") 1",
+        ),
+        (
+            "holder?.make(counters[i]--).flag ||= 1",
+            "Call dynamic_proc(\"make\") 1",
+        ),
+    ] {
+        let code = compile(
+            &format!(
+                "{types}/proc/g(datum/holder/holder, list/counters, i, datum/holder/o)\n\t{body}\n"
+            ),
+            "",
+            "g",
+        );
+        assert_has(&code, &["PopCache", "PushCache", call]);
+    }
+}
+
+#[test]
+fn a_logical_assignment_through_two_safe_accesses_has_a_value() {
+    let types = "/datum/h\n\tvar/v\n\tvar/datum/h/c\n/datum/h/proc/m()\n\treturn src\n";
+    for (body, jump) in [
+        ("return (h?.c?.v ||= x)", "JmpOr"),
+        ("return (h?.c?.c?.v &&= x)", "JmpAnd"),
+        ("return (h?.m()?.v ||= x)", "JmpOr"),
+        ("return (h?.c?.v ||= x.v)", "JmpOr"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/g(datum/h/h, datum/h/x)\n\t{body}\n"),
+            "",
+            "g",
+        );
+        assert_has(&code, &["GetVar cache[\"v\"]", jump]);
+        assert_has(&code, &["SetVarExpr cache[\"v\"]"]);
+    }
+}
+
+#[test]
 fn new_without_arguments_is_true_in_a_test() {
     let src = "/datum/t\n/proc/f(a, b)\n\treturn (new /datum/t ? a : b)\n";
     assert_eq!(compile(src, "", "f"), "GetVar arg(0)\nRet\nEnd");
