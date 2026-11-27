@@ -223,6 +223,20 @@ fn paused_line(client: &mut Client) -> (String, Option<u32>) {
 	}
 }
 
+fn paused_offset(client: &mut Client) -> (String, u32) {
+	match client.request(Request::StackFrames {
+		stack_id: 0,
+		start_frame: Some(0),
+		count: Some(1)
+	}) {
+		Response::StackFrames { frames, .. } => {
+			let frame = frames.into_iter().next().expect("paused with no frames");
+			(frame.instruction.proc.path, frame.instruction.offset)
+		}
+		other => panic!("expected StackFrames, got {:?}", other)
+	}
+}
+
 fn offset_of(client: &mut Client, proc: &str, line: u32) -> u32 {
 	match client.request(Request::Offset {
 		proc: ProcRef {
@@ -569,8 +583,26 @@ fn debugger(built: Built) {
 	let before = located(&mut client, "reload.dm", line);
 	assert_eq!(before.len(), 1, "{:?}", before);
 	stops_on(&mut client, &before[0], line);
+	let response = client.request(Request::BreakpointSet {
+		instruction: before[0].clone(),
+		condition: None,
+		hit: None,
+		log: None,
+		exact: false
+	});
+	assert!(matches!(response, Response::BreakpointSet { .. }), "{:?}", response);
 	let changes = source.edit("reload.dm", "\tvar/x = 1\n\tx += 1", "\tvar/x = 1\n\tx *= 3\n\tx += 1");
 	reload(&mut watcher, &changes);
+	eval(&mut client, "arm_breakpoint()");
+	assert_eq!(client.expect_pause(), BreakpointReason::Breakpoint);
+	assert_eq!(paused_line(&mut client), ("/breakpoint_target".to_owned(), Some(line + 1)));
+	client.resume();
+	let response = client.request(Request::BreakpointUnset {
+		instruction: before[0].clone(),
+		exact: false
+	});
+	assert!(matches!(response, Response::BreakpointUnset { success: true, .. }), "{:?}", response);
+	println!("ok: a breakpoint stays on its statement when a statement is inserted above it");
 	assert_eq!(lines_with_code(&mut client, "reload.dm", line - 1, line + 3), [
 		line - 1,
 		line,
@@ -1086,20 +1118,11 @@ fn debugger(built: Built) {
 		},
 		offset
 	};
-	let code = match client.request(Request::ProcInfo { proc: claimed(0).proc }) {
-		Response::ProcInfo(Ok(info)) => info.code,
-		other => panic!("expected ProcInfo for /claimed_target, got {:?}", other)
-	};
-	let Response::Disassemble(Ok(disassembly)) = client.request(Request::Disassemble { code }) else {
-		panic!("expected the disassembly of /claimed_target");
-	};
-	let on_line: Vec<u32> = disassembly
-		.instructions
-		.iter()
-		.filter(|at| at.line == Some(line) && !at.text.starts_with("Dbg"))
-		.map(|at| at.offset as u32)
+	let on_line: Vec<u32> = line_instructions(&mut client, "/claimed_target", line)
+		.into_iter()
+		.map(|(offset, _)| offset)
 		.collect();
-	assert!(on_line.len() > 1, "line {} has one instruction: {:?}", line, disassembly.instructions);
+	assert!(on_line.len() > 1, "line {} has one instruction: {:?}", line, on_line);
 	let mut other = world.connect();
 	let set = |client: &mut Client, offset: u32, condition: &str| {
 		let response = client.request(Request::BreakpointSet {
@@ -1152,6 +1175,212 @@ fn debugger(built: Built) {
 	unset(&mut other, on_line[on_line.len() - 1]);
 	other.leave();
 	println!("ok: instruction breakpoints keep their conditions across a reload, at the start or on one instruction");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/first_def()\n",
+		"var/chained_step = 0\n\n/proc/chained_target()\n\tchained_step += 1\n\ttwin_runs++\n\ttwin_runs++\n\n/proc/first_def()\n"
+	);
+	reload(&mut watcher, &changes);
+	let first = source.line_of("reload.dm", "\tchained_step += 1\n") + 1;
+	let lines = [first, first + 1];
+	for unset_first in [true, false] {
+		let before = lines.map(|line| offset_of(&mut client, "/chained_target", line));
+		for offset in before {
+			twin_breakpoint(&mut client, "chained_target", offset, true);
+		}
+		let changes = source.edit(
+			"reload.dm",
+			"chained_step += 1\n\ttwin_runs",
+			"chained_step += 1; chained_step += 1\n\ttwin_runs"
+		);
+		reload(&mut watcher, &changes);
+		let after = lines.map(|line| offset_of(&mut client, "/chained_target", line));
+		assert_eq!(
+			after[0], before[1],
+			"the first line's code should start where the second's did: {:?} {:?}",
+			before, after
+		);
+		let [gone, kept] = if unset_first { [0, 1] } else { [1, 0] };
+		twin_breakpoint(&mut client, "chained_target", before[gone], false);
+		twin_run(&mut client, "chained_target", lines[kept], 2, true);
+		twin_breakpoint(&mut client, "chained_target", before[kept], false);
+		twin_run(&mut client, "chained_target", lines[kept], 2, false);
+	}
+	println!("ok: breakpoints that a reload moves onto each other's old places can each be taken away");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/first_def()\n",
+		"var/exact_step = 0\nvar/exact_value = 0\n\n/proc/exact_target()\n\texact_step += 1\n\texact_value = exact_step && exact_step; \
+		 twin_runs++\n\n/proc/first_def()\n"
+	);
+	reload(&mut watcher, &changes);
+	let line = source.line_of("reload.dm", "\texact_value = exact_step &&");
+	let after_assignment = |client: &mut Client| {
+		let on_line = line_instructions(client, "/exact_target", line);
+		(on_line.iter().find(|(_, text)| text.contains("twin_runs")))
+			.unwrap_or_else(|| panic!("no instruction on line {} uses twin_runs: {:?}", line, on_line))
+			.0
+	};
+	let before = after_assignment(&mut client);
+	assert!(before > offset_of(&mut client, "/exact_target", line), "twin_runs++ starts line {}", line);
+	let exact = |offset: u32| InstructionRef {
+		proc: ProcRef {
+			path: "/exact_target".to_owned(),
+			override_id: 0
+		},
+		offset
+	};
+	let response = client.request(Request::BreakpointSet {
+		instruction: exact(before),
+		condition: Some("exact_value == exact_step".to_owned()),
+		hit: None,
+		log: None,
+		exact: true
+	});
+	assert!(
+		matches!(response, Response::BreakpointSet {
+			result: BreakpointSetResult::Success { .. }
+		}),
+		"couldn't set a breakpoint at {}: {:?}",
+		before,
+		response
+	);
+	let changes = source.edit("reload.dm", "\texact_step += 1\n", "\texact_step = exact_step + 1\n");
+	let result = reload(&mut watcher, &changes);
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+	let after = after_assignment(&mut client);
+	let runs = twin_number(&mut client, "twin_runs");
+	eval(&mut client, "exact_value = 0");
+	eval(&mut client, "twin_armed = /proc/exact_target");
+	assert_eq!(client.expect_pause(), BreakpointReason::Breakpoint);
+	assert_eq!(paused_offset(&mut client), ("/exact_target".to_owned(), after));
+	client.resume();
+	wait_for(&mut client, "twin_runs", &(runs + 1).to_string());
+	twin_breakpoint(&mut client, "exact_target", before, false);
+	twin_run(&mut client, "exact_target", line, 1, false);
+	println!("ok: an instruction breakpoint after a short-circuit on a line a reload keeps stays on its instruction");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/first_def()\n",
+		"/proc/loop_target()\n\tvar/i = 0\n\twhile (i < 1)\n\t\ti++\n\t\ttwin_runs++; continue\n\n/proc/first_def()\n"
+	);
+	reload(&mut watcher, &changes);
+	let line = source.line_of("reload.dm", "\t\ttwin_runs++; continue");
+	let continue_jump = |client: &mut Client| {
+		let on_line = line_instructions(client, "/loop_target", line);
+		(on_line.iter().find(|(_, text)| text.starts_with("Jmp")))
+			.unwrap_or_else(|| panic!("line {} has no jump: {:?}", line, on_line))
+			.0
+	};
+	let before = continue_jump(&mut client);
+	twin_breakpoint(&mut client, "loop_target", before, true);
+	let changes = source.edit("reload.dm", "\t\ti++\n", "\t\ti = i + 1\n");
+	let result = reload(&mut watcher, &changes);
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+	let after = continue_jump(&mut client);
+	assert_ne!(after, before, "the reload didn't move line {}", line);
+	let runs = twin_number(&mut client, "twin_runs");
+	eval(&mut client, "twin_armed = /proc/loop_target");
+	assert_eq!(client.expect_pause(), BreakpointReason::Breakpoint);
+	assert_eq!(paused_offset(&mut client), ("/loop_target".to_owned(), after));
+	client.resume();
+	wait_for(&mut client, "twin_runs", &(runs + 1).to_string());
+	twin_breakpoint(&mut client, "loop_target", before, false);
+	twin_run(&mut client, "loop_target", line, 1, false);
+	println!("ok: an instruction breakpoint on a moved line's jump back to a fixed loop stays on its instruction");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/first_def()\n",
+		"/proc/end_target()\n\tif (twin_runs >= 0)\n\t\ttwin_runs++\n\n/proc/first_def()\n"
+	);
+	reload(&mut watcher, &changes);
+	let line = source.line_of("reload.dm", "\tif (twin_runs >= 0)");
+	let jump = |client: &mut Client| {
+		let on_line = line_instructions(client, "/end_target", line);
+		(on_line.iter().find(|(_, text)| text.starts_with('J')))
+			.unwrap_or_else(|| panic!("line {} has no jump: {:?}", line, on_line))
+			.0
+	};
+	let at = jump(&mut client);
+	twin_breakpoint(&mut client, "end_target", at, true);
+	for (from, to) in [
+		("\t\ttwin_runs++\n", "\t\ttwin_runs = twin_runs + 1\n"),
+		("\t\ttwin_runs = twin_runs + 1\n", "\t\ttwin_runs = twin_runs + 1\n\t\ttwin_runs += 0\n"),
+		("\t\ttwin_runs += 0\n", "\t\ttwin_runs += 0\n\ttwin_waiting += 0\n")
+	] {
+		let changes = source.edit("reload.dm", from, to);
+		let result = reload(&mut watcher, &changes);
+		assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+		assert_eq!(jump(&mut client), at, "the reload moved the jump on line {}", line);
+		let runs = twin_number(&mut client, "twin_runs");
+		eval(&mut client, "twin_armed = /proc/end_target");
+		assert_eq!(client.expect_pause(), BreakpointReason::Breakpoint);
+		assert_eq!(paused_offset(&mut client), ("/end_target".to_owned(), at), "after the edit to {:?}", to);
+		client.resume();
+		wait_for(&mut client, "twin_runs", &(runs + 1).to_string());
+	}
+	twin_breakpoint(&mut client, "end_target", at, false);
+	twin_run(&mut client, "end_target", line, 1, false);
+	println!("ok: an instruction breakpoint on a jump to a proc's end stays on its instruction when the body before the end changes");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/first_def()\n",
+		"/proc/slot_target()\n\tvar/slot_x = 1\n\ttwin_runs += slot_x\n\n/proc/first_def()\n"
+	);
+	reload(&mut watcher, &changes);
+	let adds = |client: &mut Client, line: u32| {
+		let on_line = line_instructions(client, "/slot_target", line);
+		let at = (on_line.iter().rev().find(|(_, text)| text.contains("twin_runs")))
+			.unwrap_or_else(|| panic!("no instruction on line {} uses twin_runs: {:?}", line, on_line))
+			.0;
+		assert!(at > on_line[0].0, "line {} starts with twin_runs: {:?}", line, on_line);
+		at
+	};
+	let before = adds(&mut client, source.line_of("reload.dm", "\ttwin_runs += slot_x"));
+	twin_breakpoint(&mut client, "slot_target", before, true);
+	let changes = source.edit("reload.dm", "\tvar/slot_x = 1\n", "\tvar/slot_w = 0\n\tvar/slot_x = 1 + slot_w\n");
+	let result = reload(&mut watcher, &changes);
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+	let line = source.line_of("reload.dm", "\ttwin_runs += slot_x");
+	let after = adds(&mut client, line);
+	let runs = twin_number(&mut client, "twin_runs");
+	eval(&mut client, "twin_armed = /proc/slot_target");
+	assert_eq!(client.expect_pause(), BreakpointReason::Breakpoint);
+	assert_eq!(paused_offset(&mut client), ("/slot_target".to_owned(), after));
+	client.resume();
+	wait_for(&mut client, "twin_runs", &(runs + 1).to_string());
+	twin_breakpoint(&mut client, "slot_target", before, false);
+	twin_run(&mut client, "slot_target", line, 1, false);
+	println!("ok: an instruction breakpoint after a local stays on its instruction when a new local renumbers it");
+
+	let changes = source.edit(
+		"reload.dm",
+		"/proc/first_def()\n",
+		"/proc/swap_target()\n\tvar/swapped = 0\n\ttwin_runs++\n\tswapped += 2\n\tswapped *= 3\n\n/proc/first_def()\n"
+	);
+	reload(&mut watcher, &changes);
+	let line = source.line_of("reload.dm", "\tswapped += 2");
+	let swaps = [
+		("\tswapped += 2\n\tswapped *= 3\n", "\tswapped *= 3\n\tswapped += 2\n"),
+		("\tswapped *= 3\n\tswapped += 2\n", "\tswapped += 2\n\tswapped *= 3\n")
+	];
+	for (from, to) in swaps {
+		let before = offset_of(&mut client, "/swap_target", line);
+		twin_breakpoint(&mut client, "swap_target", before, true);
+		let changes = source.edit("reload.dm", from, to);
+		let result = reload(&mut watcher, &changes);
+		assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+		twin_run(&mut client, "swap_target", line + 1, 1, true);
+		let after = offset_of(&mut client, "/swap_target", line + 1);
+		twin_breakpoint(&mut client, "swap_target", after, false);
+		twin_run(&mut client, "swap_target", line, 1, false);
+	}
+	println!("ok: breakpoints on two swapped statements move with them");
 
 	let changes = source.edit(
 		"reload.dm",
@@ -1226,6 +1455,24 @@ fn locals_references(client: &mut Client, proc: &str) -> (String, u32) {
 		.and_then(|rest| rest.split_once(": 0 slots, "))
 		.and_then(|(table, references)| Some((table.to_owned(), references.parse().ok()?)));
 	parsed.unwrap_or_else(|| panic!("expected an empty locals table for {}, got {}", proc, answer))
+}
+
+fn line_instructions(client: &mut Client, proc: &str, line: u32) -> Vec<(u32, String)> {
+	let proc = ProcRef {
+		path: proc.to_owned(),
+		override_id: 0
+	};
+	let code = match client.request(Request::ProcInfo { proc: proc.clone() }) {
+		Response::ProcInfo(Ok(info)) => info.code,
+		other => panic!("expected ProcInfo for {}, got {:?}", proc.path, other)
+	};
+	let Response::Disassemble(Ok(disassembly)) = client.request(Request::Disassemble { code }) else {
+		panic!("expected the disassembly of {}", proc.path);
+	};
+	(disassembly.instructions.into_iter())
+		.filter(|at| at.line == Some(line) && !at.text.starts_with("Dbg"))
+		.map(|at| (at.offset as u32, at.text))
+		.collect()
 }
 
 fn sleep_named_twins(client: &mut Client) -> u32 {

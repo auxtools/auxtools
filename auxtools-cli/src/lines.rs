@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 pub struct LineMap {
 	to: Vec<u32>,
 	new_len: u32
@@ -33,9 +35,25 @@ impl LineMap {
 			}
 			let run_new_end = if i < old_mid.len() { matches[i].unwrap() } else { new_mid.len() };
 			let in_place = run_new_end - run_new_start;
+			let reindented = reindented_lines(&old_mid[run_old..i], &new_mid[run_new_start..run_new_end]);
 			for (n, line) in mid[run_old..i].iter_mut().enumerate() {
-				let within = if in_place == 0 { 0 } else { n.min(in_place - 1) };
+				let within = reindented[n].unwrap_or(if in_place == 0 { 0 } else { n.min(in_place - 1) });
 				*line = (prefix + run_new_start + within) as u32;
+			}
+		}
+		let (old_unique, new_unique) = (unique_lines(old.iter().map(String::as_str)), unique_lines(new.iter().map(String::as_str)));
+		let (old_trimmed, new_trimmed) = (
+			unique_lines(old.iter().map(|line| line.trim())),
+			unique_lines(new.iter().map(|line| line.trim()))
+		);
+		for (i, text) in old_mid.iter().enumerate() {
+			if matches[i].is_some() {
+				continue;
+			}
+			let trimmed = Some(text.trim()).filter(|text| !text.is_empty());
+			let now = moved_to(&old_unique, &new_unique, text, prefix + i).or_else(|| moved_to(&old_trimmed, &new_trimmed, trimmed?, prefix + i));
+			if let Some(now) = now {
+				mid[i] = now as u32;
 			}
 		}
 
@@ -93,6 +111,32 @@ fn matching_lines(old: &[String], new: &[String]) -> Vec<Option<usize>> {
 		}
 	}
 	matches
+}
+
+fn unique_lines<'a>(lines: impl Iterator<Item = &'a str>) -> HashMap<&'a str, Option<usize>> {
+	let mut found = HashMap::new();
+	for (i, line) in lines.enumerate() {
+		found.entry(line).and_modify(|at| *at = None).or_insert(Some(i));
+	}
+	found
+}
+
+fn moved_to(old: &HashMap<&str, Option<usize>>, new: &HashMap<&str, Option<usize>>, text: &str, at: usize) -> Option<usize> {
+	(old.get(text) == Some(&Some(at))).then(|| new.get(text).copied().flatten()).flatten()
+}
+
+fn reindented_lines(old: &[String], new: &[String]) -> Vec<Option<usize>> {
+	let (old_unique, new_unique) = (
+		unique_lines(old.iter().map(|line| line.trim_start())),
+		unique_lines(new.iter().map(|line| line.trim_start()))
+	);
+	(old.iter().enumerate())
+		.map(|(i, line)| {
+			let text = line.trim_start();
+			let unique = !text.is_empty() && old_unique.get(text) == Some(&Some(i));
+			new_unique.get(text).copied().flatten().filter(|_| unique)
+		})
+		.collect()
 }
 
 pub fn read(path: &str) -> Option<Vec<String>> {
@@ -160,6 +204,35 @@ mod tests {
 		let old = "a\nb\nc\nd\ne\n";
 		let new = "a\nd\nb\nc\ne\n";
 		assert_eq!(moved(old, new, &[1, 2, 3, 5]), [1, 3, 4, 5]);
+	}
+
+	#[test]
+	fn lines_moved_past_others_go_with_their_text() {
+		assert_eq!(moved("a\nb\nc\nd\n", "a\nc\nb\nd\n", &[2, 3]), [3, 2]);
+		assert_eq!(moved("a\nb\nc\nd\ne\n", "a\nd\nb\nc\ne\n", &[4]), [2]);
+	}
+
+	#[test]
+	fn a_statement_put_in_a_block_goes_with_its_text() {
+		let old = "/proc/f()\n\tdo_work()\n\treturn\n";
+		let new = "/proc/f()\n\tif (enabled)\n\t\tdo_work()\n\treturn\n";
+		assert_eq!(moved(old, new, &[2, 3]), [3, 4]);
+		assert_eq!(moved(new, old, &[2, 3, 4]), [2, 2, 3]);
+	}
+
+	#[test]
+	fn a_statement_moved_into_the_next_block_goes_with_its_text() {
+		let old = "/proc/f()\n\tnotify()\n\tif (ready)\n\t\tdo_work()\n\treturn\n";
+		let new = "/proc/f()\n\tif (ready)\n\t\tdo_work()\n\t\tnotify()\n\treturn\n";
+		assert_eq!(moved(old, new, &[2, 3, 4, 5]), [4, 2, 3, 5]);
+		assert_eq!(moved(new, old, &[2, 3, 4, 5]), [3, 4, 2, 5]);
+	}
+
+	#[test]
+	fn a_reindented_statement_with_a_twin_in_the_block_is_placed_in_order() {
+		let old = "/proc/f()\n\tdo_work()\n\tdo_work()\n";
+		let new = "/proc/f()\n\tif (enabled)\n\t\tdo_work()\n\t\tdo_work()\n";
+		assert_eq!(moved(old, new, &[2, 3]), [2, 3]);
 	}
 
 	#[test]

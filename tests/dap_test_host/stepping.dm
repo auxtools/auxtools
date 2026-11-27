@@ -256,3 +256,20 @@ var/lone_held = FALSE
 /proc/sc_lone()
 	lone_held = FALSE
 	world.log << "dap: the new lone returned [lone(2)]"
+
+var/swap_guard = FALSE
+
+/proc/sc_swap()
+	var/n = 1
+	n += 2 // @swap_add
+	n *= 3 // @swap_mul
+	return n
+var/notify_ready = FALSE
+
+/proc/sc_notify()
+	var/n = 1
+	n += 5 // @notify_add
+	if (notify_ready)
+		n *= 2
+	return n
+

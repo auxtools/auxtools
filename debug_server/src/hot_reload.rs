@@ -329,6 +329,16 @@ enum WorldEdit {
 
 pub type MovedBreakpoints<K> = HashMap<(raw_types::procs::ProcId, u32, K), u32>;
 
+pub trait Claimant: Ord + std::hash::Hash + Copy {
+	fn on_entry(&self) -> bool;
+}
+
+impl Claimant for () {
+	fn on_entry(&self) -> bool {
+		false
+	}
+}
+
 fn describe(proc: &ProcKey) -> String {
 	proc.to_string()
 }
@@ -2340,7 +2350,7 @@ fn append_entries(prepared: &Prepared, added: &mut Added) -> Result<Vec<u32>, St
 	Ok(init_procs)
 }
 
-pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
+pub fn apply<K: Claimant, T>(
 	appended: Appended,
 	breakpoints: &mut HashMap<(raw_types::procs::ProcId, u16), BTreeMap<K, T>>,
 	moved_breakpoints: &mut MovedBreakpoints<K>,
@@ -2533,11 +2543,15 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 struct UnhookedCode<K, T> {
 	code: PreparedCode,
 	old_code: std::sync::Arc<crate::code_index::Code>,
+	old_bytecode: Vec<u32>,
 	old_file: Option<u32>,
+	old_locals: Vec<String>,
+	new_locals: Vec<String>,
+	lines: Option<Vec<(u32, u32)>>,
 	hooked: Vec<(u32, Option<u32>, Option<String>, Option<BTreeMap<K, T>>)>
 }
 
-fn apply_code<K: Ord + std::hash::Hash + Copy, T>(
+fn apply_code<K: Claimant, T>(
 	p: PreparedCode,
 	breakpoints: &mut HashMap<(raw_types::procs::ProcId, u16), BTreeMap<K, T>>,
 	failures: &mut Vec<String>
@@ -2571,10 +2585,14 @@ fn apply_code<K: Ord + std::hash::Hash + Copy, T>(
 		.local_names
 		.clone()
 		.unwrap_or_else(|| auxtools::debug::local_names_for(&p.proc, old_ptr));
-	let old_file = {
-		let old = original_code(&p.proc);
-		auxtools::remember_bytecode(old_ptr, &old);
-		debug_file(&old)
+	let old_bytecode = original_code(&p.proc).into_owned();
+	auxtools::remember_bytecode(old_ptr, &old_bytecode);
+	let old_file = debug_file(&old_bytecode);
+	let old_locals = auxtools::debug::local_names_for(&p.proc, old_ptr);
+	let lines = match &p.lines {
+		Some(lines) => Some(lines.clone()),
+		None if !hooked.is_empty() && old_file == debug_file(&p.bytecode) => Some(kept_lines(&old_bytecode, &old_locals, &p.bytecode, &local_names)),
+		None => None
 	};
 
 	runtime_tables::set_proc_entry_word(p.proc.id, ProcEntryWords::BYTECODE, p.bytecode_id);
@@ -2602,6 +2620,7 @@ fn apply_code<K: Ord + std::hash::Hash + Copy, T>(
 	} else {
 		Ok(new_ptr)
 	};
+	let new_locals = local_names.clone();
 	match names_at {
 		Ok(at) => auxtools::debug::set_local_names(&p.proc, at, local_names),
 		Err(e) => failures.push(format!("{}: new calls will still show the old local variable names: {}", p.name, e))
@@ -2612,12 +2631,16 @@ fn apply_code<K: Ord + std::hash::Hash + Copy, T>(
 	Some(UnhookedCode {
 		code: p,
 		old_code,
+		old_bytecode,
 		old_file,
+		old_locals,
+		new_locals,
+		lines,
 		hooked
 	})
 }
 
-fn restore_breakpoints<K: Ord + std::hash::Hash + Copy, T>(
+fn restore_breakpoints<K: Claimant, T>(
 	unhooked: UnhookedCode<K, T>,
 	breakpoints: &mut HashMap<(raw_types::procs::ProcId, u16), BTreeMap<K, T>>,
 	moved_breakpoints: &mut MovedBreakpoints<K>,
@@ -2626,7 +2649,11 @@ fn restore_breakpoints<K: Ord + std::hash::Hash + Copy, T>(
 	let UnhookedCode {
 		code: p,
 		old_code,
+		old_bytecode,
 		old_file,
+		old_locals,
+		new_locals,
+		lines,
 		hooked
 	} = unhooked;
 	let new_code = crate::code_index::of(&p.proc);
@@ -2635,18 +2662,47 @@ fn restore_breakpoints<K: Ord + std::hash::Hash + Copy, T>(
 		_ => None
 	};
 
+	let old_moves: Vec<((raw_types::procs::ProcId, u32, K), u32)> = moved_breakpoints
+		.iter()
+		.filter(|((proc, ..), at)| *proc == p.proc.id && hooked.iter().any(|(offset, ..)| offset == *at))
+		.map(|(key, at)| (*key, *at))
+		.collect();
+	for (key, _) in &old_moves {
+		moved_breakpoints.remove(key);
+	}
+	let mut new_moves = vec![];
+	let (old_marks, new_marks) = (line_marks(&old_bytecode), line_marks(&p.bytecode));
+
+	let new_entry = new_code.entry_offset();
+
 	for (old_offset, line, other_file, known) in hooked {
-		let mut known_as: Vec<(raw_types::procs::ProcId, u32, K)> = moved_breakpoints
-			.iter()
-			.filter(|((proc, ..), at)| *proc == p.proc.id && **at == old_offset)
-			.map(|(key, _)| *key)
-			.collect();
-		for key in &known_as {
-			moved_breakpoints.remove(key);
-		}
+		let mut known_as: Vec<(raw_types::procs::ProcId, u32, K)> =
+			old_moves.iter().filter(|(_, at)| *at == old_offset).map(|(key, _)| *key).collect();
 		for client in known.iter().flat_map(BTreeMap::keys) {
 			if !known_as.iter().any(|(.., other)| other == client) {
 				known_as.push((p.proc.id, old_offset, *client));
+			}
+		}
+		let (on_entry, known_as): (Vec<_>, Vec<_>) = known_as.into_iter().partition(|(.., who)| who.on_entry());
+		let (entry, known) = match known {
+			Some(known) => {
+				let (entry, rest): (BTreeMap<K, T>, BTreeMap<K, T>) = known.into_iter().partition(|(who, _)| who.on_entry());
+				let rest = (entry.is_empty() || !rest.is_empty()).then_some(rest);
+				(Some(entry).filter(|entry| !entry.is_empty()), rest)
+			}
+			None => (None, None)
+		};
+		if entry.is_some() {
+			let place = "at the start of the proc";
+			match hook_instruction(&p.proc, new_entry) {
+				Ok(()) => {
+					keep_claims(entry, breakpoints, (p.proc.id, new_entry as u16), &p.name, place, warnings);
+					new_moves.extend(on_entry.into_iter().filter(|key| key.1 != new_entry).map(|key| (key, new_entry)));
+				}
+				Err(_) => warnings.push(format!("{}: could not restore breakpoint {}", p.name, place))
+			}
+			if known.is_none() {
+				continue;
 			}
 		}
 
@@ -2658,20 +2714,45 @@ fn restore_breakpoints<K: Ord + std::hash::Hash + Copy, T>(
 				"{}: removed breakpoint at instruction {}: no instruction at that offset before the first line after reload",
 				p.name, old_offset
 			)),
-			Some(line) => {
-				let line = match &p.lines {
-					Some(lines) if other_file.is_none() => map_line(line, lines),
-					_ => line
+			Some(old_line) => {
+				let new_line = |old_line: u32| {
+					let line = match &lines {
+						Some(lines) if other_file.is_none() => map_line(old_line, lines),
+						_ => old_line
+					};
+					let moved = firsts
+						.filter(|(old_first, _)| line >= *old_first)
+						.map(|(old_first, new_first)| line - old_first + new_first);
+					moved.unwrap_or(line)
 				};
-				let moved = firsts
-					.filter(|(old_first, _)| line >= *old_first)
-					.map(|(old_first, new_first)| line - old_first + new_first);
 				let in_other_file = |file: &str| Some(file) == other_file.as_deref();
 				let wanted = other_file.is_some().then_some(&in_other_file as &dyn Fn(&str) -> bool);
-				let line = moved.unwrap_or(line);
+				let new_offset = |old_offset: u32| match old_code.line_at(old_offset) {
+					Some(line) => {
+						let (old_start, new_start) = (old_code.offset_of(line, wanted)?, new_code.offset_of(new_line(line), wanted)?);
+						Some(jump_target(
+							(&old_bytecode, &old_marks, old_start),
+							old_offset,
+							(&p.bytecode, &new_marks, new_start)
+						))
+					}
+					None => Some(old_offset)
+				};
+				let line = new_line(old_line);
 				new_code
 					.offset_of(line, wanted)
-					.map(|offset| (offset, format!("on line {}", line)))
+					.map(|start| {
+						let kept = (old_code.offset_of(old_line, wanted)).and_then(|old_start| {
+							same_place(
+								&old_code,
+								(&old_bytecode, &old_locals, old_start),
+								old_offset,
+								(&p.bytecode, &new_locals, start),
+								new_offset
+							)
+						});
+						(kept.unwrap_or(start), format!("on line {}", line))
+					})
 					.ok_or_else(|| format!("{}: removed breakpoint on line {}: no executable code after reload", p.name, line))
 			}
 		};
@@ -2689,12 +2770,71 @@ fn restore_breakpoints<K: Ord + std::hash::Hash + Copy, T>(
 		}
 
 		keep_claims(known, breakpoints, (p.proc.id, offset as u16), &p.name, &place, warnings);
-		for key in known_as {
-			if key.1 != offset {
-				moved_breakpoints.insert(key, offset);
-			}
-		}
+		new_moves.extend(known_as.into_iter().filter(|key| key.1 != offset).map(|key| (key, offset)));
 	}
+	moved_breakpoints.extend(new_moves);
+}
+
+fn line_marks(code: &[u32]) -> Vec<u32> {
+	let instructions = dmasm::scan(code).map(|scanned| scanned.instructions).unwrap_or_default();
+	(instructions.iter())
+		.filter(|ins| matches!(ins.opcode, Opcode::DbgLine | Opcode::DbgFile))
+		.map(|ins| ins.offset)
+		.collect()
+}
+
+fn jump_target(old: (&[u32], &[u32], u32), old_offset: u32, new: (&[u32], &[u32], u32)) -> u32 {
+	let ((old, old_marks, old_start), (new, new_marks, new_start)) = (old, new);
+	let from_start = new_start.wrapping_add(old_offset.wrapping_sub(old_start));
+	fn words(code: &[u32], from: u32, to: u32) -> Option<&[u32]> {
+		code.get(from as usize..to as usize)
+	}
+	if old_offset < old_start || words(old, old_start, old_offset) == words(new, new_start, from_start) {
+		return from_start;
+	}
+	let end = |code: &[u32], marks: &[u32], start: u32| marks.iter().copied().find(|&mark| mark >= start).unwrap_or(code.len() as u32);
+	let (old_end, new_end) = (end(old, old_marks, old_start), end(new, new_marks, new_start));
+	let from_end = (old_end.checked_sub(old_offset))
+		.filter(|&after| after > 0)
+		.and_then(|after| new_end.checked_sub(after))
+		.filter(|&at| at >= new_start && words(old, old_offset, old_end) == words(new, at, new_end));
+	from_end.unwrap_or(from_start)
+}
+
+fn same_place(
+	old_code: &crate::code_index::Code,
+	old: (&[u32], &[String], u32),
+	old_offset: u32,
+	new: (&[u32], &[String], u32),
+	new_offset: impl Fn(u32) -> Option<u32>
+) -> Option<u32> {
+	let ((old, old_locals, old_start), (new, new_locals, new_start)) = (old, new);
+	let length = (old_offset.checked_sub(old_start)? as usize) + old_code.instruction_length(old_offset)?;
+	let (old_scan, new_scan) = (dmasm::scan(old).ok()?, dmasm::scan(new).ok()?);
+	let final_end = |scanned: &dmasm::ScannedBytecode| {
+		(scanned.instructions.last())
+			.filter(|ins| ins.opcode == Opcode::End)
+			.map(|ins| ins.offset)
+	};
+	let (old_end, new_end) = (final_end(&old_scan), final_end(&new_scan));
+	let mut old_words = named_words(old, old_locals, &old_scan.local_operands);
+	for label in &old_scan.label_operands {
+		if !(old_start..old_start + length as u32).contains(&label.word_offset) {
+			continue;
+		}
+		let new_word = new.get((label.word_offset - old_start + new_start) as usize).copied();
+		let target = match new_end.filter(|&end| Some(label.target) == old_end && new_word == Some(end)) {
+			Some(end) => end,
+			None => new_offset(label.target)?
+		};
+		old_words[label.word_offset as usize] = Word::Same(target);
+	}
+	let new_words = named_words(new, new_locals, &new_scan.local_operands);
+	let (old_span, new_span) = (
+		old_start as usize..old_start as usize + length,
+		new_start as usize..new_start as usize + length
+	);
+	(old_words.get(old_span)? == new_words.get(new_span)?).then_some(new_start + (old_offset - old_start))
 }
 
 fn keep_claims<K: Ord, T>(
@@ -2944,6 +3084,136 @@ fn remap_lines(bytecode: &[u32], lines: &[(u32, u32)]) -> Option<Vec<u32>> {
 	}
 
 	changed.then_some(out)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Word<'a> {
+	Same(u32),
+	Local(Option<&'a str>),
+	Jump
+}
+
+fn named_words<'a>(bytecode: &[u32], locals: &'a [String], local_operands: &[u32]) -> Vec<Word<'a>> {
+	let mut words: Vec<Word> = bytecode.iter().map(|&word| Word::Same(word)).collect();
+	for &at in local_operands {
+		words[at as usize] = Word::Local(locals.get(bytecode[at as usize] as usize).map(String::as_str));
+	}
+	words
+}
+
+fn line_code<'a>(bytecode: &[u32], locals: &'a [String]) -> Vec<(Option<u32>, Vec<Word<'a>>)> {
+	let Ok(mut scanned) = dmasm::scan(bytecode) else {
+		return vec![];
+	};
+	let mut words = named_words(bytecode, locals, &scanned.local_operands);
+	let mut targets = HashMap::new();
+	for label in &scanned.label_operands {
+		words[label.word_offset as usize] = Word::Jump;
+		targets.insert(label.word_offset as usize, label.target as usize);
+	}
+	if scanned.instructions.last().is_some_and(|ins| ins.opcode == Opcode::End) {
+		scanned.instructions.pop();
+	}
+	let (mut lines, mut file, mut inside) = (vec![], None, true);
+	let mut spawn_ends = HashSet::new();
+	for ins in scanned.instructions {
+		let at = ins.offset as usize;
+		let span = at..at + ins.bytecode.len();
+		match ins.opcode {
+			Opcode::DbgFile => inside = *file.get_or_insert(bytecode[at + 1]) == bytecode[at + 1],
+			Opcode::DbgLine => lines.push((inside.then_some(bytecode[at + 1]), at, vec![])),
+			Opcode::End if spawn_ends.contains(&span.end) && lines.last().is_some_and(|(_, _, code)| !code.is_empty()) => {}
+			_ => {
+				if ins.opcode == Opcode::Spawn {
+					spawn_ends.extend(span.clone().filter_map(|word| targets.get(&word).copied()));
+				}
+				if let Some((_, _, code)) = lines.last_mut() {
+					code.push((ins.opcode, span));
+				}
+			}
+		}
+	}
+	let ends: Vec<usize> = (lines.iter().skip(1).map(|&(_, start, _)| start)).chain([bytecode.len()]).collect();
+	(lines.iter().zip(ends))
+		.map(|((line, start, code), end)| {
+			let leaves = |span: &std::ops::Range<usize>| {
+				span.clone()
+					.any(|word| targets.get(&word).is_some_and(|target| !(*start..end).contains(target)))
+			};
+			let kept = (code.iter().enumerate().skip(1))
+				.find(|(_, (opcode, span))| matches!(opcode, Opcode::Jmp | Opcode::JmpLoop) && leaves(span))
+				.map_or(code.len(), |(i, _)| i);
+			let words = code[..kept].iter().flat_map(|(_, span)| &words[span.clone()]).copied().collect();
+			(*line, words)
+		})
+		.collect()
+}
+
+fn kept_lines(old: &[u32], old_locals: &[String], new: &[u32], new_locals: &[String]) -> Vec<(u32, u32)> {
+	const MOST_CELLS: usize = 4_000_000;
+	let (old, new) = (line_code(old, old_locals), line_code(new, new_locals));
+	let same = |a: &(Option<u32>, Vec<Word>), b: &(Option<u32>, Vec<Word>)| a.0.is_some() == b.0.is_some() && a.1 == b.1;
+	let prefix = old.iter().zip(&new).take_while(|(a, b)| same(a, b)).count();
+	let suffix = (old[prefix..].iter().rev())
+		.zip(new[prefix..].iter().rev())
+		.take_while(|(a, b)| same(a, b))
+		.count();
+	let (old_mid, new_mid) = (&old[prefix..old.len() - suffix], &new[prefix..new.len() - suffix]);
+
+	let mut pairs: Vec<(usize, usize)> = (0..prefix).map(|i| (i, i)).collect();
+	if !old_mid.is_empty() && !new_mid.is_empty() && old_mid.len() * new_mid.len() <= MOST_CELLS {
+		let width = new_mid.len() + 1;
+		let mut common = vec![0u32; (old_mid.len() + 1) * width];
+		for i in (0..old_mid.len()).rev() {
+			for j in (0..new_mid.len()).rev() {
+				common[i * width + j] = if same(&old_mid[i], &new_mid[j]) {
+					common[(i + 1) * width + j + 1] + 1
+				} else {
+					common[(i + 1) * width + j].max(common[i * width + j + 1])
+				};
+			}
+		}
+		let (mut i, mut j) = (0, 0);
+		while i < old_mid.len() && j < new_mid.len() {
+			if same(&old_mid[i], &new_mid[j]) {
+				pairs.push((prefix + i, prefix + j));
+				i += 1;
+				j += 1;
+			} else if common[(i + 1) * width + j] >= common[i * width + j + 1] {
+				i += 1;
+			} else {
+				j += 1;
+			}
+		}
+	}
+	pairs.extend((0..suffix).map(|i| (old.len() - suffix + i, new.len() - suffix + i)));
+
+	let (old_paired, new_paired): (HashSet<usize>, HashSet<usize>) = pairs.iter().copied().unzip();
+	let new_unique = unique_lines(&new, &new_paired);
+	let mut moved: Vec<(usize, usize)> = (unique_lines(&old, &old_paired).into_iter())
+		.filter_map(|(code, i)| Some((i, *new_unique.get(&code)?)))
+		.collect();
+	moved.sort_unstable();
+	pairs.extend(moved);
+
+	let mut lines = BTreeMap::new();
+	for (i, j) in pairs {
+		if let (Some(old_line), Some(new_line)) = (old[i].0, new[j].0) {
+			lines.entry(old_line).or_insert(new_line);
+		}
+	}
+	lines.into_iter().collect()
+}
+
+fn unique_lines<'b, 'a>(lines: &'b [(Option<u32>, Vec<Word<'a>>)], paired: &HashSet<usize>) -> HashMap<(bool, &'b [Word<'a>]), usize> {
+	let mut found: HashMap<_, (usize, usize)> = HashMap::new();
+	for (i, (line, code)) in lines.iter().enumerate() {
+		found.entry((line.is_some(), code.as_slice())).or_insert((0, i)).0 += 1;
+	}
+	(found.into_iter())
+		.filter(|(_, (count, i))| *count == 1 && !paired.contains(i))
+		.map(|(code, (_, i))| (code, i))
+		.collect()
 }
 
 fn map_line(line: u32, lines: &[(u32, u32)]) -> u32 {
@@ -3287,7 +3557,11 @@ impl dmasm::disassembler::DisassembleEnv for LenientDisassembleEnv {
 
 #[cfg(test)]
 mod tests {
-	use super::{map_line, remap_lines};
+	use super::{kept_lines, map_line, remap_lines};
+
+	fn names(names: &[&str]) -> Vec<String> {
+		names.iter().map(|name| name.to_string()).collect()
+	}
 
 	#[test]
 	fn lines_move_with_the_closest_known_line_above() {
@@ -3319,5 +3593,145 @@ mod tests {
 		let bytecode = [dbgfile, 1, dbgline, 85, dbgfile, 2, dbgline, 21, dbgfile, 1, dbgline, 85, ret];
 		let moved = remap_lines(&bytecode, &[(84, 86), (85, 87)]).unwrap();
 		assert_eq!(moved, [dbgfile, 1, dbgline, 87, dbgfile, 2, dbgline, 21, dbgfile, 1, dbgline, 87, ret]);
+	}
+
+	#[test]
+	fn keeps_lines_whose_code_differs_only_in_local_slots_and_jumps() {
+		use dmasm::Opcode::*;
+		const LOCAL: u32 = 0xFFDA;
+		let (line, push, set, get, jmp, ret) = (DbgLine.word(), PushInt.word(), SetVar.word(), GetVar.word(), Jmp.word(), Ret.word());
+		let old = [
+			line, 10, push, 1, set, LOCAL, 0, line, 11, push, 2, set, LOCAL, 1, line, 12, get, LOCAL, 1, jmp, 7, ret
+		];
+		let new = [
+			line, 10, push, 1, set, LOCAL, 0, line, 11, push, 0, set, LOCAL, 1, line, 12, push, 2, set, LOCAL, 2, line, 13, get, LOCAL, 2, jmp, 14,
+			ret
+		];
+		assert_eq!(kept_lines(&old, &names(&["a", "b"]), &new, &names(&["a", "c", "b"])), [
+			(10, 10),
+			(11, 12),
+			(12, 13)
+		]);
+	}
+
+	#[test]
+	fn keeps_both_of_two_swapped_lines() {
+		use dmasm::Opcode::*;
+		const LOCAL: u32 = 0xFFDA;
+		let (line, push, set, ret) = (DbgLine.word(), PushInt.word(), SetVar.word(), Ret.word());
+		let statement = |number: u32, value: u32| [line, number, push, value, set, LOCAL, 0];
+		let code = |values: [u32; 4]| -> Vec<u32> {
+			(values.iter().zip(10..))
+				.flat_map(|(&value, number)| statement(number, value))
+				.chain([ret])
+				.collect()
+		};
+		assert_eq!(kept_lines(&code([1, 2, 3, 4]), &names(&["a"]), &code([1, 3, 2, 4]), &names(&["a"])), [
+			(10, 10),
+			(11, 12),
+			(12, 11),
+			(13, 13)
+		]);
+	}
+
+	#[test]
+	fn keeps_a_line_moved_to_the_end_of_a_loop_body() {
+		use dmasm::Opcode::*;
+		const LOCAL: u32 = 0xFFDA;
+		let (line, push, set, get, jz, back, ret) = (
+			DbgLine.word(),
+			PushInt.word(),
+			SetVar.word(),
+			GetVar.word(),
+			Jz.word(),
+			JmpLoop.word(),
+			Ret.word()
+		);
+		let header = [line, 10, push, 0, set, LOCAL, 0];
+		let moved = |value: u32| [line, 0, push, value, set, LOCAL, 1];
+		let guard = [line, 0, get, LOCAL, 0, jz, 28];
+		let body = |first: [u32; 7], second: [u32; 7], third: [u32; 7]| -> Vec<u32> {
+			let mut code: Vec<u32> = [header, first, second, third].concat();
+			for (number, at) in [(11, 7), (12, 14), (13, 21)] {
+				code[at + 1] = number;
+			}
+			code.extend([back, 2, line, 14, ret]);
+			code
+		};
+		let old = body(moved(5), guard, moved(2));
+		let new = body(guard, moved(2), moved(5));
+		assert_eq!(kept_lines(&old, &names(&["a", "b"]), &new, &names(&["a", "b"])), [
+			(10, 10),
+			(11, 13),
+			(12, 11),
+			(13, 12),
+			(14, 14)
+		]);
+	}
+
+	#[test]
+	fn keeps_a_line_moved_to_the_end_of_an_if_with_an_else() {
+		use dmasm::Opcode::*;
+		const LOCAL: u32 = 0xFFDA;
+		let (line, push, set, get, jz, jmp, ret) = (
+			DbgLine.word(),
+			PushInt.word(),
+			SetVar.word(),
+			GetVar.word(),
+			Jz.word(),
+			Jmp.word(),
+			Ret.word()
+		);
+		let header = [line, 10, push, 0, set, LOCAL, 0];
+		let moved = |value: u32| [line, 0, push, value, set, LOCAL, 1];
+		let guard = [line, 0, get, LOCAL, 0, jz, 30];
+		let body = |first: [u32; 7], second: [u32; 7], third: [u32; 7]| -> Vec<u32> {
+			let mut code: Vec<u32> = [header, first, second, third].concat();
+			for (number, at) in [(11, 7), (12, 14), (13, 21)] {
+				code[at + 1] = number;
+			}
+			code.extend([jmp, 37, line, 15, push, 3, set, LOCAL, 1, line, 16, get, LOCAL, 1, ret]);
+			code
+		};
+		let old = body(moved(5), guard, moved(2));
+		let new = body(guard, moved(2), moved(5));
+		assert_eq!(kept_lines(&old, &names(&["a", "b"]), &new, &names(&["a", "b"])), [
+			(10, 10),
+			(11, 13),
+			(12, 11),
+			(13, 12),
+			(15, 15),
+			(16, 16)
+		]);
+	}
+
+	#[test]
+	fn keeps_a_line_moved_to_the_end_of_a_spawn_block() {
+		use dmasm::Opcode::*;
+		const LOCAL: u32 = 0xFFDA;
+		let (line, push, set, add, sub, get, spawn, ret, end) = (
+			DbgLine.word(),
+			PushInt.word(),
+			SetVar.word(),
+			AugAdd.word(),
+			AugSub.word(),
+			GetVar.word(),
+			Spawn.word(),
+			Ret.word(),
+			End.word()
+		);
+		let old = [
+			line, 10, push, 1, set, LOCAL, 0, line, 11, push, 2, add, LOCAL, 0, line, 12, push, 1, sub, LOCAL, 0, line, 13, get, LOCAL, 0, ret, end
+		];
+		let new = [
+			line, 10, push, 1, set, LOCAL, 0, line, 11, push, 10, spawn, 21, line, 12, push, 2, add, LOCAL, 0, end, line, 13, push, 1, sub, LOCAL, 0,
+			line, 14, get, LOCAL, 0, ret, end
+		];
+		assert_eq!(kept_lines(&old, &names(&["total"]), &new, &names(&["total"])), [
+			(10, 10),
+			(11, 12),
+			(12, 13),
+			(13, 14)
+		]);
 	}
 }
