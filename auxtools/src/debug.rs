@@ -152,7 +152,9 @@ impl Default for CallStacks {
 }
 
 impl CallStacks {
+	#[track_caller]
 	pub fn new() -> CallStacks {
+		crate::expect_live("CallStacks::new");
 		CallStacks {
 			active: Self::active(),
 			suspended: Self::suspended()
@@ -164,15 +166,21 @@ impl CallStacks {
 	///
 	/// Returns an empty `Vec` if no proc is running. Call on BYOND's thread
 	/// after the library's first initialization.
+	#[track_caller]
 	pub fn active() -> Vec<StackFrame> {
+		crate::expect_live("CallStacks::active");
 		unsafe { CallStacks::from_context(*funcs::CURRENT_EXECUTION_CONTEXT, CallStackKind::Active) }
 	}
 
+	#[track_caller]
 	pub fn suspended() -> Vec<Vec<StackFrame>> {
+		crate::expect_live("CallStacks::suspended");
 		Self::suspended_first(usize::MAX)
 	}
 
+	#[track_caller]
 	pub fn suspended_first(limit: usize) -> Vec<Vec<StackFrame>> {
+		crate::expect_live("CallStacks::suspended_first");
 		let mut suspended = vec![];
 
 		unsafe {
@@ -187,7 +195,9 @@ impl CallStacks {
 		suspended
 	}
 
+	#[track_caller]
 	pub fn suspended_instances() -> Vec<*mut procs::ProcInstance> {
+		crate::expect_live("CallStacks::suspended_instances");
 		unsafe {
 			let buffer = (*funcs::SUSPENDED_PROCS_BUFFER).buffer;
 			funcs::suspended_range().map(|x| *buffer.add(x)).collect()
