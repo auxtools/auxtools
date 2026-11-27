@@ -53,10 +53,23 @@ unsafe fn read_slot(ctx: *mut raw_types::procs::ExecutionContext, slot: Slot) ->
 		}
 	}
 }
+
+unsafe fn frames_from(mut ctx: *mut raw_types::procs::ExecutionContext) -> Vec<(u32, raw_types::procs::ProcId)> {
+	let mut frames = vec![];
+	unsafe {
+		while !ctx.is_null() {
+			let instance = *(*ctx).proc_instance();
+			frames.push((instance_id(instance), (*instance).proc));
+			ctx = *(*ctx).parent_context();
+		}
+	}
+	frames
+}
+
 pub(super) struct Watches {
 	pub(super) watched: Vec<Watched>,
 	pub(super) next_watch: u32,
-	returning: Vec<u32>
+	unwinding: Vec<(u32, raw_types::procs::ProcId)>
 }
 
 impl Watches {
@@ -64,7 +77,7 @@ impl Watches {
 		Self {
 			watched: vec![],
 			next_watch: 0,
-			returning: vec![]
+			unwinding: vec![]
 		}
 	}
 
@@ -106,7 +119,6 @@ impl Server {
 		let instance = unsafe { *(*ctx).proc_instance() };
 		let mut changed: Vec<(usize, RawValue)> = vec![];
 		let mut over: Vec<(u32, &'static str)> = vec![];
-		let mut returning: Vec<u32> = vec![];
 
 		self.eval.in_eval = true;
 		auxtools::instruction_hook::hear_all();
@@ -140,14 +152,7 @@ impl Server {
 									changed.push((index, now));
 								}
 							}
-							None => {
-								over.push((watch.id, "watched proc ended"));
-								continue;
-							}
-						}
-						let opcode = *(*(*ctx).bytecode()).add(*(*ctx).bytecode_offset() as usize);
-						if opcode == dmasm::Opcode::Ret.word() || opcode == dmasm::Opcode::End.word() {
-							returning.push(watch.id);
+							None => over.push((watch.id, "target proc ended"))
 						}
 					}
 				}
@@ -156,7 +161,7 @@ impl Server {
 		self.eval.in_eval = false;
 		self.eval.eval_error = None;
 
-		if changed.is_empty() && over.is_empty() && returning.is_empty() {
+		if changed.is_empty() && over.is_empty() {
 			return None;
 		}
 
@@ -227,13 +232,6 @@ impl Server {
 		if !paused {
 			self.pause.state = None;
 		}
-		for id in returning {
-			if wanted.iter().any(|change| change.id == id) {
-				self.watches.returning.push(id);
-			} else {
-				self.end_watch(id, "watched proc returned");
-			}
-		}
 		(!wanted.is_empty()).then_some(wanted)
 	}
 
@@ -270,8 +268,50 @@ impl Server {
 		self.eval.in_eval = was_in_eval;
 	}
 
-	pub fn end_returned_watches(&mut self) {
-		for id in std::mem::take(&mut self.watches.returning) {
+	pub fn note_unwinding(&mut self, ctx: *mut raw_types::procs::ExecutionContext) {
+		self.watches.unwinding = unsafe { frames_from(ctx) };
+	}
+
+	pub fn end_unwound_watches(&mut self, ctx: *mut raw_types::procs::ExecutionContext) {
+		if self.watches.unwinding.is_empty() {
+			return;
+		}
+		let live = unsafe { frames_from(ctx) };
+		let unwinding = &self.watches.unwinding;
+		if !live.first().is_some_and(|frame| unwinding.contains(frame)) && live.iter().any(|frame| unwinding.contains(frame)) {
+			return;
+		}
+		let unwound = std::mem::take(&mut self.watches.unwinding);
+		let asleep: Vec<_> = (debug::CallStacks::suspended_instances().into_iter())
+			.flat_map(|instance| unsafe { frames_from((*instance).context) })
+			.collect();
+		let ended: Vec<u32> = (self.watches.watched.iter())
+			.filter(|watch| match watch.place {
+				Place::Slot { instance, proc, .. } => {
+					let frame = (instance, proc);
+					unwound.contains(&frame) && !live.contains(&frame) && !asleep.contains(&frame)
+				}
+				Place::Pointer(_) => false
+			})
+			.map(|watch| watch.id)
+			.collect();
+		for id in ended {
+			self.end_watch(id, "target proc ended");
+		}
+	}
+
+	pub fn end_returning_watches(&mut self, ctx: *mut raw_types::procs::ExecutionContext) {
+		let opcode = crate::instruction_hooking::original_opcode(unsafe { (*(*ctx).bytecode()).add(*(*ctx).bytecode_offset() as usize) });
+		if opcode != dmasm::Opcode::Ret.word() && opcode != dmasm::Opcode::End.word() {
+			return;
+		}
+		let instance = unsafe { *(*ctx).proc_instance() };
+		let (returning, proc) = unsafe { (instance_id(instance), (*instance).proc) };
+		let ending: Vec<u32> = (self.watches.watched.iter())
+			.filter(|watch| matches!(watch.place, Place::Slot { instance, proc: of, .. } if instance == returning && of == proc))
+			.map(|watch| watch.id)
+			.collect();
+		for id in ending {
 			self.end_watch(id, "target proc returned");
 		}
 	}
