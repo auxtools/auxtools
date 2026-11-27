@@ -1116,6 +1116,41 @@ pub fn run() {
 	world.function_breakpoints(&[]);
 	world.resume_through("later");
 	ok("function breakpoint on a proc a reload adds");
+
+	let set = world.function_breakpoints(&["/datum/thing/twice/bump#1"]);
+	assert_eq!(set[0]["verified"], true, "{}", set[0]);
+	const SECOND: &str = "/datum/thing/twice/bump(by)\n\treturn ..(by) + 100 // @twice_second\n\n";
+	const AFTER: &str = "/proc/sc_twice()\n";
+	world.drop_events("breakpoint");
+	edit(&mut world, "stepping.dm", SECOND, "");
+	let told = world.event("breakpoint")["body"]["breakpoint"].clone();
+	assert_eq!((&told["id"], &told["verified"]), (&set[0]["id"], &json!(false)), "{}", told);
+	edit(&mut world, "stepping.dm", AFTER, &format!("{}{}", SECOND, AFTER));
+	let told = world.event("breakpoint")["body"]["breakpoint"].clone();
+	assert_eq!((&told["id"], &told["verified"]), (&set[0]["id"], &json!(true)), "{}", told);
+	world.run("twice");
+	let stop = world.stop();
+	assert_eq!(stop.line, world.marks.line("twice_second"), "stopped in {}", stop.proc);
+	world.function_breakpoints(&[]);
+	world.resume_through("twice");
+	ok("function breakpoint on a proc a reload removes and adds again");
+
+	let set = world.function_breakpoints(&["/datum/thing/twice/bump#1"]);
+	assert_eq!(set[0]["verified"], true, "{}", set[0]);
+	const INSERTED: &str = "/datum/thing/twice/bump(by)\n\treturn ..(by) + 10 // @twice_inserted\n\n";
+	edit(&mut world, "stepping.dm", SECOND, &format!("{}{}", INSERTED, SECOND));
+	world.run("twice");
+	let stop = world.stop();
+	assert_eq!(
+		stop.line,
+		world.marks.line("twice_inserted"),
+		"stopped in {} at line {}",
+		stop.proc,
+		stop.line
+	);
+	world.function_breakpoints(&[]);
+	world.resume_through("twice");
+	ok("function breakpoint on an override number a reload gives another definition");
 	edit(
 		&mut world,
 		"stepping.dm",
