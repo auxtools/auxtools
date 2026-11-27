@@ -127,12 +127,12 @@ fn moved_to(old: &HashMap<&str, Option<usize>>, new: &HashMap<&str, Option<usize
 
 fn reindented_lines(old: &[String], new: &[String]) -> Vec<Option<usize>> {
 	let (old_unique, new_unique) = (
-		unique_lines(old.iter().map(|line| line.trim_start())),
-		unique_lines(new.iter().map(|line| line.trim_start()))
+		unique_lines(old.iter().map(|line| line.trim())),
+		unique_lines(new.iter().map(|line| line.trim()))
 	);
 	(old.iter().enumerate())
 		.map(|(i, line)| {
-			let text = line.trim_start();
+			let text = line.trim();
 			let unique = !text.is_empty() && old_unique.get(text) == Some(&Some(i));
 			new_unique.get(text).copied().flatten().filter(|_| unique)
 		})
@@ -218,6 +218,8 @@ mod tests {
 		let new = "/proc/f()\n\tif (enabled)\n\t\tdo_work()\n\treturn\n";
 		assert_eq!(moved(old, new, &[2, 3]), [3, 4]);
 		assert_eq!(moved(new, old, &[2, 3, 4]), [2, 2, 3]);
+		let trimmed = "/proc/f()\n\tif (enabled)\n\t\tdo_work()\n\treturn\n";
+		assert_eq!(moved("/proc/f()\n\tdo_work()  \n\treturn\n", trimmed, &[2, 3]), [3, 4]);
 	}
 
 	#[test]
