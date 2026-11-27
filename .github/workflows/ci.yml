@@ -45,6 +45,17 @@ jobs:
       - name: Check formatting
         run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all -- --check
 
+  design-notes:
+    name: Check design notes
+    if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the code the notes name and the index by file
+        run: ci/design-notes.py --check
+
   clippy:
     name: Lint with Clippy
     if: (github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools') && !inputs.version

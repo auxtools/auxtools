@@ -185,8 +185,8 @@ Useful environment variables for `ci/run-tests.sh`:
 
 ## Continuous integration and artifacts
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs formatting, Clippy, MSRV builds (`1.95`
-and `1.88`), Linux and Windows builds, binary compatibility checks, unit and extension tests, BYOND
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs formatting, design note checks, Clippy,
+MSRV builds, Linux and Windows builds, binary compatibility checks, unit and extension tests, BYOND
 integration tests, and `.vsix` packaging.
 
 - **Binary compatibility checks:** `ci/check-linux.sh` enforces 32-bit x86 ELF output, glibc
