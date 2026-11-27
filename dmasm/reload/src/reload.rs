@@ -24,7 +24,7 @@ pub use reparent::{Reparented, ReparentedType};
 mod global_init;
 pub mod locals;
 mod resources;
-pub use global_init::GlobalInit;
+pub use global_init::{GlobalInit, StaticOwner};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -910,10 +910,15 @@ impl Snapshot {
                 if settings(old_value.code.as_ref()) != settings(new_value.code.as_ref()) {
                     return Err(format!("{key}: `set` statements changed"));
                 }
+                #[allow(clippy::type_complexity)]
                 fn statics(
                     v: &ProcValue,
-                ) -> Vec<(&str, Option<String>, Option<&dreammaker::ast::Expression>)>
-                {
+                ) -> Vec<(
+                    &str,
+                    Option<String>,
+                    Option<&dreammaker::ast::Expression>,
+                    Vec<(String, u32)>,
+                )> {
                     v.code
                         .as_deref()
                         .map(global_init::static_initializers)
@@ -1292,7 +1297,7 @@ impl Snapshot {
         declared: &str,
         location: dreammaker::Location,
         proc_path: Option<&str>,
-        statics: &[(String, u32)],
+        statics: &[(String, u32, String)],
     ) -> Result<ProcReload, Diagnostic> {
         use dreammaker::ast::{Expression, Ident, PathOp, Prefab, RelativePath, Spanned, Term};
         let mut expression = expression.clone();
@@ -1367,7 +1372,7 @@ impl Snapshot {
         location: dreammaker::Location,
         debug_info: bool,
         proc_path: Option<&str>,
-        statics: &[(String, u32)],
+        statics: &[(String, u32, String)],
     ) -> Result<ProcReload, Diagnostic> {
         let value = ProcValue {
             location,
@@ -3865,7 +3870,11 @@ pub(crate) fn constructed_type<'d>(
     }
 }
 
-fn visible_statics(declared: &[locals::Declared], name: &str, nth: u32) -> Vec<(String, u32)> {
+fn visible_statics(
+    declared: &[locals::Declared],
+    name: &str,
+    nth: u32,
+) -> Vec<(String, u32, String)> {
     declared
         .iter()
         .position(|local| local.name == name && local.nth == nth)

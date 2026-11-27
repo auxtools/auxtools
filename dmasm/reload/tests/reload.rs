@@ -4977,3 +4977,117 @@ fn the_statics_of_two_overrides_are_compared_with_their_own() {
         ["code/code.dm:10: /datum/t/f: count: changed initializer"]
     );
 }
+
+fn field_reads(nodes: &[Node]) -> Vec<String> {
+    nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Instruction(ins, ()) => Some(ins),
+            _ => None,
+        })
+        .flat_map(|ins| ins.variables())
+        .filter_map(|var| match var {
+            dmasm_bytecode::Variable::SetCache(_, field) => match field.as_ref() {
+                dmasm_bytecode::Variable::Field(name) => {
+                    Some(String::from_utf8_lossy(&name.0).into_owned())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_new_static_reads_through_a_typed_static_by_its_type() {
+    let before = "/datum/config\n\tvar/const/LIMIT = 5\n\n\
+                  /proc/limits()\n\tvar/static/datum/config/config\n\treturn config\n";
+    let after = before.replace(
+        "\treturn config\n",
+        "\tvar/static/list/limits = list(config.LIMIT)\n\treturn limits\n",
+    );
+    let changes = changes("static-typed-read", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let reload = changes
+        .plan
+        .reloads
+        .iter()
+        .find(|r| r.proc.path == "/limits");
+    let limits = reload
+        .and_then(|reload| reload.statics.iter().find(|s| s.name == "limits"))
+        .and_then(|limits| limits.init.as_ref())
+        .expect("no initializer for limits");
+    assert!(field_reads(&limits.nodes).is_empty(), "{:?}", limits.nodes);
+    assert_eq!(reads_of(&limits.nodes, "LIMIT"), ["/datum/config:LIMIT"]);
+    let reboot = &changes
+        .global_init
+        .as_ref()
+        .expect("no global init")
+        .code
+        .nodes;
+    assert!(field_reads(reboot).is_empty(), "{:?}", reboot);
+    assert_eq!(reads_of(reboot, "LIMIT"), ["/datum/config:LIMIT"]);
+}
+
+#[test]
+fn a_static_moved_into_a_block_changes_what_a_later_initializer_reads() {
+    let before = "var/seed = 20\n\n\
+                  /proc/seeded(x)\n\tvar/static/seed = 1\n\tif (x)\n\t\tseed++\n\
+                  \tvar/static/list/cache = list(seed)\n\treturn cache[1]\n";
+    let after = before.replace(
+        "\tvar/static/seed = 1\n\tif (x)\n\t\tseed++\n",
+        "\tif (x)\n\t\tvar/static/seed = 1\n\t\tseed++\n",
+    );
+    let changes = changes("static-moved-into-a-block", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let deferred: Vec<String> = changes.deferred.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        deferred,
+        ["code/code.dm:7: /proc/seeded: cache: changed initializer"]
+    );
+    let reboot = &changes
+        .global_init
+        .as_ref()
+        .expect("no global init")
+        .code
+        .nodes;
+    assert_eq!(reads_of(reboot, "seed"), [":seed"]);
+
+    let world = World::new("static-moved-into-a-block-file", before);
+    let mut old = world.parse();
+    world.write(&after);
+    match old.reload_file(&world.dir, std::path::Path::new("code/code.dm")) {
+        Ok(_) => panic!("reloaded on its own"),
+        Err(e) => assert!(e.contains("static initializers"), "{e}"),
+    }
+}
+
+#[test]
+fn a_global_init_names_the_override_whose_static_each_initializer_sets() {
+    let before = "var/rolled = rand(1, 2)\n\n\
+                  /datum/t/proc/f()\n\treturn 0\n\n\
+                  /datum/t/f()\n\tvar/static/list/cache = list(1)\n\treturn cache[1]\n\n\
+                  /datum/t/f()\n\tvar/static/list/cache = list(2)\n\treturn ..() + cache[1]\n";
+    let after = before.replace("list(2)", "list(3)");
+    let changes = changes("override-static-owners", before, &after);
+    let init = changes.global_init.as_ref().expect("no global init");
+    let owners: Vec<String> = init
+        .owners
+        .iter()
+        .map(|owner| match owner {
+            Some(owner) => format!("{} {:?}", owner.proc, owner.statics),
+            None => "-".to_owned(),
+        })
+        .collect();
+    assert_eq!(global_init_sets(&changes).len(), owners.len());
+    assert_eq!(
+        owners,
+        [
+            "-",
+            "/datum/t/f (override 1) {\"cache\": 1}",
+            "/datum/t/f (override 2) {\"cache\": 1}",
+        ]
+    );
+    let first = init.without(|var| var.name.0 == b"rolled");
+    assert_eq!(first.owners, init.owners[1..]);
+}

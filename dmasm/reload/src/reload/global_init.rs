@@ -20,6 +20,30 @@ pub struct GlobalInit {
     pub table: usize,
     #[cfg_attr(feature = "serde", serde(default))]
     pub proc_statics: BTreeMap<String, BTreeMap<String, usize>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub owners: Vec<Option<StaticOwner>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StaticOwner {
+    pub proc: super::ProcKey,
+    pub statics: BTreeMap<String, usize>,
+}
+
+fn owners<'a>(
+    set: impl Iterator<Item = &'a Initializer<'a>>,
+    world_key: impl Fn(&super::ProcKey) -> Option<super::ProcKey>,
+) -> Vec<Option<StaticOwner>> {
+    set.map(|init| {
+        let proc = world_key(init.proc.as_ref()?)?;
+        let mut statics = BTreeMap::new();
+        for name in &init.proc_static_names {
+            *statics.entry(name.clone()).or_default() += 1;
+        }
+        Some(StaticOwner { proc, statics })
+    })
+    .collect()
 }
 
 fn proc_statics<'a>(
@@ -54,7 +78,7 @@ struct Initializer<'a> {
     constant: Option<ConstValue>,
     proc_path: Option<String>,
     proc_static_names: Vec<String>,
-    visible: Vec<(String, u32)>,
+    visible: Vec<(String, u32, String)>,
     sized_list: bool,
     params: Vec<(String, String)>,
     scoped_late: bool,
@@ -70,12 +94,52 @@ impl Initializer<'_> {
         super::constructed_type(&self.declared, self.expression?)
     }
 
-    fn computed(&self) -> Option<(&StaticScope, &str, &str, Option<&Expression>)> {
+    fn bound(&self) -> Vec<(&str, u32)> {
+        bound_statics(self.expression, &self.visible)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn computed(
+        &self,
+    ) -> Option<(
+        &StaticScope,
+        &str,
+        &str,
+        Option<&Expression>,
+        Vec<(&str, u32)>,
+    )> {
         if self.constant.is_some() {
             return None;
         }
-        Some((&self.scope, &self.name, &self.declared, self.expression))
+        Some((
+            &self.scope,
+            &self.name,
+            &self.declared,
+            self.expression,
+            self.bound(),
+        ))
     }
+}
+
+fn bound_statics<'v>(
+    expression: Option<&Expression>,
+    visible: &'v [(String, u32, String)],
+) -> Vec<(&'v str, u32)> {
+    let mut bound = vec![];
+    if let Some(expression) = expression {
+        syntax::walk_expression(expression, &mut |node| {
+            let syntax::Node::Term(Term::Ident(name)) = node else {
+                return;
+            };
+            let found = visible.iter().rev().find(|(had, ..)| had == name.as_str());
+            if let Some((had, nth, _)) = found {
+                bound.push((had.as_str(), *nth));
+            }
+        });
+    }
+    bound.sort_unstable();
+    bound.dedup();
+    bound
 }
 
 impl Snapshot {
@@ -296,6 +360,9 @@ impl Snapshot {
             },
             table: 0,
             proc_statics: proc_statics(all.iter().filter(|i| i.constant.is_none())),
+            owners: owners(all.iter().filter(|i| i.constant.is_none()), |key| {
+                Some(key.clone())
+            }),
         })
     }
 
@@ -432,7 +499,11 @@ fn renumber_old_statics(
         numbers.insert(old_key, pairs);
     }
     for Initializer {
-        proc, scope, name, ..
+        proc,
+        scope,
+        name,
+        visible,
+        ..
     } in before
     {
         let Some(old_key) = proc.take() else {
@@ -442,13 +513,19 @@ fn renumber_old_statics(
         let Some(pairs) = numbers.get(&old_key) else {
             continue;
         };
+        let renumbered = |name: &str, nth: u32| {
+            pairs
+                .iter()
+                .find(|(had, _, old)| had == name && *old == nth)
+                .map_or(u32::MAX - nth, |(_, new, _)| *new)
+        };
+        for (name, nth, _) in visible.iter_mut() {
+            *nth = renumbered(name, *nth);
+        }
         let StaticScope::Proc { nth, .. } = scope else {
             continue;
         };
-        *nth = pairs
-            .iter()
-            .find(|(had, _, old)| had == name && old == nth)
-            .map_or(u32::MAX - *nth, |(_, new, _)| *new);
+        *nth = renumbered(name, *nth);
     }
 }
 
@@ -461,6 +538,7 @@ fn changed(new: &Snapshot, before: &[Initializer<'_>], after: &[Initializer<'_>]
                 was.constant != init.constant
                     || was.expression != init.expression
                     || was.constructed() != init.constructed()
+                    || was.bound() != init.bound()
             })
         })
         .map(|init| {
@@ -1003,7 +1081,7 @@ impl<'a> Walk<'a> {
         let t = init.ty;
         if !global {
             if let Some(proc_path) = &init.proc_path {
-                if let Some((_, number)) = init.visible.iter().rev().find(|(n, _)| n == name) {
+                if let Some((_, number, _)) = init.visible.iter().rev().find(|(n, ..)| n == name) {
                     let scope = StaticScope::Proc {
                         path: proc_path.clone(),
                         nth: *number,
@@ -1420,19 +1498,35 @@ fn normal(path: &Path) -> String {
     parts.join("/").to_ascii_lowercase()
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn static_initializers(
     code: &[Spanned<Statement>],
-) -> Vec<(&str, Option<String>, Option<&Expression>)> {
+) -> Vec<(
+    &str,
+    Option<String>,
+    Option<&Expression>,
+    Vec<(String, u32)>,
+)> {
     let mut found = vec![];
     static_statements(code, None, &mut found);
+    let declared = super::locals::declared(code);
+    let mut seen: Vec<&str> = vec![];
     found
         .into_iter()
         .map(|(_, var)| {
-            let declared = var.var_type.type_path.to_string();
+            let name = var.name.as_str();
+            let nth = seen.iter().filter(|had| **had == name).count() as u32;
+            seen.push(name);
+            let declared_type = var.var_type.type_path.to_string();
             let made = (var.value.as_ref())
-                .and_then(|value| super::constructed_type(&declared, value))
+                .and_then(|value| super::constructed_type(&declared_type, value))
                 .map(str::to_owned);
-            (var.name.as_str(), made, var.value.as_ref())
+            let visible = super::visible_statics(&declared, name, nth);
+            let bound = bound_statics(var.value.as_ref(), &visible)
+                .into_iter()
+                .map(|(name, nth)| (name.to_owned(), nth))
+                .collect();
+            (name, made, var.value.as_ref(), bound)
         })
         .collect()
 }
@@ -1683,6 +1777,13 @@ pub(super) fn compare(
             .map(|(init, _)| *init)
             .chain(after.iter().filter(|i| i.constant.is_none())),
     );
+    let owners = owners(
+        table
+            .iter()
+            .map(|(init, _)| *init)
+            .chain(after.iter().filter(|i| i.constant.is_none())),
+        |key| r.old_key(key),
+    );
     let runs = table.into_iter().chain(
         after
             .iter()
@@ -1715,6 +1816,7 @@ pub(super) fn compare(
         },
         table: table_vars,
         proc_statics,
+        owners,
     });
 }
 
@@ -1723,6 +1825,7 @@ impl GlobalInit {
         let mut out = self.clone();
         out.code.nodes = vec![];
         out.table = 0;
+        out.owners = vec![];
         let (mut span, mut sets) = (vec![], 0);
         for node in &self.code.nodes {
             span.push(node.clone());
@@ -1731,6 +1834,9 @@ impl GlobalInit {
                     span.retain(|n| matches!(n, Node::Instruction(Instruction::DbgFile(_), _)));
                 } else {
                     out.table += usize::from(sets < self.table);
+                    if !self.owners.is_empty() {
+                        out.owners.push(self.owners.get(sets).cloned().flatten());
+                    }
                 }
                 out.code.nodes.append(&mut span);
                 sets += 1;
