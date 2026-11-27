@@ -47,8 +47,8 @@ impl Reloads {
 			if shared {
 				self.resource_ids.remove(&resource.path);
 				warnings.push(format!(
-					"resource reload: {} shares existing resource {} (same bytes); later edits to {} will leave appearances using that shared ID \
-					 unchanged",
+					"resource reload: {} has the same bytes as resource {}, so they share an ID. Later edits to {} will not change appearances that \
+					 use the shared ID",
 					resource.path, resource.id, resource.path
 				));
 			} else {
@@ -138,10 +138,11 @@ impl Server {
 				}
 				self.reloads.waiting_reloads.push((from, waiting));
 				let why = if files.is_empty() {
-					"queued behind an earlier reload; applies as world/New starts".to_owned()
+					"queued behind an earlier reload and will apply when world/New starts".to_owned()
 				} else {
 					format!(
-						"resource files need the loaded cache ({}); reload applies as world/New starts. Map atoms use the built code until then",
+						"deferred until world/New because these resource files require the loaded resource cache: {}. Map atoms use the compiled \
+						 code until then",
 						files.join(", ")
 					)
 				};
@@ -188,7 +189,8 @@ impl Server {
 				for &id in &resource.ids {
 					match owner(id) {
 						Some(other) => id_warnings.push(format!(
-							"resource reload: {} and {} share an ID (same bytes); appearances are unchanged. Rebuild to separate them",
+							"resource reload: {} and {} have the same bytes and share an ID. Appearances using that ID will not update. Rebuild to \
+							 separate them",
 							path, other
 						)),
 						None => kept.push(id)
@@ -288,7 +290,7 @@ impl Server {
 			}
 			if !result.failures.is_empty() {
 				self.notify(format!(
-					"Hot reload partly applied as world/New started; restart the world to be sure it runs the new code: {}",
+					"Hot reload partly applied as world/New started: {}. Restart the world to run all of the new code.",
 					result.failures.join("; ")
 				));
 			}

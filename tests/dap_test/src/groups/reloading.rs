@@ -315,7 +315,7 @@ fn saved_without_reloading() {
 	world.resume_through("middle");
 	ok("changed-source warning without hot reload");
 	let said = world.refused("evaluate", json!({ "expression": "TWICE(21)", "context": "repl" }));
-	assert!(said.contains("source macros unavailable"), "{}", said);
+	assert!(said.contains("If it is a #define, evaluation can use it only after"), "{}", said);
 	ok("missing-macro diagnostic without hot reload");
 	world.end();
 }
@@ -337,7 +337,7 @@ fn starting_at_world_new() {
 	edit(&mut world, "bare.dm", "\treturn null\n", "\treturn 'reload_new.dmi'\n");
 	assert_eq!(world.eval_global("jointext(icon_states(icon_new()), \",\")"), "\"new1\"");
 	assert!(
-		!world.output.contains("applies as world/New starts"),
+		!world.output.contains("deferred until world/New"),
 		"the reload waited for world/New:\n{}",
 		world.output
 	);
@@ -531,7 +531,7 @@ fn initializers_after_reboot() {
 	);
 	reboot(&mut world, 4);
 	assert!(
-		world.output.contains("applies as world/New starts"),
+		world.output.contains("deferred until world/New"),
 		"the restore didn't wait:\n{}",
 		world.output
 	);
@@ -1061,11 +1061,7 @@ pub fn run() {
 	reboot(&mut world, 3);
 	assert_eq!(states(&mut world, "icon_reloaded"), "\"second1\"");
 	let after = world.output.rsplit("Reconnected to the world").next().unwrap_or_default().to_owned();
-	assert!(
-		!after.contains("applies as world/New starts"),
-		"the reload waited for world/New:\n{}",
-		after
-	);
+	assert!(!after.contains("deferred until world/New"), "the reload waited for world/New:\n{}", after);
 	ok("restored reload names a built resource");
 
 	edit(
@@ -1078,7 +1074,7 @@ pub fn run() {
 	reboot(&mut world, 4);
 	let after = world.output.rsplit("Reconnected to the world").next().unwrap_or_default().to_owned();
 	assert!(
-		after.contains("resource files need the loaded cache (reload_new.dmi); reload applies as world/New starts"),
+		after.contains("deferred until world/New because these resource files require the loaded resource cache: reload_new.dmi."),
 		"the launcher said:\n{}",
 		after
 	);

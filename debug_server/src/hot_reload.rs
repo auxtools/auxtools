@@ -368,7 +368,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 			)
 		} else {
 			format!(
-				"{}: var {} was removed from source but retained in the running world",
+				"{}: variable {} was removed from source, but the running world keeps it until a rebuild",
 				var.type_path, var.var
 			)
 		});
@@ -413,7 +413,10 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 
 	for removed in removed_procs {
 		if Proc::overrides(removed.proc.path.as_str()).is_empty() {
-			warnings.push(format!("{}: not found in the running world; skipping removal", removed.proc.path));
+			warnings.push(format!(
+				"{}: not found in the running world, so there is nothing to remove",
+				removed.proc.path
+			));
 			if !skipped.contains(&removed.proc.path) {
 				skipped.push(removed.proc.path.clone());
 			}
@@ -547,7 +550,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 		let code = value_code(init);
 		if !code.locals.is_empty() {
 			errors.push(format!(
-				"{}: working out its initial value needs locals, which a reload can't give it yet",
+				"{}: initializer requires local variables, which hot reload does not support",
 				name
 			));
 			continue;
@@ -559,7 +562,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	}
 
 	if !prepared.appearances.is_empty() {
-		warnings.push("verb and built-in changes apply only to new instances; existing instances retain their values".to_owned());
+		warnings.push("verb and built-in variable changes apply only to new instances. Existing instances keep their current values".to_owned());
 	}
 
 	prepared.new_vars = added.vars;
@@ -590,7 +593,7 @@ pub fn prepare(request: &HotReloadRequest, warnings: &mut Vec<String>, skipped: 
 	if !prepared.new_globals.is_empty() {
 		if let Err(e) = runtime_tables::global_vars_available() {
 			errors.push(format!(
-				"new global vars can't be listed in global.vars on this build of BYOND ({}); rebuild to add them",
+				"cannot add new global variables to global.vars on this BYOND build: {}. Rebuild to add them",
 				e
 			));
 		}
@@ -738,7 +741,7 @@ fn prepare_global_init(
 	const NAME: &str = auxtools_protocol::GLOBAL_INIT;
 	let ran = || {
 		format!(
-			"{}: global initialization has already run; rebuild to apply changed global and static initializers",
+			"{}: global initialization has already run. Rebuild to apply changed global and static initializers",
 			NAME
 		)
 	};
@@ -747,7 +750,10 @@ fn prepare_global_init(
 		return Ok(None);
 	};
 	if !init.code.locals.is_empty() {
-		return Err(format!("{}: replacement global init proc needs locals; this is not supported yet", NAME));
+		return Err(format!(
+			"{}: new global init proc requires local variables, which hot reload does not support",
+			NAME
+		));
 	}
 	let code = value_code(init.code.clone());
 	let Some(proc) = global_init_proc() else {
@@ -1059,7 +1065,7 @@ fn params_table(
 		in_lists.push(match &param.in_list {
 			InList::Builtin(word) => *word,
 			InList::Kept => current_in_list(&param.name)
-				.ok_or_else(|| format!("parameter {} has an `in` list expression the running proc doesn't", param.name))?,
+				.ok_or_else(|| format!("parameter {} has an `in` list that the running proc does not have", param.name))?,
 			InList::New(code) => in_list_proc(&param.name, code, pending, world_globals, added)?
 		});
 	}
@@ -1785,7 +1791,8 @@ fn prepare_new_var(
 		if let Some(pair) = declared.chunks(2).find(|pair| type_vars.name_of(pair[0]) == name) {
 			if pair[1] != new.flags {
 				return Err(fail(
-					"the running world retained this var with different static, const or tmp flags; rebuild to change them".to_owned()
+					"the running world already declares this variable with different static, const, or tmp modifiers. Rebuild to change them"
+						.to_owned()
 				));
 			}
 			if new.flags & STATIC != 0 {
@@ -1794,7 +1801,7 @@ fn prepare_new_var(
 					.insert((StaticScope::of_type(&new.type_path), new.var.as_bytes().to_vec()), pair[0]);
 			}
 			warnings.push(format!(
-				"{}: var {} reuses the declaration retained by the running world; existing static values are unchanged",
+				"{}: variable {} keeps its existing declaration in the running world. Existing static values do not change",
 				new.type_path, new.var
 			));
 			return Ok(());
@@ -1826,12 +1833,7 @@ fn prepare_new_var(
 					kept.push(sub);
 					continue;
 				}
-				Ok(_) => {
-					return Err(fail(format!(
-						"{} already has a var of that name (a duplicate definition)",
-						type_path(sub)
-					)))
-				}
+				Ok(_) => return Err(fail(format!("{} already has a variable with this name", type_path(sub)))),
 				Err(at) => {
 					type_vars.declared(sub).map_err(fail)?.splice(at * 2..at * 2, [id, new.flags]);
 				}
@@ -1841,10 +1843,7 @@ fn prepare_new_var(
 				let table = type_vars.table(sub).map_err(fail)?;
 				let at = table.chunks(4).position(|entry| entry[0] >= name).unwrap_or(table.len() / 4);
 				if table.get(at * 4) == Some(&name) {
-					return Err(fail(format!(
-						"{} already has a var of that name (a duplicate definition)",
-						type_path(sub)
-					)));
+					return Err(fail(format!("{} already has a variable with this name", type_path(sub))));
 				}
 				table.splice(at * 4..at * 4, [name, id, value.0, value.1]);
 			}
@@ -1875,7 +1874,8 @@ fn moved_var_warning(declaring: &str, var: &str, kept: &[u32]) -> Option<String>
 	}
 	let (they, them) = if tops.len() == 1 { ("its", "it") } else { ("their", "them") };
 	Some(format!(
-		"{}: var {} moved here; {} and {} subtypes retain runtime declarations, values and var IDs. Rebuild to give {} the new declaration",
+		"{}: variable {} moved here. In the running world, {} and {} subtypes keep their declarations, values, and variable IDs. Rebuild to give {} \
+		 the new declaration",
 		declaring,
 		var,
 		tops.join(", "),
@@ -1897,7 +1897,7 @@ fn prepare_redeclared(
 	if var.type_path.is_empty() {
 		let ids = variable_ids(var.var.as_bytes());
 		let [id] = ids[..] else {
-			return Err(fail(format!("expected one matching runtime variable; found {}", ids.len())));
+			return Err(fail(format!("expected one matching runtime variable, found {}", ids.len())));
 		};
 		if let Some(init) = &var.init {
 			added.run_once.push((id, format!("/var/{}", var.var), (**init).clone()));
@@ -2854,7 +2854,7 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 			});
 			if id.is_none() {
 				self.error = Some(format!(
-					"static local {}: cannot locate its storage in the running world; rebuild to use it",
+					"static local {}: cannot find its storage in the running world. Rebuild to use it",
 					shown
 				));
 			}
@@ -2909,7 +2909,7 @@ impl dmasm::assembler::AssembleEnv for ReloadEnv<'_> {
 		}
 
 		self.error = Some(format!(
-			"ambiguous variable: {} runtime slots named {}; no unique reference in {}",
+			"ambiguous variable: {} runtime slots share the name {} in {}",
 			candidates.len(),
 			shown,
 			declaring.unwrap_or("the world")
