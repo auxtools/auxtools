@@ -2015,7 +2015,8 @@ impl Appended {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "test-commands"), allow(dead_code))]
 pub enum FailAt {
-	Append
+	Append,
+	Change
 }
 
 #[cfg(feature = "test-commands")]
@@ -2107,7 +2108,8 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 	appended: Appended,
 	breakpoints: &mut HashMap<(raw_types::procs::ProcId, u16), BTreeMap<K, T>>,
 	moved_breakpoints: &mut MovedBreakpoints<K>,
-	warnings: &mut Vec<String>
+	warnings: &mut Vec<String>,
+	failures: &mut Vec<String>
 ) {
 	let Appended {
 		mut prepared,
@@ -2125,7 +2127,7 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 	for removal in &prepared.removed_procs {
 		if let Some(edit) = &removal.on_world {
 			if let Err(e) = edit_world_names(edit.clone()) {
-				warnings.push(format!("could not unlink world proc: {}", e));
+				failures.push(format!("could not unlink world proc: {}", e));
 			}
 		}
 		if removal.type_id == NONE {
@@ -2139,11 +2141,11 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 			Ok(list) => {
 				let _ = runtime_tables::set_type_field(removal.type_id, removal.field, list);
 			}
-			Err(e) => warnings.push(format!("could not unlink proc from type list: {}", e))
+			Err(e) => failures.push(format!("could not unlink proc from type list: {}", e))
 		}
 		for (sub, key, procs) in &removal.map_entries {
 			if let Err(e) = runtime_tables::set_named_procs(*sub, *key, procs) {
-				warnings.push(format!("could not unlink proc from type name map: {}", e));
+				failures.push(format!("could not unlink proc from type name map: {}", e));
 			}
 		}
 		for &proc in &removal.relinked {
@@ -2165,12 +2167,12 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 				Ok(list) => {
 					let _ = runtime_tables::set_type_field(on_type.type_id, on_type.field, list);
 				}
-				Err(e) => warnings.push(format!("couldn't add a proc to its type's list: {}", e))
+				Err(e) => failures.push(format!("could not add proc to type list: {}", e))
 			}
 
 			for (sub, key, procs) in &on_type.map_entries {
 				if let Err(e) = runtime_tables::set_named_procs(*sub, *key, procs) {
-					warnings.push(format!("couldn't add a proc to a type's proc names: {}", e));
+					failures.push(format!("could not add proc to type name map: {}", e));
 				}
 			}
 
@@ -2184,7 +2186,7 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 
 		if let Some(edit) = &new.on_world {
 			if let Err(e) = edit_world_names(edit.clone()) {
-				warnings.push(format!("couldn't add a proc to the world's procs: {}", e));
+				failures.push(format!("could not add proc to world procs: {}", e));
 			}
 		}
 
@@ -2215,7 +2217,7 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 	}
 	for r in renames {
 		if let Err(e) = rename(r) {
-			warnings.push(format!("could not update dynamic lookup for renamed proc: {}", e));
+			failures.push(format!("could not update dynamic lookup for renamed proc: {}", e));
 		}
 	}
 	for (proc, word, value) in prepared.entry_words {
@@ -2224,20 +2226,20 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 	for (type_id, field, words) in prepared.type_fields {
 		let _ = runtime_tables::set_type_field(type_id, field, words);
 	}
-	reparent::apply_builtins(&prepared.reparent, warnings);
+	reparent::apply_builtins(&prepared.reparent, warnings, failures);
 	for (type_id, writes) in &prepared.builtin_writes {
-		if let Err(e) = write_builtins(*type_id, writes) {
-			warnings.push(format!("couldn't set a built-in var: {}", e));
+		if let Err(e) = failing(FailAt::Change).and_then(|()| write_builtins(*type_id, writes)) {
+			failures.push(format!("could not set built-in variable: {}", e));
 		}
 	}
-	inherit::apply(&prepared.builtin_inherits, warnings);
+	inherit::apply(&prepared.builtin_inherits, failures);
 	for &type_id in &prepared.appearances {
 		let _ = runtime_tables::forget_type_appearance(type_id);
 	}
 
 	for (id, (tag, data)) in prepared.global_values {
 		if let Err(e) = runtime_tables::set_global_words(id, tag as u8, data) {
-			warnings.push(format!("couldn't set a static var's value: {}", e));
+			failures.push(format!("couldn't set a static var's value: {}", e));
 		}
 	}
 
@@ -2252,12 +2254,12 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 					warnings.push(format!("(global init): {}", e.message));
 				}
 			}
-			None => warnings.push("(global init): missing /proc/auxtools_expr_stub to run it".to_owned())
+			None => failures.push("(global init): missing /proc/auxtools_expr_stub to run global initializers".to_owned())
 		}
 	}
 	for (id, name, bytecode) in prepared.run_once {
 		let Some(stub) = Proc::find("/proc/auxtools_expr_stub") else {
-			warnings.push(format!("{}: missing /proc/auxtools_expr_stub for initializer evaluation", name));
+			failures.push(format!("{}: missing /proc/auxtools_expr_stub for initializer evaluation", name));
 			continue;
 		};
 		stub.set_bytecode(bytecode);
@@ -2270,7 +2272,7 @@ pub fn apply<K: Ord + std::hash::Hash + Copy, T>(
 		match result {
 			Ok(value) => {
 				if let Err(e) = runtime_tables::set_global_value(id, value) {
-					warnings.push(format!("{}: {}", name, e));
+					failures.push(format!("{}: {}", name, e));
 				}
 			}
 			Err(e) => warnings.push(format!("{}: initializer evaluation failed: {}", name, e.message))
