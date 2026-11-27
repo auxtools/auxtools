@@ -186,3 +186,21 @@ var/datum/declared/declared_one = new
 /proc/calls_kept_declaration()
 	var/last = /datum/kept::speak()
 	return "[call(new /datum/kept, /datum/kept/proc/speak)()], then [call(new /datum/kept, last)()]"
+
+var/hr_tally = 100
+
+/datum/tallied/proc/bump()
+	hr_tally++
+
+/proc/tallies()
+	var/datum/tallied/T = new
+	T.bump()
+	return "[("hr_tally" in T.vars) ? T.vars["hr_tally"] : "none"] [global.hr_tally]"
+
+/proc/hr_asked()
+	return "global"
+
+/datum/asking/proc/ask()
+	return hr_asked()
+
+/datum/asking/child
