@@ -680,7 +680,7 @@ pub fn unhook_all() {
 		*DEFERRED_INSTRUCTION_REPLACE.get() = None;
 	}
 
-	for (opcode_ptr, original) in ORIGINAL_BYTECODE.lock().unwrap().drain() {
+	for (opcode_ptr, original) in ORIGINAL_BYTECODE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).drain() {
 		unsafe {
 			std::ptr::copy_nonoverlapping(original.as_ptr(), opcode_ptr.0 as *mut u32, original.len());
 		}

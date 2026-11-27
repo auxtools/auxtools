@@ -411,9 +411,20 @@ impl Server {
 	}
 
 	pub fn refuse(reason: String) {
-		let Ok(events) = Self::take_events() else {
-			return;
-		};
+		if let Ok(events) = Self::take_events() {
+			Self::refuse_on(events, reason);
+		}
+	}
+
+	pub fn give_up(&mut self, reason: String) {
+		self.clients.clear();
+		self.hold = None;
+		self.hold_max = None;
+		let (_, nothing) = mpsc::channel();
+		Self::refuse_on(std::mem::replace(&mut self.events, nothing), reason);
+	}
+
+	fn refuse_on(events: mpsc::Receiver<Event>, reason: String) {
 		thread::spawn(move || {
 			while let Ok(event) = events.recv() {
 				if let Event::Connected(_, mut connection) = event {
