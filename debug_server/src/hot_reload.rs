@@ -2427,6 +2427,36 @@ pub fn locals_references(path: &str) -> Result<(u32, u16, u32), String> {
 }
 
 #[cfg(feature = "test-commands")]
+pub fn in_list_values(path: &str, param: &str) -> Result<Vec<String>, String> {
+	let proc = Proc::find(path).ok_or_else(|| format!("proc not found: {}", path))?;
+	let entry = runtime_tables::proc_entry(proc.id).ok_or_else(|| format!("could not read proc table entry for {}", path))?;
+	let words = runtime_tables::misc_words(entry.0[ProcEntryWords::PARAMETERS]).ok_or_else(|| format!("{} has no parameters", path))?;
+	let in_list = words
+		.chunks(4)
+		.find(|words| words.len() == 4 && unsafe { StringRef::from_variable_id(raw_types::strings::VariableId(words[2])) }.data() == param.as_bytes())
+		.map(|words| words[1])
+		.ok_or_else(|| format!("{} has no parameter {}", path, param))?;
+	if in_list & 0xFF != 0x40 {
+		return Err(format!("parameter {}'s `in` list is built-in", param));
+	}
+	let id = *runtime_tables::in_list_procs()?
+		.get((in_list >> 8) as usize)
+		.ok_or_else(|| format!("parameter {}'s `in` list is not in the table", param))?;
+	let mut returned = auxtools::Value::NULL.raw;
+	let value = unsafe {
+		let null = auxtools::Value::NULL.raw;
+		if raw_types::funcs::call_proc_by_id(&mut returned, null, 2, raw_types::procs::ProcId(id), 0, null, std::ptr::null(), 0, 0, 0) != 1 {
+			return Err(format!("parameter {}'s `in` list failed", param));
+		}
+		auxtools::Value::from_raw_owned(returned)
+	};
+	let list = auxtools::List::from_value(&value).map_err(|e| e.message)?;
+	(1..=list.len())
+		.map(|i| list.get(i).and_then(|item| item.as_string()).map_err(|e| e.message))
+		.collect()
+}
+
+#[cfg(feature = "test-commands")]
 pub fn declared_references(path: &str) -> Result<(u32, u32), String> {
 	let id = runtime_tables::type_field(find_type(path)?, type_fields::DECLARED_VARS)?;
 	let (_, references) = misc_references(id).ok_or_else(|| format!("{} has no declared variables", path))?;
