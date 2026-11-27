@@ -1,0 +1,10 @@
+[package]
+name = "test_support"
+description = "Shared integration test library for locating BYOND and built binaries, launching worlds, and driving the CLI, debug adapter, and debug protocol"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true

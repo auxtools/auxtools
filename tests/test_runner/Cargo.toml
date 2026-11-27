@@ -8,3 +8,4 @@ publish = false
 
 [dependencies]
 auxtest = { path = "../auxtest" }
+test_support = { path = "../support" }
