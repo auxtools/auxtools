@@ -292,6 +292,9 @@ impl Proc {
 	/// Returns `HookFailure::AlreadyHooked` if this library already has a hook
 	/// on this proc ID.
 	pub fn hook(&self, func: ProcHook) -> Result<(), HookFailure> {
+		if self.entry().is_null() {
+			return Err(HookFailure::ProcNotFound);
+		}
 		hook_by_id(self.id, func, self.path.to_owned())
 	}
 
