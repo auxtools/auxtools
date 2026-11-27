@@ -3694,3 +3694,110 @@ fn lines_read_on_are_recorded_as_dreammaker_does() {
         ["DbgLine 2", "DbgLine 3", "DbgLine 2"]
     );
 }
+
+#[test]
+fn a_scoped_chain_from_a_type_path_follows_the_declared_type_of_each_var() {
+    let types = "/datum/config\n\tvar/datum/settings/settings\n\
+                 /datum/settings\n\tvar/static/item_type = 5\n";
+    for body in [
+        "return /datum/config::settings::item_type",
+        "return /datum/config::settings.item_type",
+    ] {
+        let src = format!("{types}/proc/f()\n\t{body}\n");
+        assert_eq!(
+            global_scopes(&src),
+            ["Some(Type(\"/datum/settings\"))"],
+            "{}",
+            body
+        );
+    }
+    let code = compile(
+        &format!("{types}/proc/f()\n\treturn /datum/config::settings::item_type\n"),
+        "",
+        "f",
+    );
+    assert!(
+        code.starts_with("GetVar global(\"item_type\")"),
+        "reads more than the static:\n{}",
+        code
+    );
+}
+
+#[test]
+fn a_scoped_static_after_a_computed_value_is_read_alone() {
+    let types = "/datum/config\n\tvar/datum/settings/settings\n\tvar/static/own_type = 4\n\
+                 /datum/config/proc/get()\n\treturn src\n\
+                 /datum/settings\n\tvar/static/item_type = 5\n\
+                 var/datum/config/config\nvar/list/configs = list(null)\n\
+                 /proc/get_config() as /datum/config\n\treturn config\n\
+                 /proc/get_untyped()\n\treturn null\n";
+    for (body, read) in [
+        ("return get_config()::settings::item_type", "item_type"),
+        ("return configs[1]:settings::item_type", "item_type"),
+        ("return get_untyped()::item_type", "item_type"),
+        ("return config.get()::own_type", "own_type"),
+        ("return config.get()::settings::item_type", "item_type"),
+    ] {
+        let code = compile(&format!("{types}/proc/f()\n\t{body}\n"), "", "f");
+        assert!(
+            code.starts_with(&format!("GetVar global(\"{read}\")\nRet")),
+            "{}: reads more than the static:\n{}",
+            body,
+            code
+        );
+    }
+    let body = "return get_config()?.settings::item_type";
+    let code = compile(&format!("{types}/proc/f()\n\t{body}\n"), "", "f");
+    assert_has(
+        &code,
+        &["PushCache", "GetVar global(\"item_type\")", "PopCache"],
+    );
+}
+
+#[test]
+fn a_scoped_static_after_a_safe_access_is_read_alone() {
+    let types = "/datum/holder\n\tvar/datum/settings/b\n\tvar/list/l\n\
+                 /datum/holder/proc/f() as /datum/settings\n\treturn b\n\
+                 /datum/settings\n\tvar/static/x = 5\n\tvar/plain = 2\n\
+                 /datum/settings/proc/f2() as /datum/settings\n\treturn src\n";
+    for body in ["return a?.f()::x", "return a?.b.f2()::x", "return a?.b::x"] {
+        let code = compile(
+            &format!("{types}/proc/s(datum/holder/a)\n\t{body}\n"),
+            "",
+            "s",
+        );
+        assert_has(&code, &["PushCache", "GetVar global(\"x\")", "PopCache"]);
+        assert!(
+            !code.contains("Call"),
+            "{}: calls before the static:\n{}",
+            body,
+            code
+        );
+    }
+}
+
+#[test]
+fn a_scoped_var_after_a_safe_access_warns_where_dreammaker_reads_the_receivers() {
+    let types = "/datum/holder\n\tvar/datum/settings/b\n\tvar/list/l\n\
+                 /datum/holder/proc/f() as /datum/settings\n\treturn b\n\
+                 /datum/holder/proc/g()\n\treturn b\n\
+                 /datum/settings\n\tvar/static/x = 5\n\tvar/plain = 2\n";
+    let warns = |body: &str| {
+        let src = format!("{types}/proc/s(datum/holder/a)\n\t{body}\n");
+        compiled_of(&src, "", "s", dmasm_compiler::ByondVersion::LATEST)
+            .byond_bugs
+            .iter()
+            .any(|bug| bug.id == dmasm_compiler::diagnostic::Id::ByondSafeScopeReceiver)
+    };
+    for body in [
+        "return a?.f()::plain",
+        "return a?.l[1]::x",
+        "return a?.b::plain",
+        "return a?.g()::x",
+    ] {
+        assert!(warns(body), "{}", body);
+    }
+    for body in ["return a?.f()::x", "return a?.b::x", "return a.b::plain"] {
+        assert!(!warns(body), "{}", body);
+    }
+}

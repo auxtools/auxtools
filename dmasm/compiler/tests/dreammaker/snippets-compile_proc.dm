@@ -2566,3 +2566,80 @@ var/g = 1
 	h?.c.m().v++
 /proc/c5_inc_v(datum/h/h, list/l, i, x)
 	return (h?.c.m().v++)
+// Guards: a_scoped_chain_from_a_type_path_follows_the_declared_type_of_each_var (compile_proc.rs)
+/datum/config
+	var/datum/settings/settings
+/datum/settings
+	var/static/item_type = 5
+var/datum/config/config
+/proc/f1()
+	return /datum/config::settings::item_type
+/proc/f2()
+	return /datum/config::settings.item_type
+/proc/f3()
+	return config::settings::item_type
+// Guards: a_scoped_static_after_a_computed_value_is_read_alone (compile_proc.rs)
+/datum/config
+	var/datum/settings/settings
+	var/static/own_type = 4
+/datum/config/proc/get()
+	return src
+/datum/settings
+	var/static/item_type = 5
+var/datum/config/config
+var/list/configs = list(null)
+/proc/get_config() as /datum/config
+	return config
+/proc/get_untyped()
+	return null
+/proc/f1()
+	return get_config()::settings::item_type
+/proc/f2()
+	return configs[1]:settings::item_type
+/proc/f3()
+	return get_untyped()::item_type
+/proc/f4()
+	return config.get()::own_type
+/proc/f5()
+	return config.get()::settings::item_type
+/proc/f6()
+	return get_config()?.settings::item_type
+/proc/f7()
+	return config.settings::item_type
+// Guards: a_scoped_static_after_a_safe_access_is_read_alone, a_scoped_var_after_a_safe_access_warns_where_dreammaker_reads_the_receivers (compile_proc.rs)
+// Known: /proc/s2  DreamMaker restores the cache before reading `::` after a `?.` and more, and reads the initial value of the `?.` receiver's var (a BYOND bug, which dmasm warns of); dmasm reads the var of the value before `::`
+// Known: /proc/s3  DreamMaker restores the cache before reading `::` after a `?.` and more, and reads the initial value of the `?.` receiver's var (a BYOND bug, which dmasm warns of); dmasm reads the var of the value before `::`
+// Known: /proc/s4  DreamMaker restores the cache before reading `::` after a `?.` and more, and reads the initial value of the `?.` receiver's var (a BYOND bug, which dmasm warns of); dmasm reads the var of the value before `::`
+// Known: /proc/s6  DreamMaker restores the cache before reading `::` after a `?.` and more, and reads the initial value of the `?.` receiver's var (a BYOND bug, which dmasm warns of); dmasm reads the var of the value before `::`
+// Known: /proc/s7  DreamMaker restores the cache before reading `::` after a `?.` and more, and reads the initial value of the `?.` receiver's var (a BYOND bug, which dmasm warns of); dmasm reads the var of the value before `::`
+// Known: /proc/s8  DreamMaker restores the cache before reading `::` after a `?.` and more, and reads the initial value of the `?.` receiver's var (a BYOND bug, which dmasm warns of); dmasm reads the var of the value before `::`
+/datum/holder
+	var/datum/settings/b
+	var/list/l
+/datum/holder/proc/f() as /datum/settings
+	return b
+/datum/holder/proc/g()
+	return b
+/datum/settings
+	var/static/x = 5
+	var/plain = 2
+/proc/s1(datum/holder/a)
+	return a?.f()::x
+/proc/s2(datum/holder/a)
+	return a?.f()::plain
+/proc/s3(datum/holder/a)
+	return a?.l[1]::x
+/proc/s4(datum/holder/a)
+	return a?.l[1]::plain
+/proc/s5(datum/holder/a)
+	return a?.b::x
+/proc/s6(datum/holder/a)
+	return a?.b::plain
+/proc/s7(datum/holder/a)
+	return a?.g()::x
+/proc/s8(datum/holder/a)
+	return a?.g()::plain
+/proc/s9(datum/holder/a)
+	return a?.b.f2()::x
+/datum/settings/proc/f2() as /datum/settings
+	return src
