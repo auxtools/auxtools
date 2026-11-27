@@ -98,7 +98,7 @@ fn unexpected(why: String) -> String {
 	format!("BYOND's appearance tree is not laid out as expected ({why}), so the resource reload made no changes")
 }
 
-unsafe fn word(at: *mut u8, offset: usize) -> *mut *mut u8 {
+const unsafe fn word(at: *mut u8, offset: usize) -> *mut *mut u8 {
 	at.add(offset) as *mut *mut u8
 }
 unsafe fn link(node: *mut u8, offset: usize) -> *mut u8 {
@@ -107,7 +107,7 @@ unsafe fn link(node: *mut u8, offset: usize) -> *mut u8 {
 unsafe fn set_link(node: *mut u8, offset: usize, to: *mut u8) {
 	*word(node, offset) = to;
 }
-unsafe fn color(node: *mut u8) -> u16 {
+const unsafe fn color(node: *mut u8) -> u16 {
 	if node.is_null() {
 		BLACK
 	} else {
