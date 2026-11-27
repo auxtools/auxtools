@@ -942,7 +942,7 @@ impl Summary {
 			(
 				"recompiled users of",
 				named(changes.consts.iter().chain(&changes.retyped).cloned().collect()),
-				"vars"
+				"names"
 			),
 			(
 				"reloaded",
