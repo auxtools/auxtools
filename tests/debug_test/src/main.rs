@@ -557,6 +557,13 @@ fn profiled<'a>(totals: &'a ProfileTotals, path: &str) -> &'a ProfiledCode {
 	(totals.codes.iter().find(|code| code.proc.path == path)).unwrap_or_else(|| panic!("{} isn't in {:?}", path, totals))
 }
 
+fn most_hits(client: &mut Client, code: &ProfiledCode) -> u64 {
+	match profile_request(client, ProfileRequest::Code { code: code.code }) {
+		Ok(ProfileReply::Code(instructions)) => instructions.iter().map(|instruction| instruction.hits).max().unwrap_or(0),
+		other => panic!("expected the instructions of {:?}, got {:?}", code, other)
+	}
+}
+
 fn profile(world: &World, mut client: Client) -> Client {
 	let proc = |path: &str| ProcRef {
 		path: path.to_owned(),
@@ -654,6 +661,29 @@ fn profile(world: &World, mut client: Client) -> Client {
 	assert_eq!(profiled(&totals, "/profiled_loop").total.calls, 1);
 	println!("ok: proc filters");
 
+	for order in ["profiled_twin_b(10) + profiled_twin_a(100)", "profiled_twin_a(100) + profiled_twin_b(10)"] {
+		let only = ProfileRequest::Start {
+			procs: vec![proc("/profiled_twin_a")]
+		};
+		assert_eq!(profile_request(&mut client, only), Ok(ProfileReply::Started));
+		assert_eq!(eval(&mut client, None, order), "5105");
+		let totals = profile_totals(&mut client, ProfileRequest::Stop);
+		assert_eq!(totals.codes.len(), 1, "after {}: {:?}", order, totals);
+		let twin = profiled(&totals, "/profiled_twin_a");
+		assert_eq!((twin.total.calls, most_hits(&mut client, twin)), (1, 101), "after {}: {:?}", order, twin);
+	}
+	assert_eq!(
+		profile_request(&mut client, ProfileRequest::Start { procs: vec![] }),
+		Ok(ProfileReply::Started)
+	);
+	assert_eq!(eval(&mut client, None, "profiled_twin_a(100) + profiled_twin_b(10)"), "5105");
+	let totals = profile_totals(&mut client, ProfileRequest::Stop);
+	for (path, hits) in [("/profiled_twin_a", 101), ("/profiled_twin_b", 11)] {
+		let twin = profiled(&totals, path);
+		assert_eq!((twin.total.calls, most_hits(&mut client, twin)), (1, hits), "{:?}", twin);
+	}
+	println!("ok: procs that share code are profiled apart");
+
 	let mut second = world.connect();
 	assert_eq!(
 		profile_request(&mut second, ProfileRequest::Start { procs: vec![] }),
@@ -677,6 +707,33 @@ fn profile(world: &World, mut client: Client) -> Client {
 	assert_eq!(gone, none);
 	println!("ok: profile client cleanup");
 	client
+}
+
+fn loop_back_to_the_start() {
+	let world = World::start(&host_file("debug_test_plain.dmb"), &[]);
+	let mut client = world.connect();
+	pause(&mut client);
+	let only = ProfileRequest::Start {
+		procs: vec![ProcRef {
+			path: "/profiled_countdown".to_owned(),
+			override_id: 0
+		}]
+	};
+	assert_eq!(profile_request(&mut client, only), Ok(ProfileReply::Started));
+	assert_eq!(eval(&mut client, None, "profiled_countdown(5)"), "0");
+	let totals = profile_totals(&mut client, ProfileRequest::Stop);
+	let counted = profiled(&totals, "/profiled_countdown");
+	let Ok(ProfileReply::Code(instructions)) = profile_request(&mut client, ProfileRequest::Code { code: counted.code }) else {
+		panic!("expected the instructions of {:?}", counted);
+	};
+	assert_eq!(
+		instructions.first().map(|first| (first.offset, first.hits)),
+		Some((0, 6)),
+		"{:?}",
+		instructions
+	);
+	assert_eq!(counted.total.calls, 1, "{:?}", counted);
+	println!("ok: a loop back to the first instruction isn't counted as calls");
 }
 
 fn waiting_world_ends() {
@@ -726,6 +783,7 @@ fn panics() {
 
 fn main() {
 	paths::compile(&host_file("debug_test_host.dme"));
+	paths::compile(&host_file("debug_test_plain.dme"));
 
 	let world = World::start(&host_file("debug_test_host.dmb"), &[]);
 
@@ -819,6 +877,7 @@ fn main() {
 	println!("ok: the world connects again after a reboot");
 	drop(world);
 
+	loop_back_to_the_start();
 	waiting_world_ends();
 	panics();
 
