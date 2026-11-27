@@ -789,6 +789,13 @@ var/gx = 1
 // Guards: savefile_input_statement (compile_proc.rs)
 /proc/f(savefile/S, x)
 	S["k"] >> x
+// Guards: a_savefile_is_read_into_a_parenthesised_place (compile_proc.rs)
+/datum/t/var/list/l
+/proc/f(savefile/S, x, datum/t/o)
+	S >> (x)
+	S["k"] >> ((x))
+	S >> (o.l)
+	S >> (o.l[1])
 // Guards: sized_list_var (compile_proc.rs)
 /proc/f(n)
 	var/list/L[n]
