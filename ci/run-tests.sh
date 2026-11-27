@@ -8,7 +8,8 @@
 # worlds through test console commands). BYOND is the installation directory
 # containing bin/. Run this script from the repository root.
 #
-# Set WINE=wine to run Windows binaries on Linux.
+# Set WINE=wine to run Windows binaries on Linux. Wine uses WINEPREFIX if set,
+# or defaults to a dedicated prefix in target/wine-prefix.
 #
 # Suites run in parallel, each in target/run-tests/TEST with its own copy of
 # the test worlds, printing output when finished. Any suite still running
@@ -77,13 +78,29 @@ run() {
 	report "$name" $status $(($(date +%s) - start))
 }
 
+if [ -n "${WINE:-}" ]; then
+	own_prefix=
+	if [ -z "${WINEPREFIX:-}" ]; then
+		mkdir -p target
+		export WINEPREFIX=$PWD/target/wine-prefix
+		own_prefix=1
+	fi
+	if ! "$WINE" reg query 'HKCU\Software\Wine\Drivers' /v Graphics 2>/dev/null | grep -q null; then
+		if [ -n "$own_prefix" ]; then
+			"$WINE" reg add 'HKCU\Software\Wine\Drivers' /v Graphics /d null /f >/dev/null
+			"${WINESERVER:-wineserver}" -w
+		else
+			echo "warning: the Wine prefix $WINEPREFIX doesn't use Wine's null graphics driver, so without a display a world may exit at its start. To set it: $WINE reg add 'HKCU\Software\Wine\Drivers' /v Graphics /d null /f" >&2
+		fi
+	fi
+fi
+
 if [ -n "${SERIAL:-}" ]; then
 	for test in $tests; do
 		run "$test" "$programs/$test$exe"
 	done
 else
 	rm -rf "$work"
-	[ -z "${WINE:-}" ] || "$WINE" cmd /c exit
 	declare -A pids
 	trap 'kill "${pids[@]}" 2>/dev/null; exit 130' INT TERM
 	start=$(date +%s)
