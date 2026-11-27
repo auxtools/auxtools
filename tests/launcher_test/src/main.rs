@@ -2039,9 +2039,9 @@ fn stops(server: &str) {
 	let printed = cli.run(&["stop", "--timeout", "1"], 2);
 	assert!(
 		printed.starts_with(&format!(
-			"error: timed out after 1 second waiting for world process {} to exit. The connection to the debugger ended before the process exited. \
-			 To terminate the process, run stop again with --kill.",
-			pid
+			"error: timed out after 1 second waiting for world process {} to exit. The debug connection closed before the process exited, so \
+			 terminate PID {} through the operating system.",
+			pid, pid
 		)),
 		"stop said {}",
 		printed

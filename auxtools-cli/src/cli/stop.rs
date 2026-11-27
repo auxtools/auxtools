@@ -95,18 +95,21 @@ pub fn stop(world: &mut World, args: &args::Stop) -> Result<()> {
 		Err(e) => return Err(e)
 	};
 	if !args.kill && world.unavailable.is_none() {
-		let lost = if disconnected {
-			" The connection to the debugger ended before the process exited."
+		let advice = if disconnected {
+			format!(
+				"The debug connection closed before the process exited, so terminate PID {} through the operating system.",
+				pid
+			)
 		} else {
-			""
+			"Run 'auxtools stop --kill' to terminate it.".to_owned()
 		};
 		return Err(Failure(
 			TIMED_OUT,
 			format!(
-				"timed out after {} waiting for world process {} to exit.{} To terminate the process, run stop again with --kill.",
+				"timed out after {} waiting for world process {} to exit. {}",
 				seconds_text(timeout),
 				pid,
-				lost
+				advice
 			)
 		));
 	}
