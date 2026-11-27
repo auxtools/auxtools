@@ -101,7 +101,7 @@ pub fn shutdown() {
 	}
 }
 
-unsafe fn state() -> &'static mut State {
+fn state() -> &'static mut State {
 	unsafe { (*BYTECODE_ALLOCATIONS.get()).as_mut().unwrap() }
 }
 
@@ -141,14 +141,9 @@ unsafe fn references(entry: u32) -> Result<u32, String> {
 /// # Panics
 ///
 /// Panics if called before the library is initialized or after shutdown.
-#[track_caller]
 pub fn remember_bytecode(ptr: *const u32, bytecode: &[u32]) {
-	crate::expect_live("remember_bytecode");
 	changed();
-	unsafe { state() }
-		.retired_by_address
-		.entry(ptr as usize)
-		.or_insert_with(|| bytecode.to_vec());
+	state().retired_by_address.entry(ptr as usize).or_insert_with(|| bytecode.to_vec());
 }
 
 /// Returns a copy of the bytecode at `ptr` if this library replaced or recorded
@@ -164,10 +159,8 @@ pub fn remember_bytecode(ptr: *const u32, bytecode: &[u32]) {
 /// # Panics
 ///
 /// Panics if called before the library is initialized or after shutdown.
-#[track_caller]
 pub fn bytecode_at(ptr: *const u32) -> Option<Vec<u32>> {
-	crate::expect_live("bytecode_at");
-	let state = unsafe { state() };
+	let state = state();
 
 	if let Some(bytecode) = state.retired_by_address.get(&(ptr as usize)) {
 		return Some(bytecode.clone());
@@ -252,9 +245,10 @@ unsafe fn give_own_entry(state: &mut State, proc: &Proc, keep_address: bool) -> 
 /// Panics if called before the library is initialized or after shutdown.
 ///
 /// # Safety
-/// Call on BYOND's thread while a world is live. No other library has
-/// replaced `proc`'s code: the new entry takes over the code's buffer, and that
-/// library would free the buffer when it shuts down.
+///
+/// No other library may have replaced `proc`'s bytecode. Because the new entry
+/// takes over the existing buffer, another library freeing that buffer at
+/// shutdown would cause use-after-free.
 pub unsafe fn own_code(proc: &Proc) -> Result<(), String> {
 	let state = state();
 	if owned_entry(state, proc).is_none() {
@@ -279,11 +273,8 @@ pub unsafe fn own_code(proc: &Proc) -> Result<(), String> {
 /// # Panics
 ///
 /// Panics if called before the library is initialized or after shutdown.
-///
-/// # Safety
-/// Call on BYOND's thread while a world is live.
-pub unsafe fn copy_code(proc: &Proc) -> Result<(), String> {
-	give_own_entry(state(), proc, false)
+pub fn copy_code(proc: &Proc) -> Result<(), String> {
+	unsafe { give_own_entry(state(), proc, false) }
 		.map(|_| ())
 		.map_err(|e| format!("could not copy bytecode for {}: {}", proc.path, e))
 }

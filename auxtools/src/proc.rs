@@ -25,19 +25,10 @@ use crate::*;
 /// fn assert_send<T: Send>() {}
 /// assert_send::<auxtools::Proc>();
 /// ```
-///
-/// Its ID can't be changed, so it always names an entry of its world.
-///
-/// ```compile_fail,E0616
-/// fn renumber(proc: &mut auxtools::Proc) {
-///     proc.id = auxtools::raw_types::procs::ProcId(u32::MAX);
-/// }
-/// ```
 #[derive(Clone)]
 pub struct Proc {
-	pub(crate) id: raw_types::procs::ProcId,
+	pub id: raw_types::procs::ProcId,
 	pub path: String,
-	world: u32,
 	not_send: PhantomData<*mut ()>
 }
 
@@ -54,9 +45,7 @@ impl Proc {
 	/// [`Proc::set_apart`].
 	pub const APART: u32 = u32::MAX;
 
-	#[track_caller]
 	pub fn overrides<S: Into<String>>(path: S) -> Vec<Self> {
-		crate::expect_live("Proc::overrides");
 		let path = strip_path(path.into());
 		PROCS_BY_NAME.with(|h| h.borrow().get(&path).cloned().unwrap_or_default())
 	}
@@ -79,16 +68,12 @@ impl Proc {
 		PROCS_BY_NAME.with(|h| h.borrow_mut().insert(path, procs));
 	}
 
-	pub const fn id(&self) -> raw_types::procs::ProcId {
-		self.id
-	}
-
-	/// Null once the proc's world has ended. Valid only until DM code runs
-	/// again. BYOND moves the table when it grows.
+	/// Returns a pointer to this proc's entry in BYOND's proc table, or null if
+	/// the ID does not exist.
+	///
+	/// The pointer is valid only until DM code runs again or the proc table
+	/// grows, because BYOND may reallocate the table in memory.
 	pub fn entry(&self) -> *mut raw_types::procs::ProcEntry {
-		if self.world != crate::world_generation() {
-			return std::ptr::null_mut();
-		}
 		entry_by_id(self.id)
 	}
 
@@ -98,9 +83,7 @@ impl Proc {
 	/// [`Proc::find_override`] to look up subsequent definitions. Returns
 	/// `None` if no matching proc exists, or if called before initialization,
 	/// after shutdown, or off BYOND's thread.
-	#[track_caller]
 	pub fn find<S: Into<String>>(path: S) -> Option<Self> {
-		crate::expect_live("Proc::find");
 		get_proc(path)
 	}
 
@@ -108,15 +91,11 @@ impl Proc {
 	///
 	/// Override ID `0` matches [`Proc::find`]. Passing [`Proc::APART`] returns
 	/// the proc most recently set apart for `path`.
-	#[track_caller]
 	pub fn find_override<S: Into<String>>(path: S, override_id: u32) -> Option<Self> {
-		crate::expect_live("Proc::find_override");
 		get_proc_override(path, override_id)
 	}
 
-	#[track_caller]
 	pub fn from_id(id: raw_types::procs::ProcId) -> Option<Self> {
-		crate::expect_live("Proc::from_id");
 		let proc_entry = entry_by_id(id);
 		if proc_entry.is_null() {
 			return None;
@@ -125,7 +104,6 @@ impl Proc {
 		Some(Proc {
 			id,
 			path,
-			world: crate::world_generation(),
 			not_send: PhantomData
 		})
 	}
@@ -153,25 +131,16 @@ impl Proc {
 		Some(StringRef::from_id(file_id))
 	}
 
-	/// Empty once the proc's world has ended.
 	pub fn parameter_names(&self) -> Vec<StringRef> {
-		let entry = self.entry();
-		if entry.is_null() {
-			return vec![];
-		}
 		unsafe {
-			let (data, count) = raw_types::misc::get_parameters((*entry).metadata.parameters);
+			let (data, count) = raw_types::misc::get_parameters((*self.entry()).metadata.parameters);
 			(0..count).map(|i| StringRef::from_variable_id((*data.add(i)).name)).collect()
 		}
 	}
 
 	pub fn local_names(&self) -> Vec<StringRef> {
-		let entry = self.entry();
-		if entry.is_null() {
-			return vec![];
-		}
 		unsafe {
-			let (names, count) = raw_types::misc::get_locals((*entry).metadata.locals);
+			let (names, count) = raw_types::misc::get_locals((*self.entry()).metadata.locals);
 			(0..count).map(|i| StringRef::from_variable_id(*names.add(i))).collect()
 		}
 	}
@@ -208,9 +177,7 @@ impl Proc {
 	/// `runtime_tables::add_proc`. Each proc is appended to its path's override
 	/// list, so registering the same ID more than once duplicates the entry and
 	/// shifts subsequent override IDs.
-	#[track_caller]
 	pub fn add_to_table(first: raw_types::procs::ProcId) {
-		crate::expect_live("Proc::add_to_table");
 		let mut id = first.0;
 		while let Some(proc) = Proc::from_id(raw_types::procs::ProcId(id)) {
 			register_proc(proc);
@@ -219,11 +186,7 @@ impl Proc {
 	}
 
 	pub fn locals_count(&self) -> usize {
-		let entry = self.entry();
-		if entry.is_null() {
-			return 0;
-		}
-		unsafe { raw_types::misc::get_locals((*entry).metadata.locals).1 }
+		unsafe { raw_types::misc::get_locals((*self.entry()).metadata.locals).1 }
 	}
 
 	/// Returns a mutable pointer to this proc's current bytecode buffer and its
@@ -253,12 +216,18 @@ impl Proc {
 		std::slice::from_raw_parts(ptr, count as usize)
 	}
 
-	/// Calls the proc with a null `src` and `usr`. Fails once the proc's world
-	/// has ended.
+	/// Synchronously calls this proc on BYOND's thread with `null` for `src`
+	/// and `usr`.
+	///
+	/// Takes a temporary reference to each argument so the caller's `Value`s
+	/// remain valid, and returns a `Value` owning the reference returned by
+	/// BYOND. If this library has hooked the proc, the hook executes in place
+	/// of the DM code.
+	///
+	/// Runtime errors inside the proc follow BYOND's normal error handling
+	/// while this method still returns `Ok`. Because this runs DM code,
+	/// pointers into BYOND tables (such as [`Proc::entry`]) are invalidated.
 	pub fn call(&self, args: &[&Value]) -> runtime::DMResult {
-		if self.world != crate::world_generation() {
-			return Err(runtime!("{} can't be called, because its world has ended", self.path));
-		}
 		let mut ret = raw_types::values::Value {
 			tag: raw_types::values::ValueTag::Null,
 			data: raw_types::values::ValueData { id: 0 }
@@ -314,11 +283,8 @@ impl Proc {
 
 impl fmt::Debug for Proc {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let entry = self.entry();
-		if entry.is_null() {
-			return write!(f, "Proc({}, ended)", self.id.0);
-		}
-		write!(f, "Proc({:?})", unsafe { StringRef::from_id((*entry).path) })
+		let path = unsafe { (*self.entry()).path };
+		write!(f, "Proc({:?})", unsafe { StringRef::from_id(path) })
 	}
 }
 

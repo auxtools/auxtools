@@ -22,7 +22,7 @@ extern "C" {
 type Handler = fn(*mut raw_types::procs::ExecutionContext);
 
 static mut HANDLER: Option<Handler> = None;
-static TIMED: AtomicBool = AtomicBool::new(false);
+static mut TIMED: bool = false;
 static mut ENTERED: u64 = 0;
 static mut LEFT: u64 = 0;
 static mut CALLS_BYPASS_DETOUR: bool = false;
@@ -49,7 +49,6 @@ static mut DETOURED: bool = false;
 /// Returns an error if BYOND's `execute_instruction` function cannot be found
 /// or hooked on the running build.
 pub fn set_handler(handler: Handler) -> Result<(), String> {
-	crate::check_live("instruction_hook::set_handler").map_err(|e| e.message)?;
 	detour()?;
 	unsafe {
 		HANDLER = Some(handler);
@@ -434,17 +433,25 @@ unsafe fn take_table(execute_instruction: usize) -> Result<(), &'static str> {
 /// report the interval spent inside BYOND. Must be called on BYOND's thread
 /// because the flag is unsynchronized.
 pub fn time_instructions(timed: bool) {
-	TIMED.store(timed, Ordering::Relaxed);
+	unsafe {
+		TIMED = timed;
+	}
 }
 
 pub fn timestamp() -> u64 {
 	unsafe { core::arch::x86::_rdtsc() }
 }
 
-/// Returns `None` when nested execution spoiled the interval. Panics on a
-/// thread other than BYOND's.
+/// Returns the number of CPU time-stamp-counter ticks elapsed between the end
+/// of the previous handler call and the start of the current one.
+///
+/// Measures the approximate work BYOND spent on the previous instruction in the
+/// same tick units as `timestamp()`, not wall-clock time. Meaningful only
+/// inside the instruction handler while [`time_instructions`] is enabled.
+///
+/// Returns `None` if nested DM execution inside the handler overwrote the
+/// recorded timestamps.
 pub fn ticks_since_last() -> Option<u64> {
-	assert!(crate::on_byond_thread(), "instruction_hook::ticks_since_last must run on BYOND's thread");
 	unsafe { ENTERED.checked_sub(LEFT) }
 }
 
@@ -498,7 +505,7 @@ fn detour() -> Result<(), String> {
 #[no_mangle]
 extern "C" fn handle_instruction(ctx: *mut raw_types::procs::ExecutionContext) -> *const raw_types::procs::ExecutionContext {
 	unsafe {
-		if TIMED.load(Ordering::Relaxed) {
+		if TIMED {
 			ENTERED = timestamp();
 		}
 		if CALLS_BYPASS_DETOUR && (*(ctx as *const FrameStart)).offset == 0 {
@@ -507,7 +514,7 @@ extern "C" fn handle_instruction(ctx: *mut raw_types::procs::ExecutionContext) -
 		if let Some(handler) = HANDLER {
 			handler(ctx);
 		}
-		if TIMED.load(Ordering::Relaxed) {
+		if TIMED {
 			LEFT = timestamp();
 		}
 	}

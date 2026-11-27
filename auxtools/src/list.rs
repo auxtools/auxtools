@@ -25,7 +25,6 @@ impl List {
 		Ok(Self { value: val.clone() })
 	}
 
-	#[track_caller]
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -35,9 +34,7 @@ impl List {
 	/// # Panics
 	///
 	/// Panics if BYOND fails to allocate the list.
-	#[track_caller]
 	pub fn with_size(len: u32) -> Self {
-		crate::expect_live("List::with_size");
 		let mut id: raw_types::lists::ListId = raw_types::lists::ListId(0);
 		unsafe {
 			assert_eq!(raw_types::funcs::create_list(&mut id, len), 1);
@@ -166,9 +163,6 @@ impl List {
 	///
 	/// Panics if the call into BYOND fails.
 	pub fn is_list(value: &Value) -> bool {
-		if matches!(value.raw.tag, raw_types::values::ValueTag::Null | raw_types::values::ValueTag::Number) {
-			return false;
-		}
 		let mut is_list: u8 = 0;
 		unsafe {
 			assert_eq!(raw_types::funcs::value_is_list(&mut is_list, value.raw), 1);
