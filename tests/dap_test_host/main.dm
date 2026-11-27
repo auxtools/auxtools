@@ -12,6 +12,9 @@ var/early_global = early_value()
 		return L[1] // @early_failure
 	return 5 // @early_value
 
+/world
+	fps = 100
+
 /world/New()
 	maxx = 3
 	maxy = 3
@@ -42,7 +45,7 @@ var/early_global = early_value()
 			idle_ticks = 0
 			sleep(idle)
 			world.log << "dap: idle over"
-		sleep(1)
+		sleep(world.tick_lag)
 
 /proc/sc_quit()
 	world.log << "dap: quitting"

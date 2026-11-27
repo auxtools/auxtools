@@ -13,10 +13,13 @@ var/reboot_requested = FALSE
 /proc/request_reboot()
 	reboot_requested = TRUE
 
+/world
+	fps = 100
+
 /proc/main_loop()
 	while (!reboot_requested)
 		tick()
-		sleep(1)
+		sleep(world.tick_lag)
 
 	world.Reboot()
 

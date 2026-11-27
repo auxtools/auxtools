@@ -40,6 +40,9 @@ var/reboot_requested = FALSE
 /proc/request_reboot()
 	reboot_requested = TRUE
 
+/world
+	fps = 100
+
 /proc/main_loop()
 #if DM_VERSION >= 516
 	var/callee/this_proc = callee
@@ -51,7 +54,7 @@ var/reboot_requested = FALSE
 			runtimes_left--
 			spawn()
 				make_runtime()
-		sleep(1)
+		sleep(world.tick_lag)
 
 	world.Reboot()
 
