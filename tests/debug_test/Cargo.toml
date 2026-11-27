@@ -1,18 +1,15 @@
 [package]
 name = "debug_test"
+description = "Integration test suite for the debug server's debugger"
 version = "0.1.0"
 publish = false
 authors.workspace = true
 edition.workspace = true
 
-# Same trick as test_runner: depending on the cdylib gets debug_server
-# compiled before `cargo run` runs us.
 [dependencies]
 debug_server = { path = "../../debug_server" }
-auxtools-cli = { path = "../../auxtools-cli" }
-serde = { version = "1", features = ["derive"] }
-dmasm = { workspace = true }
-bincode = "1"
+test_support = { path = "../support" }
+auxtools-protocol = { path = "../../auxtools-protocol" }
 
 [lints]
 workspace = true

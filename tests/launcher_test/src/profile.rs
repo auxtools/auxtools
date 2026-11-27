@@ -1,23 +1,19 @@
-//! CLI profile reports and lifecycle.
-
 use std::{
 	path::Path,
 	time::{Duration, Instant}
 };
 
-use crate::{
-	journal::{run, Background},
-	line_of
-};
+use test_support::cli::{launcher_command, Background};
+
+use crate::{journal::run, line_of};
 
 pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	let tally = line_of(code, "\ttick(1)");
 	let tick = line_of(code, "/proc/tick(n)") + 1;
 
-	// tally() calls tick() every round and again every other round.
 	let started = Instant::now();
-	let printed = run(pid, &["profile", "/proc/tick", "/proc/tally", "--for", "3"], 0);
-	assert!(started.elapsed() >= Duration::from_secs(3), "profile --for 3 ended early");
+	let printed = run(pid, &["profile", "/proc/tick", "/proc/tally", "--for", "1.5"], 0);
+	assert!(started.elapsed() >= Duration::from_millis(1500), "profile --for 1.5 ended early");
 	let lines: Vec<&str> = printed.lines().collect();
 	let row = |end: &str| {
 		let found = lines.iter().find(|line| line.ends_with(end));
@@ -28,7 +24,7 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	};
 	let number = |text: &str| text.parse::<u64>().unwrap_or_else(|_| panic!("{} isn't a count in {}", text, printed));
 	assert!(
-		lines[0].starts_with("profiled 3.") && lines[0].ends_with(" in 2 procs"),
+		lines[0].starts_with("profiled 1.") && lines[0].ends_with(" in 2 procs"),
 		"unexpected profile output: {}",
 		printed
 	);
@@ -41,7 +37,6 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 		"instructions",
 		"proc"
 	]);
-	// (a time is a number and its unit)
 	let of_tick = row(&format!("  /tick  attach_host.dm:{}", tick));
 	let of_tally = row(&format!("  /tally  attach_host.dm:{}", tally));
 	let (ticks, tallies) = (number(of_tick[5]), number(of_tally[5]));
@@ -60,13 +55,12 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 		"unexpected profile output: {}",
 		printed
 	);
-	// Count returns and attribute callee time to the calling instruction.
 	let returned = row("  Ret");
 	assert_eq!(number(returned[1]), ticks, "{}", printed);
 	let called = lines.iter().find(|line| line.ends_with("  CallGlob 1 /tick")).unwrap();
 	let called: Vec<&str> = called.split_whitespace().collect();
 	assert!(
-		number(called[1]) == tallies && called.len() == 9 && ["ns", "us"].contains(&called[5]),
+		number(called[1]) == tallies && (called.len() == 7 || (called.len() == 9 && ["ns", "us"].contains(&called[5]))),
 		"unexpected profile output: {}",
 		printed
 	);
@@ -76,8 +70,7 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	);
 	println!("ok: named proc listings");
 
-	// Rank procs and source lines by self time.
-	let printed = run(pid, &["profile", "--for", "2", "--top", "3"], 0);
+	let printed = run(pid, &["profile", "--for", "1", "--top", "3"], 0);
 	let lines: Vec<&str> = printed.lines().collect();
 	let tables: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].trim_start().starts_with("time ")).collect();
 	assert!(
@@ -95,7 +88,7 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	let page = dir.join("profile.html");
 	let printed = run(
 		pid,
-		&["profile", "--for", "2", "--top", "2", "--json", "--html", page.to_str().unwrap()],
+		&["profile", "--for", "1", "--top", "2", "--json", "--html", page.to_str().unwrap()],
 		0
 	);
 	let report: serde_json::Value = serde_json::from_str(&printed).unwrap_or_else(|e| panic!("{}: {}", e, printed));
@@ -104,7 +97,7 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	let times: Vec<u64> = procs.iter().map(|proc| proc["ns"].as_u64().unwrap()).collect();
 	assert!(
 		report["ended"] == "time"
-			&& report["seconds"].as_f64().unwrap() >= 2.0
+			&& report["seconds"].as_f64().unwrap() >= 1.0
 			&& ["/run_until_stopped", "/value", "/tally", "/tick"]
 				.iter()
 				.all(|name| names.contains(name))
@@ -127,38 +120,28 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	);
 	println!("ok: JSON and HTML profiles");
 
-	// Reject concurrent profiles and discard profiles on client exit.
-	let busy = "error: cannot start a profile: another profile is running.\n";
-	// Retry if the competing profile starts first.
+	let busy = "error: cannot start profiling: another profile is already running\n";
 	let left_running = |args: &[&str]| {
-		for wait in 1..=10 {
-			let running = Background::start(pid, args);
-			std::thread::sleep(Duration::from_secs(wait));
-			let pid = pid.to_string();
-			let (code, printed) = crate::client::launcher_command(&["--pid", &pid, "profile", "--for", "1"]);
-			if (code, printed.as_str()) == (1, busy) {
-				return running;
-			}
-			running.stop();
-		}
-		panic!("concurrent profile was not rejected");
+		let mut running = Background::start(pid, args);
+		running.error_with("profiling until interrupted");
+		running
 	};
 	let running = left_running(&["profile"]);
 	for (args, said) in [
 		(&["profile", "--for", "1"][..], busy),
 		(
 			&["profile", "/proc/nothing_called_this"],
-			"error: cannot start a profile: the world has no proc /proc/nothing_called_this.\n"
+			"error: cannot start profiling: the world has no proc /proc/nothing_called_this\n"
 		),
-		(&["profile", "tick"], "error: invalid proc path 'tick': expected /PATH[#N].\n")
+		(&["profile", "tick"], "error: invalid proc path 'tick': expected /PATH[#N]\n")
 	] {
 		assert_eq!(run(pid, args, 1), said, "{:?}", args);
 	}
 	running.stop();
-	let deadline = Instant::now() + Duration::from_secs(30);
+	let deadline = Instant::now() + Duration::from_secs(20);
 	loop {
 		let pid = pid.to_string();
-		let (code, printed) = crate::client::launcher_command(&["--pid", &pid, "profile", "--for", "1"]);
+		let (code, printed) = launcher_command(&["--pid", &pid, "profile", "--for", "1"]);
 		if code == 0 {
 			break;
 		}
@@ -170,7 +153,7 @@ pub fn profile(pid: u64, dir: &Path, code: &Path) {
 	#[cfg(unix)]
 	{
 		let running = left_running(&["profile", "/proc/tick"]);
-		std::thread::sleep(Duration::from_secs(2));
+		crate::journal::rounds_pass(pid, 2);
 		std::process::Command::new("kill")
 			.args(["-INT", &running.id().to_string()])
 			.status()

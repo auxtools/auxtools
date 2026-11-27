@@ -1,18 +1,12 @@
-// Started with the debug library loaded into it, which adds the procs it
-// needs: this has none of auxtools' own.
-
 var/runtimes_left = 0
 var/reboot_requested = FALSE
 
-// The test puts its breakpoints on these two. They are called in this order,
-// once per tick, so the test can tell which breakpoint it stopped on.
 /proc/breakpoint_target()
 	return 2
 
 /proc/tick_marker()
 	return 1
 
-// 516's own kinds of value. 515 has none of them.
 #if DM_VERSION >= 516
 /proc/alist_sample()
 	return alist("a" = 1, 7 = "seven", "n" = null)
@@ -27,8 +21,6 @@ var/reboot_requested = FALSE
 	return pixloc(1, 1, 1)
 #endif
 
-// What the profiler is checked on: a loop, whose instructions run a known
-// number of times, and a call to it
 /proc/profiled_loop(n)
 	var/s = 0
 	for (var/i in 1 to n)
@@ -38,8 +30,38 @@ var/reboot_requested = FALSE
 /proc/profiled_call()
 	return profiled_loop(1000)
 
-// Two seconds of runtime errors, then quiet again. The debugger is told not
-// to pause on them.
+#define PROFILED_TWINS(first, second) /proc/first(n) { var/s = 0; for (var/i in 1 to n) s += i; return s } /proc/second(n) { var/s = 0; for (var/i in 1 to n) s += i; return s }
+PROFILED_TWINS(profiled_twin_a, profiled_twin_b)
+
+/proc/profiled_countdown(n)
+	while (n > 0)
+		n--
+	return n
+
+/proc/watched_steps()
+	var/steps = 1
+	steps = 2
+	. = steps
+
+/proc/watched_throw()
+	var/thrown = 1
+	thrown = 2
+	throw "unwound"
+
+/proc/catches_watched()
+	var/caught = 0
+	try
+		watched_throw()
+	catch
+		caught = 1
+	return caught
+
+/proc/throw_caught()
+	try
+		throw "thrown and caught"
+	catch
+		return 1
+
 /proc/start_runtimes()
 	runtimes_left = 20
 
@@ -50,9 +72,11 @@ var/reboot_requested = FALSE
 /proc/request_reboot()
 	reboot_requested = TRUE
 
+/world
+	fps = 100
+
 /proc/main_loop()
 #if DM_VERSION >= 516
-	// a callee only reads while its proc is running, so the test looks at this one
 	var/callee/this_proc = callee
 #endif
 	while (!reboot_requested)
@@ -62,15 +86,11 @@ var/reboot_requested = FALSE
 			runtimes_left--
 			spawn()
 				make_runtime()
-		sleep(1)
+		sleep(world.tick_lag)
 
-	// Rebooting has to happen out here. The debugger evaluates
-	// request_reboot() from inside the debug server, which can't shut itself
-	// down there.
 	world.Reboot()
 
 /world/New()
-	// pixloc_sample() needs a real tile to point at
 	maxx = 5
 	maxy = 5
 	maxz = 1
@@ -79,15 +99,12 @@ var/reboot_requested = FALSE
 		main_loop()
 	. = ..()
 
-// Evaluated expressions call verbs as well as procs
 /mob/helper/verb/greet(who as text)
 	set name = "Greet Someone"
 	return "hi [who]"
 
 var/mob/helper/helper = new
 
-// BYOND pushes past a buffer in its own frame running stored(), and loses the
-// registers it saved there (see call_keeping_registers in hooks.cpp)
 var/overrun_global = 2
 
 /proc/overrun_args(x1 = null, x2, x3)

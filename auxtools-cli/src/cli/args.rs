@@ -1,31 +1,43 @@
-//! Clap command, argument and option definitions. Full help pages are in
-//! `help`.
-//!
-//! `rules` validates option combinations before connecting to a world.
-
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
-use super::help;
+use super::{help, hold, json, launch};
 
-const JSON: &str = "Emit one JSON value on stdout.";
-const HOLD_MAX: &str =
-	"Automatically resume a retained pause after this many\nseconds with no debugger connected.\n[default: AUXTOOLS_HOLD_MAX, or unlimited if unset]";
+pub const JSON: &str = "Emit one JSON value on stdout.";
+const HOLD_MAX: &str = "Resume after SECONDS with no debugger connected.";
 
-pub const RESPONSE_TIMEOUT: &str = "Set the wait for each response from the world. [default: 30]";
-
-/// Default response timeout, overridden by `--response-timeout`.
 pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_KILL_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_REBOOT_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_TOP: u64 = 40;
+
+fn default_seconds(default: Duration) -> String {
+	format!("[default: {}]", default.as_secs_f64())
+}
+
+pub fn response_timeout_help() -> String {
+	format!(
+		"Wait up to SECONDS for each world response. {}",
+		default_seconds(DEFAULT_RESPONSE_TIMEOUT)
+	)
+}
+
+fn hold_max_help(help: &str) -> String {
+	format!("{}\n[default: {}, or unlimited if unset]", help, hold::HOLD_MAX_VAR)
+}
+
+fn depth_help() -> String {
+	format!("Limit JSON expansion to N levels. [default: {}]\nRequires --json.", json::DEFAULT_DEPTH)
+}
 
 #[derive(Parser)]
 #[command(name = "auxtools", disable_help_subcommand = true, disable_version_flag = true)]
 pub struct Cli {
-	/// The world's process: before the command or after it
-	#[arg(long, global = true, value_name = "PID", value_parser = pid, help = "Select the world process.")]
+	#[arg(long, global = true, value_name = "PID", value_parser = pid, help = "Select the world process by PID.")]
 	pub pid: Option<u32>,
-	/// Response timeout, accepted before or after the command.
-	#[arg(long, global = true, value_name = "SECONDS", value_parser = seconds, help = RESPONSE_TIMEOUT)]
+	#[arg(long, global = true, value_name = "SECONDS", value_parser = seconds, help = response_timeout_help())]
 	pub response_timeout: Option<Duration>,
 	#[arg(long, short = 'V', hide = true)]
 	pub version: bool,
@@ -33,103 +45,125 @@ pub struct Cli {
 	pub command: Option<Command>
 }
 
-#[derive(Subcommand)]
-pub enum Command {
-	Launch(Launch),
-	List(List),
-	Status(Status),
-	Stop(Stop),
-	Reboot(Reboot),
-	Reconnect(Reconnect),
-	Log(Log),
-	Stack(Stack),
-	Vars(Vars),
-	Eval(Eval),
-	Proc(ProcInfo),
-	Disassemble(Disassemble),
-	Pause(Pause),
-	Continue(Continue),
-	StepOver(StepOver),
-	StepIn(StepIn),
-	StepOut(StepOut),
-	Wait(Wait),
-	Trace(Trace),
-	Profile(Profile),
-	Check(Check),
-	Dap,
-	Help(Help),
-	Version(Version)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scope {
+	Local,
+	World,
+	WorldExit
+}
+
+macro_rules! commands {
+	($($group:tt { $($name:tt => $variant:ident $(($options:ident))?, $scope:ident;)* })*) => {
+		#[derive(Subcommand)]
+		pub enum Command {
+			$($(
+				#[command(name = $name)]
+				$variant $(($options))?,
+			)*)*
+		}
+
+		impl Command {
+			pub const fn name(&self) -> &'static str {
+				match self {
+					$($(Self::$variant { .. } => $name,)*)*
+				}
+			}
+
+			pub const fn scope(&self) -> Scope {
+				match self {
+					$($(Self::$variant { .. } => Scope::$scope,)*)*
+				}
+			}
+		}
+
+		pub const GROUPS: &[(&str, &[(&str, Scope)])] = &[
+			$(($group, &[$(($name, Scope::$scope),)*]),)*
+		];
+	};
+}
+
+commands! {
+	"World management" {
+		"launch" => Launch(Launch), Local;
+		"list" => List(List), Local;
+		"status" => Status(Status), World;
+		"stop" => Stop(Stop), WorldExit;
+		"reboot" => Reboot(Reboot), World;
+		"reconnect" => Reconnect(Reconnect), World;
+		"log" => Log(Log), World;
+	}
+	"Inspection" {
+		"stack" => Stack(Stack), World;
+		"vars" => Vars(Vars), World;
+		"eval" => Eval(Eval), World;
+		"proc" => Proc(ProcInfo), World;
+		"disassemble" => Disassemble(Disassemble), World;
+	}
+	"Execution" {
+		"pause" => Pause(Pause), World;
+		"continue" => Continue(Continue), World;
+		"step-over" => StepOver(StepOver), World;
+		"step-in" => StepIn(StepIn), World;
+		"step-out" => StepOut(StepOut), World;
+		"wait" => Wait(Wait), World;
+		"trace" => Trace(Trace), World;
+		"profile" => Profile(Profile), World;
+	}
+	"Source code" {
+		"check" => Check(Check), Local;
+	}
+	"Integration" {
+		"dap" => Dap, Local;
+		"help" => Help(Help), Local;
+		"version" => Version(Version), Local;
+	}
 }
 
 impl Command {
-	/// Its name, as it's typed
-	pub const fn name(&self) -> &'static str {
-		match self {
-			Self::Launch(_) => "launch",
-			Self::List(_) => "list",
-			Self::Status(_) => "status",
-			Self::Stop(_) => "stop",
-			Self::Reboot(_) => "reboot",
-			Self::Reconnect(_) => "reconnect",
-			Self::Log(_) => "log",
-			Self::Stack(_) => "stack",
-			Self::Vars(_) => "vars",
-			Self::Eval(_) => "eval",
-			Self::Proc(_) => "proc",
-			Self::Disassemble(_) => "disassemble",
-			Self::Pause(_) => "pause",
-			Self::Continue(_) => "continue",
-			Self::StepOver(_) => "step-over",
-			Self::StepIn(_) => "step-in",
-			Self::StepOut(_) => "step-out",
-			Self::Wait(_) => "wait",
-			Self::Trace(_) => "trace",
-			Self::Profile(_) => "profile",
-			Self::Check(_) => "check",
-			Self::Dap => "dap",
-			Self::Help(_) => "help",
-			Self::Version(_) => "version"
-		}
-	}
-
-	/// Whether it's a command to a running world, which `--pid` chooses
 	pub const fn selects_world(&self) -> bool {
-		!matches!(
-			self,
-			Self::Launch(_) | Self::List(_) | Self::Check(_) | Self::Dap | Self::Help(_) | Self::Version(_)
-		)
+		!matches!(self.scope(), Scope::Local)
 	}
 
-	/// Whether response timeouts apply. `stop` waits for process exit instead.
 	pub const fn awaits_responses(&self) -> bool {
-		self.selects_world() && !matches!(self, Self::Stop(_))
+		matches!(self.scope(), Scope::World)
 	}
+}
+
+pub fn scope_of(name: &str) -> Option<Scope> {
+	GROUPS
+		.iter()
+		.flat_map(|(_, commands)| commands.iter())
+		.find(|(command, _)| *command == name)
+		.map(|(_, scope)| *scope)
 }
 
 #[derive(Args)]
 pub struct Launch {
 	#[arg(value_name = "DMB")]
 	pub dmb: PathBuf,
-	#[arg(long, help = "Run in the background; return when startup completes.")]
+	#[arg(long, help = "Run in the background and return once the world starts.")]
 	pub detach: bool,
-	#[arg(long, help = "Emit {pid, launcher, log}. Requires --detach.")]
+	#[arg(long, help = "Print {pid, launcher, log, unavailable} as JSON.\nRequires --detach.")]
 	pub json: bool,
 	#[arg(
 		long,
 		value_name = "FILE",
-		help = "Write launcher output to FILE.\nWith --detach, default: NAME.auxtools.log beside NAME.dmb."
+		help = format!(
+			"Write launcher and world output to FILE.\n[default: terminal, or NAME.{} beside NAME.dmb\nwith --detach]",
+			launch::LOG_EXTENSION
+		)
 	)]
 	pub log: Option<PathBuf>,
 	#[arg(
 		long,
 		value_name = "FILE",
-		help = "Set the source project used for hot reload.\n[default: NAME.dme beside NAME.dmb]"
+		help = "Set the .dme project file for hot reload.\n[default: NAME.dme beside NAME.dmb]"
 	)]
 	pub dme: Option<PathBuf>,
 	#[arg(
 		short = 'D',
 		value_name = "NAME[=VALUE]",
-		help = "Set a preprocessor define used by hot reload. Repeatable.\nUse the same defines used to compile the DMB."
+		help = "Define a preprocessor macro for hot reload. Repeatable.\nPass the defines used to compile the .dmb."
 	)]
 	pub defines: Vec<String>,
 	#[arg(long, help = "Disable source watching and hot reload.")]
@@ -137,19 +171,30 @@ pub struct Launch {
 	#[arg(
 		long,
 		value_name = "PROGRAM",
-		help = "Select dreamdaemon, dreamdaemon-gui, or dreamseeker.\n[default: dreamdaemon]\nOn Windows, dreamdaemon runs dd.exe and \
-		        dreamdaemon-gui runs DreamDaemon.exe\nwith its window. Linux supports DreamDaemon only."
+		help = "Select the BYOND host: dreamdaemon, dreamdaemon-gui, or\ndreamseeker. [default: dreamdaemon]\nWindows: dreamdaemon runs dd.exe and \
+		        dreamdaemon-gui runs\nwindowed dreamdaemon.exe. Linux supports DreamDaemon only."
 	)]
 	pub server: Option<String>,
-	#[arg(long, value_name = "N", value_parser = port, help = "Set the listening port for DreamDaemon.")]
+	#[arg(long, value_name = "N", value_parser = port, help = "Listen on port N (DreamDaemon only).")]
 	pub port: Option<u16>,
 	#[arg(
 		long,
 		value_name = "PATH",
-		help = "Set the BYOND installation path.\n[default: BYOND_SYSTEM, then the installed location]"
+		help = "Use the BYOND installation at PATH.\n[default: BYOND_SYSTEM, then standard install locations]"
 	)]
 	pub byond: Option<PathBuf>,
-	/// Given to the launcher `--detach` starts in the background
+	#[arg(
+		long,
+		value_name = "FILE",
+		help = "Record line coverage for the entire run and write\nan LCOV tracefile to FILE when the world exits."
+	)]
+	pub lcov: Option<PathBuf>,
+	#[arg(
+		long,
+		value_name = "FILE",
+		help = "Record line coverage for the entire run and write\na Cobertura XML report to FILE when the world exits."
+	)]
+	pub cobertura: Option<PathBuf>,
 	#[arg(long, hide = true)]
 	pub detached: bool,
 	#[arg(last = true, value_name = "ARGS")]
@@ -170,15 +215,23 @@ pub struct Status {
 
 #[derive(Args)]
 pub struct Stop {
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the graceful shutdown deadline. [default: 10]")]
+	#[arg(
+		long,
+		value_name = "SECONDS",
+		value_parser = seconds,
+		help = format!("Wait up to SECONDS for graceful shutdown. {}", default_seconds(DEFAULT_STOP_TIMEOUT))
+	)]
 	pub timeout: Option<Duration>,
-	#[arg(long, help = "Terminate the process if graceful shutdown times out.")]
+	#[arg(long, help = "Terminate the process if shutdown fails or times out.")]
 	pub kill: bool,
 	#[arg(
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = "Set the wait after forced termination. [default: 5]\nRequires --kill."
+		help = format!(
+			"Wait up to SECONDS for exit after termination.\n{} Requires --kill.",
+			default_seconds(DEFAULT_KILL_TIMEOUT)
+		)
 	)]
 	pub kill_timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
@@ -187,7 +240,12 @@ pub struct Stop {
 
 #[derive(Args)]
 pub struct Reboot {
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the reboot deadline. [default: 60]")]
+	#[arg(
+		long,
+		value_name = "SECONDS",
+		value_parser = seconds,
+		help = format!("Wait up to SECONDS for the reboot. {}", default_seconds(DEFAULT_REBOOT_TIMEOUT))
+	)]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -199,7 +257,10 @@ pub struct Reconnect {
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = "Set the reboot deadline for DreamSeeker-hosted worlds. [default: 60]"
+		help = format!(
+			"Wait up to SECONDS when DreamSeeker hosts and\nreboots the world. {}",
+			default_seconds(DEFAULT_REBOOT_TIMEOUT)
+		)
 	)]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
@@ -208,28 +269,27 @@ pub struct Reconnect {
 
 #[derive(Args)]
 pub struct Log {
-	#[arg(long, help = "Stream new entries after printing matching retained entries.")]
+	#[arg(long, help = "Stream new entries after printing existing ones.")]
 	pub follow: bool,
-	#[arg(long, help = "Include runtime errors and thrown exceptions, with stacks.")]
+	#[arg(long, help = "Include runtime errors and thrown exceptions.")]
 	pub runtimes: bool,
-	#[arg(long, help = "Include hot reload attempts, results, and diagnostics.")]
+	#[arg(long, help = "Include hot reload attempts and diagnostics.")]
 	pub reloads: bool,
 	#[arg(long, help = "Include world output captured by the launcher.")]
 	pub output: bool,
-	#[arg(long, help = "Include world loads, reboots, and automatic debugger actions.")]
+	#[arg(long, help = "Include world loads, reboots, and pause timeouts.")]
 	pub world: bool,
-	#[arg(long, help = "Include results of code run by eval --spawn.")]
+	#[arg(long, help = "Include results of code run with eval --spawn.")]
 	pub spawned: bool,
 	#[arg(
 		long,
 		value_name = "FILTER",
-		help = "Show only runtime errors whose messages match FILTER:\ncomma-separated substrings, any of which matches;\n! excludes one. \
-		        Case-insensitive. Implies --runtimes."
+		help = "Filter runtime errors by comma-separated terms\n(case-insensitive). Prefix with ! to exclude.\nImplies --runtimes."
 	)]
 	pub runtime_filter: Option<String>,
-	#[arg(long, value_name = "N", value_parser = whole::<u64>, help = "Read entries with sequence numbers greater than N.")]
+	#[arg(long, value_name = "N", value_parser = whole::<u64>, help = "Show entries numbered after N.")]
 	pub since: Option<u64>,
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Limit initial output to the last N matching entries.")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Show only the last N matching journal entries.")]
 	pub last: Option<u32>,
 	#[arg(long, help = "Emit JSON Lines, one journal entry per line.")]
 	pub json: bool
@@ -237,7 +297,7 @@ pub struct Log {
 
 #[derive(Args)]
 pub struct Stack {
-	#[arg(long, help = "Include sleeping proc stacks and their stable stack IDs.")]
+	#[arg(long, help = "Include sleeping proc stacks with their stack IDs.")]
 	pub all: bool,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -245,11 +305,11 @@ pub struct Stack {
 
 #[derive(Args)]
 pub struct Vars {
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Select a zero-based frame; 0 is innermost. [default: 0]")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Inspect frame N (0 is innermost). [default: 0]")]
 	pub frame: Option<u32>,
 	#[arg(long, help = "Include global variables.")]
 	pub globals: bool,
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Set JSON value expansion depth. Requires --json. [default: 2]")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = depth_help())]
 	pub depth: Option<u32>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -257,35 +317,33 @@ pub struct Vars {
 
 #[derive(Args)]
 pub struct Eval {
-	/// The expression's words, or `-` for stdin. A negative number is one;
-	/// anything else that starts with a hyphen goes after `--`.
 	#[arg(value_name = "EXPRESSION", allow_negative_numbers = true)]
 	pub expression: Vec<String>,
-	#[arg(short = 'f', long, value_name = "FILE", help = "Read the expression from FILE.")]
+	#[arg(short = 'f', long, value_name = "FILE", help = "Read the expression or statements from FILE.")]
 	pub file: Option<PathBuf>,
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Select a zero-based paused frame. [default: 0 when paused]")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Evaluate in paused frame N.\n[default: 0 when paused]")]
 	pub frame: Option<u32>,
 	#[arg(
 		long,
 		value_name = "REF",
-		help = "Evaluate outside any frame, with src set to the object whose\nref() is REF: [0x2000001] or 0x2000001."
+		help = "Evaluate outside any frame with src set to REF\n(a ref() value such as [0x2000001] or 0x2000001)."
 	)]
 	pub src: Option<String>,
 	#[arg(
 		long,
-		help = "Run the code as the world's own on its next tick instead of\nevaluating it now. Report its spawn number and return."
+		help = "Schedule code on the next tick instead of running\nit now. Prints the spawn number and returns."
 	)]
 	pub spawn: bool,
-	#[arg(long, help = "Wait for spawned code to finish and report its value.\nRequires --spawn.")]
+	#[arg(long, help = "Wait for spawned code to finish and print its\nresult. Requires --spawn.")]
 	pub wait: bool,
 	#[arg(
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = "Set the --wait deadline. Requires --wait. [default: unlimited]"
+		help = "Wait up to SECONDS for spawned code to finish.\n[default: unlimited] Requires --wait."
 	)]
 	pub timeout: Option<Duration>,
-	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = "Set JSON value expansion depth. Requires --json. [default: 2]")]
+	#[arg(long, value_name = "N", value_parser = whole::<u32>, help = depth_help())]
 	pub depth: Option<u32>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -309,7 +367,7 @@ pub struct Disassemble {
 
 #[derive(Args)]
 pub struct Pause {
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = HOLD_MAX)]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = hold_max_help(HOLD_MAX))]
 	pub hold_max: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -323,14 +381,11 @@ pub struct Continue {
 
 #[derive(Args)]
 pub struct StepOver {
-	#[arg(
-		long,
-		help = "Step by one bytecode instruction, stepping over proc calls.\nInclude the resulting instruction offset and text."
-	)]
+	#[arg(long, help = "Step one bytecode instruction, over proc calls,\nand report the next instruction.")]
 	pub instruction: bool,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the step deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS for the step.\n[default: unlimited]")]
 	pub timeout: Option<Duration>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = HOLD_MAX)]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = hold_max_help(HOLD_MAX))]
 	pub hold_max: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -338,14 +393,11 @@ pub struct StepOver {
 
 #[derive(Args)]
 pub struct StepIn {
-	#[arg(
-		long,
-		help = "Step by one bytecode instruction, stepping into proc calls.\nInclude the resulting instruction offset and text."
-	)]
+	#[arg(long, help = "Step one bytecode instruction, into proc calls,\nand report the next instruction.")]
 	pub instruction: bool,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the step deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS for the step.\n[default: unlimited]")]
 	pub timeout: Option<Duration>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = HOLD_MAX)]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = hold_max_help(HOLD_MAX))]
 	pub hold_max: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -353,9 +405,9 @@ pub struct StepIn {
 
 #[derive(Args)]
 pub struct StepOut {
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the step deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS for the step.\n[default: unlimited]")]
 	pub timeout: Option<Duration>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = HOLD_MAX)]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = hold_max_help(HOLD_MAX))]
 	pub hold_max: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -363,7 +415,6 @@ pub struct StepOut {
 
 #[derive(Args)]
 pub struct Wait {
-	/// Without one, `wait` shows what it can wait for
 	#[command(subcommand)]
 	pub event: Option<WaitFor>
 }
@@ -380,23 +431,27 @@ pub struct WaitPause {
 	#[arg(
 		long = "break",
 		value_name = "LOCATION",
-		help = "Set a temporary breakpoint. Repeatable.\nLOCATION is FILE:LINE or /proc/path[#N].\n#N selects a zero-based definition. [default: 0]"
+		help = "Set a temporary breakpoint at FILE:LINE or\n/proc/path[#N] (definition index, [default: 0]).\nRepeatable."
 	)]
 	pub breaks: Vec<String>,
-	#[arg(long = "change", value_name = "EXPR", help = "Watch a variable or list entry for changes. Repeatable.")]
+	#[arg(
+		long = "change",
+		value_name = "EXPR",
+		help = "Set a data breakpoint on a variable or list entry.\nRepeatable."
+	)]
 	pub changes: Vec<String>,
 	#[arg(
 		long,
 		value_name = "N",
 		value_parser = whole::<u32>,
-		help = "Select the paused frame used to resolve watches.\n[default: 0, the innermost frame]"
+		help = "Resolve data breakpoints in paused frame N\n(0 is innermost). [default: 0] Requires --change."
 	)]
 	pub frame: Option<u32>,
 	#[arg(
 		long = "if",
 		value_name = "CONDITION",
-		help = "Apply a DM condition to watches, if present;\notherwise apply it to breakpoints.\nFor watches, old and value contain the previous \
-		        and new values."
+		help = "Pause only when CONDITION evaluates to truthy.\nApplies to --change if given, else --break.\nFor --change, old and value hold \
+		        old/new values.\nRequires --break or --change."
 	)]
 	pub condition: Option<String>,
 	#[arg(long, help = "Pause on uncaught runtime errors and exceptions.")]
@@ -406,19 +461,19 @@ pub struct WaitPause {
 	#[arg(
 		long,
 		value_name = "FILTER",
-		help = "Pause only on runtime errors whose messages match FILTER:\ncomma-separated substrings, any of which matches;\n! excludes one. \
-		        Case-insensitive. Implies --runtimes."
+		help = "Pause only on runtime errors matching FILTER\n(comma-separated, case-insensitive substrings).\nPrefix with ! to exclude. Implies \
+		        --runtimes."
 	)]
 	pub runtime_filter: Option<String>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS. [default: unlimited]")]
 	pub timeout: Option<Duration>,
-	#[arg(long, help = "Do not retain the pause after this command disconnects.")]
+	#[arg(long, help = "Do not keep the world paused on exit.\nCannot be used with --hold-max.")]
 	pub no_hold: bool,
 	#[arg(
 		long,
 		value_name = "SECONDS",
 		value_parser = seconds,
-		help = "Limit the retained pause when no debugger is connected.\n[default: AUXTOOLS_HOLD_MAX, or unlimited if unset]"
+		help = hold_max_help(HOLD_MAX)
 	)]
 	pub hold_max: Option<Duration>,
 	#[arg(long, help = "Emit one JSON object with pause details.")]
@@ -431,10 +486,10 @@ pub struct WaitReload {
 		long,
 		value_name = "N",
 		value_parser = whole::<u64>,
-		help = "Use the first reload event after journal entry N.\n[default: wait for a new event]"
+		help = "Match the first reload after journal entry N.\n[default: wait for a new event]"
 	)]
 	pub since: Option<u64>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS. [default: unlimited]")]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -446,10 +501,10 @@ pub struct WaitReboot {
 		long,
 		value_name = "N",
 		value_parser = whole::<u64>,
-		help = "Use the first world-load event after journal entry N.\n[default: wait for a new event]"
+		help = "Match the first world load after journal entry N.\n[default: wait for a new event]"
 	)]
 	pub since: Option<u64>,
-	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Set the wait deadline. [default: unlimited]")]
+	#[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Wait up to SECONDS. [default: unlimited]")]
 	pub timeout: Option<Duration>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -462,16 +517,20 @@ pub struct Trace {
 	#[arg(
 		long,
 		value_name = "MESSAGE",
-		help = "Format each hit using MESSAGE with {DM expression} values.\n{{ and }} are literal braces."
+		help = "Print MESSAGE on each hit. {EXPR} interpolates DM\nexpressions, and {{ / }} produce literal braces.\nCannot be used with --by."
 	)]
 	pub log: Option<String>,
-	#[arg(long = "if", value_name = "CONDITION", help = "Record only hits where the DM condition is true.")]
+	#[arg(long = "if", value_name = "CONDITION", help = "Record only hits where CONDITION is truthy.")]
 	pub condition: Option<String>,
-	#[arg(long, value_name = "EXPR", help = "Group hits by expression value and print counts at exit.")]
+	#[arg(
+		long,
+		value_name = "EXPR",
+		help = "Count hits by EXPR and print counts on exit.\nCannot be used with --log."
+	)]
 	pub by: Option<String>,
-	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after the specified duration. [default: unlimited]")]
+	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after SECONDS. [default: unlimited]")]
 	pub duration: Option<Duration>,
-	#[arg(long, value_name = "N", value_parser = positive, help = "Stop after N recorded hits. N must be positive.")]
+	#[arg(long, value_name = "N", value_parser = positive, help = "Stop after N recorded hits (positive integer).")]
 	pub count: Option<u64>,
 	#[arg(long, help = "Emit JSON Lines: bound, hit, and summary events.")]
 	pub json: bool
@@ -481,18 +540,18 @@ pub struct Trace {
 pub struct Profile {
 	#[arg(value_name = "/PATH[#N]")]
 	pub procs: Vec<String>,
-	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after the specified duration. [default: unlimited]")]
+	#[arg(long = "for", value_name = "SECONDS", value_parser = seconds, help = "Stop after SECONDS. [default: unlimited]")]
 	pub duration: Option<Duration>,
 	#[arg(
 		long,
 		value_name = "N",
 		value_parser = positive,
-		default_value = "40",
+		default_value_t = DEFAULT_TOP,
 		hide_default_value = true,
-		help = "List the N slowest procs and lines. [default: 40]"
+		help = format!("List the N slowest procs and lines. [default: {}]", DEFAULT_TOP)
 	)]
 	pub top: u64,
-	#[arg(long, value_name = "FILE", help = "Write an HTML report to FILE.")]
+	#[arg(long, value_name = "FILE", help = "Write an interactive HTML report to FILE.")]
 	pub html: Option<PathBuf>,
 	#[arg(long, help = JSON)]
 	pub json: bool
@@ -502,7 +561,7 @@ pub struct Profile {
 pub struct Check {
 	#[arg(value_name = "DME")]
 	pub dme: Option<PathBuf>,
-	#[arg(short = 'D', value_name = "NAME[=VALUE]", help = "Set a build define (repeatable). Match the DMB build.")]
+	#[arg(short = 'D', value_name = "NAME[=VALUE]", help = "Define a build preprocessor macro. Repeatable.")]
 	pub defines: Vec<String>,
 	#[arg(long, value_name = "VERSION", value_parser = byond_version, help = byond_version_help())]
 	pub byond_version: Option<(u32, u32)>,
@@ -512,7 +571,6 @@ pub struct Check {
 
 #[derive(Args)]
 pub struct Help {
-	/// The command, and its subcommand
 	#[arg(value_name = "COMMAND")]
 	pub path: Vec<String>
 }
@@ -523,19 +581,15 @@ pub struct Version {
 	pub json: bool
 }
 
-/// Maximum duration accepted by an option (about thirty years).
 pub const MANY_SECONDS: f64 = 1e9;
 
-/// A time in seconds: a number that isn't negative
 fn seconds(text: &str) -> Result<Duration, String> {
 	match text.trim().parse::<f64>() {
-		// Keep the limit representable when added to the current time.
 		Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => Ok(Duration::from_secs_f64(seconds.min(MANY_SECONDS))),
 		_ => Err("expected a non-negative number of seconds".to_owned())
 	}
 }
 
-/// A count of something, from 0
 fn whole<T: std::str::FromStr>(text: &str) -> Result<T, String> {
 	text.parse().map_err(|_| "expected a non-negative integer".to_owned())
 }
@@ -555,7 +609,6 @@ fn port(text: &str) -> Result<u16, String> {
 	text.parse().map_err(|_| "expected a port number from 0 to 65535".to_owned())
 }
 
-/// A BYOND build, as `MAJOR.BUILD`
 fn byond_version(text: &str) -> Result<(u32, u32), String> {
 	text.split_once('.')
 		.and_then(|(major, build)| Some((major.parse().ok()?, build.parse().ok()?)))
@@ -564,30 +617,27 @@ fn byond_version(text: &str) -> Result<(u32, u32), String> {
 
 fn byond_version_help() -> String {
 	let latest = dmasm::ByondVersion::LATEST;
-	format!("Check for bugs affecting this BYOND build. [default: {}.{}]", latest.major, latest.build)
+	format!("Check for bugs in BYOND build VERSION.\n[default: {}.{}]", latest.major, latest.build)
 }
 
-/// Why there's no command to run
 pub enum Unparsed {
-	/// Help was asked for: the page, for stdout
 	Help(String),
-	/// The arguments are wrong: why
 	Usage(String)
 }
 
-/// The commands as clap has them, each with its page of help
 pub fn command() -> clap::Command {
 	help::attach(Cli::command())
 }
 
-/// Reads the arguments after the program's name
 pub fn parse(args: &[String]) -> Result<Cli, Unparsed> {
 	let given = std::iter::once("auxtools".to_owned()).chain(args.iter().cloned());
-	let matches = command().try_get_matches_from(given).map_err(|error| help::unparsed(&error, args))?;
-	Cli::from_arg_matches(&matches).map_err(|error| help::unparsed(&error, args))
+	let mut command = command();
+	let matches = command
+		.try_get_matches_from_mut(given)
+		.map_err(|error| help::unparsed(&error, args, &command))?;
+	Cli::from_arg_matches(&matches).map_err(|error| help::unparsed(&error, args, &command))
 }
 
-/// Validate option combinations before connecting to a world.
 pub fn rules(command: &Command) -> Result<(), String> {
 	let requires = |given: bool, option: &str, needed: bool, other: &str| match given && !needed {
 		true => Err(format!("{} requires {}.", option, other)),
@@ -634,7 +684,7 @@ pub fn rules(command: &Command) -> Result<(), String> {
 mod tests {
 	use std::time::Duration;
 
-	use super::{parse, rules, Cli, Command, Unparsed, WaitFor};
+	use super::{parse, rules, Cli, Command, Unparsed, WaitFor, DEFAULT_TOP};
 
 	fn args(args: &[&str]) -> Vec<String> {
 		args.iter().map(|arg| (*arg).to_owned()).collect()
@@ -697,7 +747,7 @@ mod tests {
 		);
 		assert_eq!(
 			refused(&["wait", "--break", "a.dm:3"]),
-			"unexpected argument '--break' before a wait command: specify pause, reload, or reboot. Run 'auxtools wait --help' for usage."
+			"unexpected argument '--break' before a wait command. Specify pause, reload, or reboot first. Run 'auxtools wait --help' for usage."
 		);
 		assert_eq!(
 			refused(&["status", "--sideways"]),
@@ -779,7 +829,7 @@ mod tests {
 			_ => panic!("not profile")
 		};
 		let all = profile(&["profile"]);
-		assert!(all.procs.is_empty() && all.duration.is_none() && all.top == 40 && all.html.is_none() && !all.json);
+		assert!(all.procs.is_empty() && all.duration.is_none() && all.top == DEFAULT_TOP && all.html.is_none() && !all.json);
 		let some = profile(&[
 			"profile",
 			"/mob/proc/life",
@@ -810,11 +860,9 @@ mod tests {
 		assert_eq!(eval(&["eval", "6", "*", "7"]).expression, args(&["6", "*", "7"]));
 		assert_eq!(eval(&["eval", "-"]).expression, args(&["-"]));
 		assert_eq!(eval(&["eval", "-1"]).expression, args(&["-1"]));
-		// Its options can come after it, or among its words
 		let after = eval(&["eval", "x", "+", "1", "--json", "--frame", "2"]);
 		assert_eq!(after.expression, args(&["x", "+", "1"]));
 		assert!(after.json && after.frame == Some(2));
-		// What starts with a hyphen and isn't a number goes after `--`
 		let negated = eval(&["eval", "--json", "--", "-x", "--y"]);
 		assert_eq!(negated.expression, args(&["-x", "--y"]));
 		assert!(negated.json);
@@ -909,6 +957,6 @@ mod tests {
 		assert!(shown(&["stop", "--help"]).starts_with("Request graceful shutdown and wait for the world process to exit.\n"));
 		assert_eq!(shown(&["stop", "-h"]), shown(&["stop", "--help"]));
 		assert!(shown(&["wait", "pause", "--help"]).starts_with("Wait for execution to pause and report the location and reason.\n"));
-		assert!(shown(&["wait", "--help"]).starts_with("Wait for a debugger or world lifecycle event.\n"));
+		assert!(shown(&["wait", "--help"]).starts_with("Wait for a pause, hot reload, or reboot.\n"));
 	}
 }

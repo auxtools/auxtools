@@ -1,9 +1,6 @@
-// `node expression.test.js`: what a hover takes for an expression
-
 const assert = require("assert");
-const { expressionAt } = require("./expression");
+const { evaluatableExpression, expressionAt } = require("./expression");
 
-// The expression found with the mouse on the `|` in `line`
 function at(marked) {
 	const column = marked.indexOf("|");
 	const line = marked.replace("|", "");
@@ -22,15 +19,22 @@ assert.strictEqual(at("\tif (target?.cli|ent)"), "target?.client");
 assert.strictEqual(at("\tthing:hid|den = 1"), "thing:hidden");
 assert.strictEqual(at("\tthing?:hid|den = 1"), "thing?:hidden");
 assert.strictEqual(at("\ta . b . |c"), "a . b . c");
-// What's reached through a call or an index starts after it
 assert.strictEqual(at("\tget_mob().na|me"), undefined);
-assert.strictEqual(at("\titems[1].na|me"), undefined);
-// Calls aren't made
+assert.strictEqual(at("\titems[1].na|me"), "items[1].name");
+assert.strictEqual(at("\tx = src.ite|ms[i]"), "src.items");
+assert.strictEqual(at("\tx = src.items[|i]"), "i");
+assert.strictEqual(at("\tx = src.items[i|]"), "src.items[i]");
+assert.strictEqual(at("\tx = items[i].na|me"), "items[i].name");
+assert.strictEqual(at("\tx = items?[1]?.na|me"), "items?[1]?.name");
+assert.strictEqual(at('\tx = items["slot (left)"].na|me'), 'items["slot (left)"].name');
+assert.strictEqual(at("\tx = a[b[1]][2].|c"), "a[b[1]][2].c");
+assert.strictEqual(at("\tx = a[b[1]|]"), "a[b[1]]");
+assert.strictEqual(at("\tx = list(1)[1].na|me"), undefined);
+assert.strictEqual(at('\tworld.log << "a[1|]"'), undefined);
 assert.strictEqual(at("\tsrc.bu|mp(2)"), undefined);
 assert.strictEqual(at("\tle|af(x)"), undefined);
 assert.strictEqual(at("\tleaf(|x)"), "x");
 assert.strictEqual(at("/proc/le|af(x)"), undefined);
-// Nor are texts, comments, keywords, numbers or paths values to read
 assert.strictEqual(at('\tworld.log << "dap: wor|ld"'), undefined);
 assert.strictEqual(at('\tworld.log << "a \\" b|" + c'), undefined);
 assert.strictEqual(at('\tworld.log << "a" + |c'), "c");
@@ -38,12 +42,43 @@ assert.strictEqual(at("\tx = 1 // then |y"), undefined);
 assert.strictEqual(at("\tret|urn x"), undefined);
 assert.strictEqual(at("\tvar/|y = 1"), undefined);
 assert.strictEqual(at("\tx = 1e|3"), undefined);
+assert.strictEqual(at("\tx = 1.e|5"), undefined);
+assert.strictEqual(at("\tx = target1.na|me"), "target1.name");
+assert.strictEqual(at("\tx = ::cou|nt"), "::count");
+assert.strictEqual(at("\tx = ::registry[key].na|me"), "::registry[key].name");
+assert.strictEqual(at("\tx = ::registry[key|]"), "::registry[key]");
+assert.strictEqual(at("\tx = /datum::na|me"), undefined);
+assert.strictEqual(at("\tx = src.slot2.na|me"), "src.slot2.name");
 assert.strictEqual(at("\tnew /datum/th|ing(x)"), undefined);
 assert.strictEqual(at("\tvar/datum/thing/|t = x"), undefined);
-// A ternary's colon isn't a member's
 assert.strictEqual(at("\treturn a ? b : |c"), "c");
 assert.strictEqual(at("\treturn a ? b :|c"), "c");
-// Nothing there
 assert.strictEqual(at("\tx = | 1"), undefined);
 assert.strictEqual(at("|"), undefined);
-console.log("ok: 30 hover expressions");
+const vscode = {
+	Range: class {
+		constructor(line, start, endLine, end) {
+			Object.assign(this, { line, start, endLine, end });
+		}
+	},
+	EvaluatableExpression: class {
+		constructor(range) {
+			this.range = range;
+		}
+	},
+};
+const document = { lineAt: (line) => ({ text: ["", "\tvar/n = src.items[i].na"][line] }) };
+assert.deepStrictEqual({ ...evaluatableExpression(vscode, document, { line: 1, character: 23 }).range }, {
+	line: 1,
+	start: 9,
+	endLine: 1,
+	end: 24,
+});
+assert.deepStrictEqual({ ...evaluatableExpression(vscode, document, { line: 1, character: 20 }).range }, {
+	line: 1,
+	start: 9,
+	endLine: 1,
+	end: 21,
+});
+assert.strictEqual(evaluatableExpression(vscode, document, { line: 1, character: 3 }), undefined);
+console.log("ok: 50 hover expressions");

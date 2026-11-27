@@ -1,14 +1,5 @@
 name: CI
 
-# Cross-compile Linux and Windows binaries on Linux, test the BYOND matrix
-# on Linux, Windows and Wine, and package both targets in the VS Code extension.
-#
-# Run automatically for repositories owned by willox or auxtools. Other forks
-# can start a run through Actions > CI > Run workflow.
-#
-# release.yml supplies release.bundle to build and test a release without
-# restoring the crate or Windows SDK caches.
-
 on:
   push:
     branches: [master]
@@ -17,7 +8,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: Release version; its tag must be in release.bundle
+        description: Release version (its tag must be in release.bundle)
         required: true
         type: string
 
@@ -30,32 +21,127 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Build each artifact from source without reusing prior build outputs.
   CARGO_INCREMENTAL: 0
   RUST_VERSION: 1.99.1
-  # Pin nightly rustfmt for the options in .rustfmt.toml.
+  RUSTUP_TOOLCHAIN: 1.99.1
   RUSTFMT_TOOLCHAIN: nightly-2026-10-24
 
 jobs:
   format:
-    name: Check the formatting
+    name: Check formatting
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Verify Rust version in rust-toolchain.toml
+        run: |
+          [ "$RUSTUP_TOOLCHAIN" = "$RUST_VERSION" ] && grep -qxF "channel = \"$RUST_VERSION\"" rust-toolchain.toml || { echo "::error::RUSTUP_TOOLCHAIN or rust-toolchain.toml doesn't name Rust $RUST_VERSION"; exit 1; }
+
       - name: Install rustfmt
         run: rustup toolchain install "$RUSTFMT_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
 
-      - name: Check the formatting
+      - name: Check formatting
         run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all -- --check
+
+  design-notes:
+    name: Check design notes
+    if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the code the notes name and the index by file
+        run: ci/design-notes.py --check
+
+  clippy:
+    name: Lint with Clippy
+    if: (github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools') && !inputs.version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      TARGET: i686-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install 32-bit compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy --target "$TARGET" --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore Cargo crate cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: crates-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: crates-linux-
+
+      - name: Run Clippy
+        run: ci/clippy.sh --locked --target "$TARGET" --workspace
+
+  minimum-rust:
+    name: Build with Rust ${{ matrix.rust }}
+    if: (github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools') && !inputs.version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust: "1.95"
+            manifests: Cargo.toml
+            packages: --workspace
+          - rust: "1.88"
+            manifests: auxtools/Cargo.toml auxtools-impl/Cargo.toml dmasm/bytecode/Cargo.toml
+            packages: -p auxtools -p auxtools-impl -p dmasm-bytecode
+    env:
+      TARGET: i686-unknown-linux-gnu
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+      MANIFESTS: ${{ matrix.manifests }}
+      PACKAGES: ${{ matrix.packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify rust-version in manifests
+        run: |
+          for manifest in $MANIFESTS; do
+            grep -qxF "rust-version = \"$RUSTUP_TOOLCHAIN\"" "$manifest" || { echo "::error::$manifest doesn't name rust-version $RUSTUP_TOOLCHAIN"; exit 1; }
+          done
+
+      - name: Install 32-bit compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib
+
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "$TARGET" --no-self-update
+
+      - name: Restore Cargo crate cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: crates-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: crates-linux-
+
+      - name: Build
+        run: cargo build --locked --target "$TARGET" $PACKAGES
 
   build-linux:
     name: Build for Linux
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
-    # Build on Ubuntu 22.04 for glibc 2.35 compatibility.
-    # ci/check-linux.sh verifies the resulting requirements.
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -63,14 +149,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download the release commits
+      - name: Download release commits
         if: inputs.version
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release.bundle
           path: ${{ runner.temp }}
 
-      - name: Check out the release commit
+      - name: Check out release commit
         if: inputs.version
         env:
           VERSION: ${{ inputs.version }}
@@ -78,7 +164,7 @@ jobs:
           git fetch --no-tags "$RUNNER_TEMP/release.bundle" "refs/tags/v$VERSION:refs/tags/v$VERSION"
           git checkout --detach "v$VERSION"
 
-      - name: Install the 32-bit compiler
+      - name: Install 32-bit compilers
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib
@@ -88,7 +174,7 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET" --no-self-update
           rustup default "$RUST_VERSION"
 
-      - name: Restore downloaded crates
+      - name: Restore Cargo crate cache
         if: ${{ !inputs.version }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -99,43 +185,93 @@ jobs:
           key: crates-linux-${{ hashFiles('Cargo.lock') }}
           restore-keys: crates-linux-
 
+      - name: Restore Cargo build cache
+        if: ${{ !inputs.version }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/built-from
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ env.TARGET }}/release/.fingerprint
+            target/${{ env.TARGET }}/release/build
+            target/${{ env.TARGET }}/release/deps
+            target/${{ env.TARGET }}/release/examples
+            target/test-commands/release/.fingerprint
+            target/test-commands/release/build
+            target/test-commands/release/deps
+            target/test-commands/${{ env.TARGET }}/release/.fingerprint
+            target/test-commands/${{ env.TARGET }}/release/build
+            target/test-commands/${{ env.TARGET }}/release/deps
+          key: build-linux-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: build-linux-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Restore timestamps on unchanged files
+        if: ${{ !inputs.version }}
+        run: ci/source-times.sh target/built-from
+
       - name: Build
         run: cargo build --release --locked --target "$TARGET" --workspace
 
-      - name: Unit tests
-        run: cargo test --release --locked --target "$TARGET" -p auxtools-cli
+      - name: Build recipe checker
+        run: cargo build --release --locked --target "$TARGET" -p auxtools --example check_recipes
 
-      - name: The extension's tests
+      - name: Build DreamMaker comparison tool
+        run: cargo build --release --locked --target "$TARGET" -p dmasm-compiler --example compare_dreammaker
+
+      - name: Run unit tests
+        run: cargo test --release --locked --target "$TARGET" -p auxtools-cli -p auxtools -p auxtools-protocol -p auxtools-dm -p debug_server -p dmasm -p dmasm-bytecode -p dmasm-compiler -p dmasm-reload -p test_support
+
+      - name: Test VS Code extension
         run: |
           node editors/vscode/expression.test.js
           node editors/vscode/unsaved.test.js
           node editors/vscode/buildflags.test.js
+          node editors/vscode/report.test.js
+          node editors/vscode/messages.test.js
+          python3 editors/vscode/package.py --out "$RUNNER_TEMP/auxtools.vsix"
+          python3 -m zipfile -e "$RUNNER_TEMP/auxtools.vsix" "$RUNNER_TEMP/vsix"
+          node editors/vscode/package.test.js "$RUNNER_TEMP/vsix"
 
-      - name: Split the debug information off, check and pack
+      - name: Split debug symbols, verify, and package
         run: |
+          mkdir -p "$RUNNER_TEMP/programs/released"
           cd "target/$TARGET/release"
+          cp auxtools libdebug_server.so libauxtest.so test_runner debug_test hot_reload_test launcher_test dap_test examples/check_recipes examples/compare_dreammaker "$RUNNER_TEMP/programs"
+          cd "$RUNNER_TEMP/programs"
           "$GITHUB_WORKSPACE/ci/split-debug.sh" auxtools libdebug_server.so
           "$GITHUB_WORKSPACE/ci/check-linux.sh" auxtools libdebug_server.so
-          strip --strip-debug libauxtest.so test_runner debug_test hot_reload_test launcher_test dap_test
+          if grep -q 'asked for with #panic' libdebug_server.so; then echo "the debug library has the tests' console commands"; exit 1; fi
+          strip --strip-debug libauxtest.so test_runner debug_test hot_reload_test launcher_test dap_test check_recipes compare_dreammaker
           tar -czf "$RUNNER_TEMP/auxtools-linux.tar.gz" auxtools libdebug_server.so
           tar -czf "$RUNNER_TEMP/auxtools-linux-symbols.tar.gz" auxtools.debug libdebug_server.so.debug
-          tar -cf "$RUNNER_TEMP/bundle-linux.tar" auxtools libdebug_server.so libauxtest.so test_runner debug_test hot_reload_test launcher_test dap_test
+          mv libdebug_server.so released/
 
-      - name: Upload the launcher and the debug library
+      - name: Build test debug library and bundle
+        run: |
+          cargo build --release --locked --target "$TARGET" --workspace --features debug_server/test-commands --target-dir target/test-commands
+          cd "$RUNNER_TEMP/programs"
+          cp "$GITHUB_WORKSPACE/target/test-commands/$TARGET/release/libdebug_server.so" .
+          strip --strip-debug libdebug_server.so
+          grep -q 'asked for with #panic' libdebug_server.so
+          tar -cf "$RUNNER_TEMP/bundle-linux.tar" auxtools libdebug_server.so released/libdebug_server.so libauxtest.so test_runner debug_test hot_reload_test launcher_test dap_test check_recipes compare_dreammaker
+
+      - name: Upload launcher and debug library
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-linux.tar.gz
           archive: false
           if-no-files-found: error
 
-      - name: Upload their debug information
+      - name: Upload debug symbols
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-linux-symbols.tar.gz
           archive: false
           if-no-files-found: error
 
-      - name: Upload the bundle for the later jobs
+      - name: Upload build bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bundle-linux
@@ -146,7 +282,6 @@ jobs:
   build-windows:
     name: Build for Windows
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'willox' || github.repository_owner == 'auxtools'
-    # Microsoft C++ headers require clang 19 or newer.
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -155,14 +290,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download the release commits
+      - name: Download release commits
         if: inputs.version
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release.bundle
           path: ${{ runner.temp }}
 
-      - name: Check out the release commit
+      - name: Check out release commit
         if: inputs.version
         env:
           VERSION: ${{ inputs.version }}
@@ -170,7 +305,7 @@ jobs:
           git fetch --no-tags "$RUNNER_TEMP/release.bundle" "refs/tags/v$VERSION:refs/tags/v$VERSION"
           git checkout --detach "v$VERSION"
 
-      - name: Install LLVM's tools
+      - name: Install LLVM tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang lld llvm
@@ -180,7 +315,7 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET" --no-self-update
           rustup default "$RUST_VERSION"
 
-      - name: Restore downloaded crates
+      - name: Restore Cargo crate cache
         if: ${{ !inputs.version }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -191,14 +326,40 @@ jobs:
           key: crates-windows-${{ hashFiles('Cargo.lock') }}
           restore-keys: crates-windows-
 
-      - name: Restore the Windows SDK
+      - name: Restore Cargo build cache
+        if: ${{ !inputs.version }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/built-from
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ env.TARGET }}/release/.fingerprint
+            target/${{ env.TARGET }}/release/build
+            target/${{ env.TARGET }}/release/deps
+            target/${{ env.TARGET }}/release/examples
+            target/test-commands/release/.fingerprint
+            target/test-commands/release/build
+            target/test-commands/release/deps
+            target/test-commands/${{ env.TARGET }}/release/.fingerprint
+            target/test-commands/${{ env.TARGET }}/release/build
+            target/test-commands/${{ env.TARGET }}/release/deps
+          key: build-windows-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: build-windows-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Restore timestamps on unchanged files
+        if: ${{ !inputs.version }}
+        run: ci/source-times.sh target/built-from
+
+      - name: Restore Windows SDK
         if: ${{ !inputs.version }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .msvc-sdk
           key: msvc-sdk-${{ hashFiles('ci/msvc/fetch-sdk.sh') }}
 
-      - name: Fetch the Windows SDK
+      - name: Fetch Windows SDK
         run: ci/msvc/fetch-sdk.sh "$MSVC_SDK"
 
       - name: Build
@@ -206,34 +367,52 @@ jobs:
           . ci/msvc/env.sh
           cargo build --release --locked --target "$TARGET" --workspace
 
-      - name: Build the unit tests
+      - name: Build recipe checker
         run: |
           . ci/msvc/env.sh
-          ci/unit-tests.sh "target/$TARGET/release/unit" --release --locked --target "$TARGET" -p auxtools-cli
+          cargo build --release --locked --target "$TARGET" -p auxtools --example check_recipes
 
-      - name: Check and pack
+      - name: Build unit tests
         run: |
-          cd "target/$TARGET/release"
-          "$GITHUB_WORKSPACE/ci/check-windows.sh" auxtools.exe debug_server.dll
-          python3 -m zipfile -c "$RUNNER_TEMP/auxtools-windows.zip" auxtools.exe debug_server.dll
-          python3 -m zipfile -c "$RUNNER_TEMP/auxtools-windows-symbols.zip" auxtools-cli.pdb debug_server.pdb
-          tar -cf "$RUNNER_TEMP/bundle-windows.tar" auxtools.exe debug_server.dll auxtest.dll test_runner.exe debug_test.exe hot_reload_test.exe launcher_test.exe dap_test.exe unit
+          . ci/msvc/env.sh
+          ci/unit-tests.sh "target/$TARGET/release/unit" --release --locked --target "$TARGET" -p auxtools-cli -p auxtools -p auxtools-protocol -p auxtools-dm -p debug_server -p dmasm -p dmasm-bytecode -p dmasm-compiler -p dmasm-reload -p test_support
 
-      - name: Upload the launcher and the debug library
+      - name: Verify and package
+        run: |
+          mkdir -p "$RUNNER_TEMP/programs/released"
+          cd "target/$TARGET/release"
+          cp -r auxtools.exe auxtools.pdb debug_server.dll debug_server.pdb auxtest.dll test_runner.exe debug_test.exe hot_reload_test.exe launcher_test.exe dap_test.exe unit examples/check_recipes.exe "$RUNNER_TEMP/programs"
+          cd "$RUNNER_TEMP/programs"
+          "$GITHUB_WORKSPACE/ci/check-windows.sh" auxtools.exe debug_server.dll
+          if grep -q 'asked for with #panic' debug_server.dll; then echo "the debug library has the tests' console commands"; exit 1; fi
+          python3 -m zipfile -c "$RUNNER_TEMP/auxtools-windows.zip" auxtools.exe debug_server.dll
+          python3 -m zipfile -c "$RUNNER_TEMP/auxtools-windows-symbols.zip" auxtools.pdb debug_server.pdb
+          mv debug_server.dll released/
+
+      - name: Build test debug library and bundle
+        run: |
+          . ci/msvc/env.sh
+          cargo build --release --locked --target "$TARGET" --workspace --features debug_server/test-commands --target-dir target/test-commands
+          cd "$RUNNER_TEMP/programs"
+          cp "$GITHUB_WORKSPACE/target/test-commands/$TARGET/release/debug_server.dll" .
+          grep -q 'asked for with #panic' debug_server.dll
+          tar -cf "$RUNNER_TEMP/bundle-windows.tar" auxtools.exe debug_server.dll released/debug_server.dll auxtest.dll test_runner.exe debug_test.exe hot_reload_test.exe launcher_test.exe dap_test.exe unit check_recipes.exe
+
+      - name: Upload launcher and debug library
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-windows.zip
           archive: false
           if-no-files-found: error
 
-      - name: Upload their debug information
+      - name: Upload debug symbols
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ runner.temp }}/auxtools-windows-symbols.zip
           archive: false
           if-no-files-found: error
 
-      - name: Upload the bundle for the later jobs
+      - name: Upload build bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bundle-windows
@@ -241,143 +420,28 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  test-linux:
-    name: Linux, BYOND ${{ matrix.byond }}
-    needs: build-linux
-    # Test Linux binaries on the minimum supported glibc environment.
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        byond: ["515.1637", "515.1647", "516.1659", "516.1685", "516.1689"]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install the 32-bit libraries BYOND needs
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libc6:i386 libstdc++6:i386 libgcc-s1:i386 libcurl4:i386
-
-      - name: Download the bundle
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: bundle-linux
-          path: bundle
-
-      - name: Restore BYOND
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .byond
-          key: byond-${{ matrix.byond }}-linux-${{ hashFiles('ci/byond.sha256') }}
-
-      - name: Fetch BYOND
-        run: ci/fetch-byond.sh "${{ matrix.byond }}" linux .byond
-
-      - name: Test
-        run: |
-          mkdir programs
-          tar -xf bundle/bundle-linux.tar -C programs
-          ci/run-tests.sh programs .byond/byond
-
-  test-windows:
-    name: Windows, BYOND ${{ matrix.byond }}
-    needs: build-windows
-    # Test Windows binaries on Server 2022 (Windows 10 generation).
-    runs-on: windows-2022
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        byond: ["515.1637", "515.1647", "516.1659", "516.1685", "516.1689"]
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Download the bundle
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: bundle-windows
-          path: bundle
-
-      - name: Restore BYOND
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .byond
-          key: byond-${{ matrix.byond }}-windows-${{ hashFiles('ci/byond.sha256') }}
-
-      - name: Fetch BYOND
-        run: ci/fetch-byond.sh "${{ matrix.byond }}" windows .byond
-
-      - name: Test
-        run: |
-          mkdir programs
-          tar -xf bundle/bundle-windows.tar -C programs
-          ci/run-tests.sh programs .byond/byond
-
-  test-wine:
-    name: Wine, BYOND ${{ matrix.byond }}
-    needs: build-windows
-    # Use Wine 10.0.
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        byond: ["515.1637", "515.1647", "516.1659", "516.1685", "516.1689"]
-    env:
-      WINE: wine
-      WINEARCH: win32
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Wine
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wine wine32:i386
-          wine --version
-
-      - name: Download the bundle
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: bundle-windows
-          path: bundle
-
-      - name: Restore BYOND
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .byond
-          key: byond-${{ matrix.byond }}-windows-${{ hashFiles('ci/byond.sha256') }}
-
-      - name: Fetch BYOND
-        run: ci/fetch-byond.sh "${{ matrix.byond }}" windows .byond
-
-      - name: Test
-        run: |
-          mkdir programs
-          tar -xf bundle/bundle-windows.tar -C programs
-          ci/run-tests.sh programs .byond/byond
-
-  package:
-    name: Pack the VS Code extension
+  test-linux-wine:
+    name: Test on Linux and Wine
     needs: [build-linux, build-windows]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BUILDS: 515.1637 515.1644 515.1647 516.1652 516.1657 516.1659 516.1670 516.1674 516.1685 516.1689
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download the release commits
+      - name: Download release commits
         if: inputs.version
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release.bundle
           path: ${{ runner.temp }}
 
-      - name: Check out the release commit
+      - name: Check out release commit
         if: inputs.version
         env:
           VERSION: ${{ inputs.version }}
@@ -385,28 +449,128 @@ jobs:
           git fetch --no-tags "$RUNNER_TEMP/release.bundle" "refs/tags/v$VERSION:refs/tags/v$VERSION"
           git checkout --detach "v$VERSION"
 
-      - name: Download the Linux bundle
+      - name: Download Linux bundle
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: bundle-linux
           path: bundle
 
-      - name: Download the Windows bundle
+      - name: Download Windows bundle
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: bundle-windows
           path: bundle
 
-      # package.py takes the programs from where cargo builds them
-      - name: Pack
+      - name: Run tests
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RELEASE: ${{ inputs.version }}
+        run: |
+          git archive --format=tar.gz -o "$RUNNER_TEMP/source.tar.gz" HEAD
+          COMMIT=$(git rev-parse HEAD)
+          export COMMIT
+          if [ -n "$RELEASE" ]; then
+            BUILDS=$(tr '\n' ' ' <ci/supported-builds.txt)
+            RERUNS=2
+            KNOWN_BROKEN=$(tr '\n' ' ' <ci/known-broken-builds.txt)
+            export RERUNS KNOWN_BROKEN
+          fi
+          ci/cloud.sh bundle/bundle-linux.tar bundle/bundle-windows.tar "$RUNNER_TEMP/source.tar.gz" $BUILDS
+
+  test-windows:
+    name: Test on Windows
+    needs: build-windows
+    if: inputs.version
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        byond: ["515.1637", "515.1644", "515.1647", "516.1652", "516.1657", "516.1659", "516.1670", "516.1674", "516.1685", "516.1689"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download Windows bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-windows
+          path: bundle
+
+      - name: Restore BYOND
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .byond
+          key: byond-${{ matrix.byond }}-windows-${{ hashFiles('ci/byond.sha256') }}
+
+      - name: Fetch BYOND
+        run: ci/fetch-byond.sh "${{ matrix.byond }}" windows .byond
+
+      - name: Unpack bundle
+        run: |
+          mkdir programs
+          tar -xf bundle/bundle-windows.tar -C programs
+
+      - name: Check registry patterns
+        run: programs/check_recipes.exe windows "${{ matrix.byond }}" .byond/byond/bin/byondcore.dll
+
+      - name: Run tests
+        run: ci/run-tests.sh programs .byond/byond
+
+  package:
+    name: Package VS Code extension
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download release commits
+        if: inputs.version
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release.bundle
+          path: ${{ runner.temp }}
+
+      - name: Check out release commit
+        if: inputs.version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git fetch --no-tags "$RUNNER_TEMP/release.bundle" "refs/tags/v$VERSION:refs/tags/v$VERSION"
+          git checkout --detach "v$VERSION"
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-linux
+          path: bundle
+
+      - name: Download Windows bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-windows
+          path: bundle
+
+      - name: Package extension
         run: |
           mkdir -p target/i686-unknown-linux-gnu/release target/i686-pc-windows-msvc/release
-          tar -xf bundle/bundle-linux.tar -C target/i686-unknown-linux-gnu/release auxtools libdebug_server.so
-          tar -xf bundle/bundle-windows.tar -C target/i686-pc-windows-msvc/release auxtools.exe debug_server.dll
+          tar -xf bundle/bundle-linux.tar -C target/i686-unknown-linux-gnu/release --strip-components=1 released/libdebug_server.so
+          tar -xf bundle/bundle-linux.tar -C target/i686-unknown-linux-gnu/release auxtools
+          tar -xf bundle/bundle-windows.tar -C target/i686-pc-windows-msvc/release --strip-components=1 released/debug_server.dll
+          tar -xf bundle/bundle-windows.tar -C target/i686-pc-windows-msvc/release auxtools.exe
+          if grep -q 'asked for with #panic' target/i686-unknown-linux-gnu/release/libdebug_server.so target/i686-pc-windows-msvc/release/debug_server.dll; then echo "a debug library has the tests' console commands"; exit 1; fi
           python3 editors/vscode/package.py | tee packed.txt
           grep -q "(2 platforms)" packed.txt
 
-      - name: Upload the extension
+      - name: Verify extension package
+        run: |
+          python3 -m zipfile -e auxtools-*.vsix "$RUNNER_TEMP/vsix"
+          node editors/vscode/package.test.js "$RUNNER_TEMP/vsix"
+
+      - name: Upload extension
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: auxtools-*.vsix

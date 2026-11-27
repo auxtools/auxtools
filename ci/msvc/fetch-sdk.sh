@@ -1,17 +1,18 @@
 #!/bin/sh
-# Fetch Microsoft C runtime and Windows SDK headers/import libraries
-# for Linux cross-compilation to i686-pc-windows-msvc.
+# Fetch the Microsoft C runtime and Windows SDK headers and import libraries
+# for cross-compiling to i686-pc-windows-msvc on Linux:
 #
 #     ci/msvc/fetch-sdk.sh DIRECTORY
 #
-# Use xwin (https://github.com/Jake-Shadle/xwin) to download and extract
-# the libraries into DIRECTORY (about 800 MB). Running this script accepts
-# Microsoft's license: https://go.microsoft.com/fwlink/?LinkId=2086102
+# Uses xwin (https://github.com/Jake-Shadle/xwin) to download and extract
+# pinned x86 SDK and CRT versions into DIRECTORY. If DIRECTORY already holds
+# those versions, the script leaves it untouched. Otherwise, it deletes and
+# recreates DIRECTORY.
 #
-# Pin SDK and CRT versions for reproducible linking. Static CRT linking
-# and the selected system imports support Windows 10 and later.
+# Running this script accepts Microsoft's license:
+# https://go.microsoft.com/fwlink/?LinkId=2086102
 set -eu
-[ $# -eq 1 ] || { sed -n '2,8p' "$0" >&2; exit 2; }
+[ $# -eq 1 ] || { sed -n '2,13p' "$0" >&2; exit 2; }
 dest=$1
 
 XWIN_VERSION=0.10.0

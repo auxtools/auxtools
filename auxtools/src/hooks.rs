@@ -30,7 +30,6 @@ extern "C" {
 	static mut runtime_original: *const c_void;
 	fn runtime_hook(error: *const c_char);
 
-	// Set while a shim replaces BYOND's runtime errors with its own (hooks.h)
 	static runtime_intercepted: bool;
 
 	fn call_proc_by_id_hook_trampoline(
@@ -62,6 +61,11 @@ impl Detours {
 
 thread_local!(static DETOURS: RefCell<Detours> = const { RefCell::new(Detours::new()) });
 
+/// Reasons installing a proc hook can fail.
+///
+/// Only `ProcNotFound` and `AlreadyHooked` are returned. `NotInitialized` and
+/// `UnknownFailure` are never produced. The `Debug` output formats each variant
+/// as a human-readable message used in initialization errors.
 pub enum HookFailure {
 	NotInitialized,
 	ProcNotFound,
@@ -72,14 +76,23 @@ pub enum HookFailure {
 impl std::fmt::Debug for HookFailure {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::NotInitialized => write!(f, "Library not initialized"),
-			Self::ProcNotFound => write!(f, "Proc not found"),
-			Self::AlreadyHooked => write!(f, "Proc is already hooked"),
-			Self::UnknownFailure => write!(f, "Unknown failure")
+			Self::NotInitialized => write!(f, "library not initialized"),
+			Self::ProcNotFound => write!(f, "proc not found"),
+			Self::AlreadyHooked => write!(f, "proc is already hooked"),
+			Self::UnknownFailure => write!(f, "unknown failure")
 		}
 	}
 }
 
+/// Installs the library's detours on BYOND's runtime-error and proc-call
+/// functions.
+///
+/// Called internally during the library's first initialization. Library authors
+/// should not call this directly.
+///
+/// # Panics
+///
+/// Panics if either detour cannot be created or enabled.
 pub fn init() -> Result<(), String> {
 	unsafe {
 		let runtime_hook = RawDetour::new(raw_types::funcs::runtime_byond as *const (), runtime_hook as *const ()).unwrap();
@@ -101,6 +114,14 @@ pub fn init() -> Result<(), String> {
 	Ok(())
 }
 
+/// Disables the detours installed by [`init`].
+///
+/// Called internally by `auxtools_full_shutdown`. Library authors should not
+/// call this directly.
+///
+/// # Panics
+///
+/// Panics if called on a thread other than the one that ran [`init`].
 pub fn shutdown() {
 	unsafe {
 		DETOURS.with(|detours_cell| {
@@ -113,39 +134,35 @@ pub fn shutdown() {
 	}
 }
 
+/// Function signature for a DM proc hook, receiving `src`, `usr`, and the call
+/// arguments.
+///
+/// While a proc is hooked, every call invokes the hook on BYOND's thread in
+/// place of the proc's DM bytecode. Returning `Ok(value)` sets the proc's
+/// return value. Returning `Err` or panicking (caught and formatted as
+/// `panicked: MESSAGE`) returns `null` to DM and passes
+/// `MESSAGE HookPath: PATH` to `/proc/auxtools_stack_trace` if the world
+/// defines it, without raising a BYOND runtime error.
+///
+/// `args` contains only the arguments passed by the caller (whereas the
+/// `#[hook]` attribute fills missing parameters with `null`). Invoking the
+/// hooked proc from inside its own hook re-enters the hook.
 pub type ProcHook = fn(&Value, &Value, Vec<Value>) -> DMResult;
 
-/// Lets a `RefCell` live in a plain `static`.
-///
-/// Everything here is only touched from BYOND's game thread: its proc calls and
-/// init/shutdown, which it also drives. The table used to be a `thread_local!`,
-/// but in a dlopen'd .so every access goes through `__tls_get_addr`, and it is
-/// read on every single DM proc call.
 struct GameThreadOnly<T>(T);
 
-// SAFETY: only the game thread ever reaches these statics, see above
 unsafe impl<T> Sync for GameThreadOnly<T> {}
 
 static PROC_HOOKS: GameThreadOnly<RefCell<FxHashMap<raw_types::procs::ProcId, (ProcHook, String)>>> =
 	GameThreadOnly(RefCell::new(HashMap::with_hasher(BuildHasherDefault::new())));
 
-/// Hook counts by the low 16 bits of proc ID. Zero skips the `PROC_HOOKS`
-/// lookup; collisions use the full lookup.
 static mut HOOKED_LOW_WORDS: [u8; 0x10000] = [0; 0x10000];
 
-/// Stack offset of the proc ID after the return address, `usr` and proc
-/// type. Linux adds a return-value pointer; Windows returns in registers.
 #[cfg(unix)]
 const PROC_ID_ARGUMENT: usize = 0x14;
 #[cfg(windows)]
 const PROC_ID_ARGUMENT: usize = 0x10;
 
-/// Bypass the trampoline when no proc hook, pending work, world load or
-/// runtime interception needs it.
-///
-/// Linux BYOND may clobber EBX, ESI, EDI and EBP, crashing its caller. Save
-/// these registers around a call with twelve copied argument dwords, as
-/// `call_keeping_registers` in hooks.cpp does.
 #[cfg(unix)]
 #[unsafe(naked)]
 unsafe extern "C" fn call_proc_by_id_entry() {
@@ -156,25 +173,19 @@ unsafe extern "C" fn call_proc_by_id_entry() {
 		"jne 2f",
 		"cmp byte ptr [{intercepted}], 0",
 		"jne 2f",
-		// EAX is caller-saved.
 		"movzx eax, word ptr [esp + {proc_id}]",
 		"cmp byte ptr [{hooked} + eax], 0",
 		"jne 2f",
-		// Trampoline calls are counted by `on_proc_call`.
 		"inc dword ptr [{calls}]",
 		"push ebp",
 		"push ebx",
 		"push esi",
 		"push edi",
-		// Preserve 16-byte stack alignment at the call.
 		"sub esp, 12",
-		// Copy argument dwords in reverse order. Each push advances the
-		// source at the same offset from ESP.
 		".rept 12",
 		"push dword ptr [esp + 76]",
 		".endr",
 		"call dword ptr [{original}]",
-		// BYOND popped the return-value pointer and left it in EAX.
 		"add esp, 56",
 		"pop edi",
 		"pop esi",
@@ -194,8 +205,6 @@ unsafe extern "C" fn call_proc_by_id_entry() {
 	)
 }
 
-/// Windows BYOND preserves callee-saved registers, allowing a direct jump
-/// with the caller's arguments.
 #[cfg(windows)]
 #[unsafe(naked)]
 unsafe extern "C" fn call_proc_by_id_entry() {
@@ -206,11 +215,9 @@ unsafe extern "C" fn call_proc_by_id_entry() {
 		"jne 2f",
 		"cmp byte ptr [{intercepted}], 0",
 		"jne 2f",
-		// EAX is caller-saved.
 		"movzx eax, word ptr [esp + {proc_id}]",
 		"cmp byte ptr [{hooked} + eax], 0",
 		"jne 2f",
-		// Trampoline calls are counted by `on_proc_call`.
 		"inc dword ptr [{calls}]",
 		"jmp dword ptr [{original}]",
 		"2:",
@@ -240,6 +247,10 @@ fn hook_by_id(id: raw_types::procs::ProcId, hook: ProcHook, hook_path: String) -
 	}
 }
 
+/// Removes all proc hooks installed by this library.
+///
+/// Called automatically during shutdown and on a failed initialization. Must be
+/// called on BYOND's thread because the hook table is unsynchronized.
 pub fn clear_hooks() {
 	PROC_HOOKS.0.borrow_mut().clear();
 	unsafe {
@@ -247,6 +258,19 @@ pub fn clear_hooks() {
 	}
 }
 
+/// Installs `hook` on the first definition (override ID 0) of the proc at
+/// `name`.
+///
+/// Accepts proc paths in the same format as `Proc::find`. The hook remains
+/// active until shutdown removes it and must be re-installed for each new world
+/// (use `#[hook("/path")]` to install automatically on every initialization).
+///
+/// # Errors
+///
+/// - `HookFailure::ProcNotFound` if no proc exists at `name`, or if called
+///   before initialization, after shutdown, or off BYOND's thread.
+/// - `HookFailure::AlreadyHooked` if this library already has a hook on that
+///   proc.
 pub fn hook<S: Into<String>>(name: S, hook: ProcHook) -> Result<(), HookFailure> {
 	match super::proc::get_proc(name) {
 		Some(p) => hook_by_id(p.id, hook, p.path.to_owned()),
@@ -255,12 +279,24 @@ pub fn hook<S: Into<String>>(name: S, hook: ProcHook) -> Result<(), HookFailure>
 }
 
 impl Proc {
+	/// Installs `func` on this specific proc definition (by proc ID), allowing
+	/// individual overrides to be hooked independently.
+	///
+	/// The hook remains active until shutdown removes it.
+	///
+	/// # Errors
+	///
+	/// Returns `HookFailure::AlreadyHooked` if this library already has a hook
+	/// on this proc ID.
 	pub fn hook(&self, func: ProcHook) -> Result<(), HookFailure> {
 		hook_by_id(self.id, func, self.path.to_owned())
 	}
 
-	/// Whether this library installed a Rust hook for the proc. Hooks in other
-	/// auxtools libraries loaded into the same world are not visible here.
+	/// Returns `true` if this library currently has a hook installed on this
+	/// proc ID.
+	///
+	/// Call on BYOND's thread. Does not report hooks installed by other
+	/// auxtools libraries loaded into the same world.
 	pub fn is_hooked(&self) -> bool {
 		PROC_HOOKS.0.borrow().contains_key(&self.id)
 	}
@@ -271,33 +307,58 @@ extern "C" fn on_runtime(error: *const c_char) {
 	let str = crate::text_of(unsafe { CStr::from_ptr(error) }.to_bytes());
 
 	for func in inventory::iter::<RuntimeErrorHook> {
-		func.0(&str);
+		let _ = crate::guard(|| func.0(&str));
 	}
 }
 
-/// Whether interpreter calls bypass the call_proc_by_id detour. GCC inlined
-/// them on Linux before 516.1664. Those builds dispatch proc hooks through
-/// the instruction hook (see `proc_starting`).
+fn call_hook(hook: ProcHook, src: &Value, usr: &Value, args: Vec<Value>) -> DMResult {
+	crate::guard(|| hook(src, usr, args)).unwrap_or_else(|panic| Err(crate::runtime!("panicked: {}", crate::panic_message(&*panic))))
+}
+
+fn hook_failed(proc_id: raw_types::procs::ProcId, error: &crate::Runtime) {
+	let path = PROC_HOOKS.0.borrow().get(&proc_id).map(|(_, path)| path.clone()).unwrap_or_default();
+	if let (Some(trace), Ok(message)) = (
+		Proc::find("/proc/auxtools_stack_trace"),
+		Value::from_string(format!("{} HookPath: {}", error.message, path))
+	) {
+		let _ = trace.call(&[&message]);
+	}
+}
+
+/// Returns `true` on builds where BYOND's interpreter bypasses the proc-call
+/// detour.
+///
+/// This occurs on Linux before build 1664 (both BYOND 515 and 516), where GCC
+/// inlined the interpreter's proc calls. Always returns `false` on Windows. On
+/// affected builds, auxtools installs its instruction hook at initialization
+/// and dispatches proc hooks when each frame begins.
+///
+/// Reads the BYOND build recorded during the first initialization, so before
+/// initialization it returns `true` on Linux.
 pub fn calls_bypass_detour() -> bool {
 	cfg!(unix) && crate::version::get().1 < 1664
 }
 
-/// What a hooked frame runs instead of its code: `End`, which returns `.`
 static RETURN_DOT: [u32; 1] = [0x00];
 
-/// Dispatch deferred work and proc hooks at the first instruction on builds
-/// where [`calls_bypass_detour`] is true. A hook's result replaces execution
-/// of the original proc.
+/// Runs per-call housekeeping and proc hook dispatch for a frame about to
+/// execute its first instruction.
+///
+/// Completes any pending world-load initialization, drains `at_proc_calls`
+/// work, increments the proc call counter, and invokes any installed hook on
+/// the frame's proc (returning the hook's result without executing the proc's
+/// bytecode). Called internally by the instruction hook on builds where
+/// [`calls_bypass_detour`] returns `true`. Library authors should not call this
+/// directly.
 ///
 /// # Safety
-/// `ctx` must be the running frame on BYOND's thread.
+///
+/// `ctx` must point to the currently executing frame on BYOND's thread.
 pub unsafe fn proc_starting(ctx: *mut raw_types::procs::ExecutionContext) {
 	if std::ptr::eq(*(*ctx).bytecode() as *const u32, RETURN_DOT.as_ptr()) {
 		return;
 	}
 	let instance = *(*ctx).proc_instance();
-	// The startup call can run code replaced during WorldLoad::ready
-	// (see `start_runs_new_code`).
 	if crate::on_proc_call((*instance).proc, (*instance).src.tag) && *(*ctx).bytecode_offset() == 0 {
 		if let Some(proc) = Proc::from_id((*instance).proc) {
 			let (now, _) = proc.bytecode_mut_ptr();
@@ -312,28 +373,23 @@ pub unsafe fn proc_starting(ctx: *mut raw_types::procs::ExecutionContext) {
 	let Some(hook) = PROC_HOOKS.0.borrow().get(&proc_id).map(|(hook, _)| *hook) else {
 		return;
 	};
-	// The frame keeps its own references to these
 	let src = Value::from_raw((*instance).src);
 	let usr = Value::from_raw((*instance).usr);
 	let args = std::slice::from_raw_parts((*instance).args(), (*instance).args_count() as usize)
 		.iter()
 		.map(|v| Value::from_raw(*v))
 		.collect();
-	let result = match hook(&src, &usr, args) {
+	let result = match call_hook(hook, &src, &usr, args) {
 		Ok(r) => {
 			let raw = r.raw;
 			std::mem::forget(r);
 			raw
 		}
 		Err(e) => {
-			let path = PROC_HOOKS.0.borrow()[&proc_id].1.clone();
-			if let Some(trace) = Proc::find("/proc/auxtools_stack_trace") {
-				let _ = trace.call(&[&Value::from_string(format!("{} HookPath: {}", e.message.as_str(), path)).unwrap()]);
-			}
+			hook_failed(proc_id, &e);
 			Value::NULL.raw
 		}
 	};
-	// `.` is null at a proc's start; it takes our reference
 	*(*ctx).dot_mut() = result;
 	*(*ctx).bytecode_mut() = RETURN_DOT.as_ptr() as *mut u32;
 	*(*ctx).bytecode_offset_mut() = 0;
@@ -349,14 +405,11 @@ extern "C" fn call_proc_by_id_hook(
 	src_raw: raw_types::values::Value,
 	args_ptr: *mut raw_types::values::Value,
 	num_args: usize,
-	// the trampoline deals with these two once we return
 	_callback: u32,
 	_callback_value: u32
 ) -> u8 {
 	crate::on_proc_call(proc_id, src_raw.tag);
 
-	// copy the fn out so no borrow is held while the hook runs DM code, which
-	// can call back into here or register hooks
 	let Some(hook) = PROC_HOOKS.0.borrow().get(&proc_id).map(|(hook, _)| *hook) else {
 		return 0;
 	};
@@ -365,7 +418,6 @@ extern "C" fn call_proc_by_id_hook(
 		(
 			Value::from_raw(src_raw),
 			Value::from_raw(usr_raw),
-			// Taking ownership of args here
 			std::slice::from_raw_parts(args_ptr, num_args)
 				.iter()
 				.map(|v| Value::from_raw_owned(*v))
@@ -373,19 +425,14 @@ extern "C" fn call_proc_by_id_hook(
 		)
 	};
 
-	let result = match hook(&src, &usr, args) {
+	let result = match call_hook(hook, &src, &usr, args) {
 		Ok(r) => {
 			let result_raw = r.raw;
-			// Stealing our reference out of the Value
 			std::mem::forget(r);
 			result_raw
 		}
 		Err(e) => {
-			let path = PROC_HOOKS.0.borrow()[&proc_id].1.clone();
-			Proc::find("/proc/auxtools_stack_trace")
-				.unwrap()
-				.call(&[&Value::from_string(format!("{} HookPath: {}", e.message.as_str(), path)).unwrap()])
-				.unwrap();
+			hook_failed(proc_id, &e);
 			Value::NULL.raw
 		}
 	};

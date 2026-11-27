@@ -1,9 +1,4 @@
-//! Read DM pointers through the exported byondapi function.
-//! This avoids signature scanning and dependence on internal pointer layouts.
-
 use std::sync::OnceLock;
-
-use byond_scan::{Anchor, Extract, Recipe, VersionRange};
 
 use crate::{
 	raw_types::{
@@ -13,19 +8,9 @@ use crate::{
 	Value
 };
 
-const READ_POINTER: Recipe = Recipe {
-	name: "Byond_ReadPointer",
-	versions: VersionRange { min: 1637, max: 1688 },
-	anchor: Anchor::Export(c"Byond_ReadPointer"),
-	hops: &[],
-	extract: Extract::Entry
-};
-
-/// Resolve `Byond_ReadPointer` for the C++ wrapper, which catches runtime
-/// errors raised by some builds when the target object has been deleted.
 fn found() -> bool {
 	static FOUND: OnceLock<bool> = OnceLock::new();
-	*FOUND.get_or_init(|| match crate::find_recipe(&READ_POINTER) {
+	*FOUND.get_or_init(|| match crate::registry::find!("Byond_ReadPointer") {
 		Ok(address) => {
 			unsafe { funcs::read_pointer_byond = address as *const std::ffi::c_void };
 			true
@@ -34,14 +19,22 @@ fn found() -> bool {
 	})
 }
 
-/// Whether pointers can be read in this world
+/// Returns `true` if the running BYOND build exports `Byond_ReadPointer`.
+///
+/// The lookup result is cached for the lifetime of the process. When this
+/// returns `false`, `read` and [`read_raw`] always return `None`.
 pub fn readable() -> bool {
 	found()
 }
 
-/// Read a pointer without retaining the returned value. Compare it or
-/// convert it to [`Value`] immediately. Returns `None` for invalid pointers
-/// or targets that no longer exist.
+/// Reads the raw value targeted by a DM pointer (`&var`).
+///
+/// Returns `None` if `pointer` is not a pointer value, if the running BYOND
+/// build lacks `Byond_ReadPointer`, or if BYOND fails the read (for example,
+/// for a variable on a deleted object).
+///
+/// The returned `RawValue` holds no BYOND reference. Compare or convert it
+/// immediately, or use `read` to obtain an owning `Value`.
 pub fn read_raw(pointer: &Value) -> Option<RawValue> {
 	if pointer.raw.tag != ValueTag::Pointer {
 		return None;
@@ -56,7 +49,6 @@ pub fn read_raw(pointer: &Value) -> Option<RawValue> {
 	(unsafe { funcs::read_pointer(&mut result, &pointer.raw) } == 1).then_some(result)
 }
 
-/// What a pointer names now
 pub fn read(pointer: &Value) -> Option<Value> {
 	read_raw(pointer).map(|raw| unsafe { Value::from_raw(raw) })
 }

@@ -2,8 +2,16 @@ use std::iter::FromIterator;
 
 use crate::*;
 
-/// A wrapper around [Values](struct.Value.html) that make working with lists a
-/// little easier. It can also hold an `/alist`, where numbers are keys.
+/// A handle to a DM list, holding one BYOND reference.
+///
+/// Not `Send`. `List::from_value` and `Value::as_list` accept any value that
+/// BYOND's `islist()` accepts, including `/alist` on BYOND 516 and later, and
+/// return `Err` for everything else.
+///
+/// `get` and `set` follow DM's `L[x]` indexing rules: numbers are 1-based
+/// positions and other values are associative keys, except in an `/alist` where
+/// numbers are keys as well. `get` and `set` return `Err` if BYOND raises a
+/// runtime error, while `append`, `remove`, `len`, and `is_list` panic instead.
 pub struct List {
 	value: Value
 }
@@ -11,22 +19,25 @@ pub struct List {
 impl List {
 	pub fn from_value(val: &Value) -> DMResult<Self> {
 		if !Self::is_list(val) {
-			return Err(runtime!("attempted to create List from non-list value"));
+			return Err(runtime!("cannot create List from a non-list value"));
 		}
 
 		Ok(Self { value: val.clone() })
 	}
 
-	/// Creates a new empty list.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Creates a new list filled with `capacity` nulls.
-	pub fn with_size(capacity: u32) -> Self {
+	/// Creates a new DM list of `len` elements, each initialized to `null`.
+	///
+	/// # Panics
+	///
+	/// Panics if BYOND fails to allocate the list.
+	pub fn with_size(len: u32) -> Self {
 		let mut id: raw_types::lists::ListId = raw_types::lists::ListId(0);
 		unsafe {
-			assert_eq!(raw_types::funcs::create_list(&mut id, capacity), 1);
+			assert_eq!(raw_types::funcs::create_list(&mut id, len), 1);
 		}
 
 		let raw = raw_types::values::Value {
@@ -46,13 +57,12 @@ impl List {
 			data: raw_types::values::ValueData { id: 0 }
 		};
 
-		// assoc funcs for everything else
 		unsafe {
 			if raw_types::funcs::get_assoc_element(&mut value, self.value.raw, index.raw) == 1 {
 				return Ok(Value::from_raw_owned(value));
 			}
 
-			Err(runtime!("failed to get assoc list entry (probably given an invalid list or key)"))
+			Err(runtime!("could not read list entry (invalid list, index, or key)"))
 		}
 	}
 
@@ -65,7 +75,7 @@ impl List {
 				return Ok(());
 			}
 
-			Err(runtime!("failed to set assoc list entry (probably given an invalid list or key)"))
+			Err(runtime!("could not write list entry (invalid list, index, or key)"))
 		}
 	}
 
@@ -97,40 +107,38 @@ impl List {
 		self.len() == 0
 	}
 
-	/// Whether this is a DM `/alist`, where numbers are keys and not positions.
 	pub fn is_alist(&self) -> bool {
 		self.value.raw.tag == raw_types::values::ValueTag::Alist
 	}
 
-	/// Every key and value of an `/alist`, in the order `for (var/k in A)`
-	/// gives them.
+	/// Returns all `(key, value)` pairs of an `/alist` in the same order as
+	/// `for (var/k in A)`.
 	///
-	/// This is a copy, so nothing here points into BYOND's tree once it
-	/// returns.
+	/// Each returned `Value` holds its own BYOND reference.
+	///
+	/// # Errors
+	///
+	/// Returns an error if this list is not an `/alist` (always the case before
+	/// BYOND 516).
 	pub fn alist_pairs(&self) -> DMResult<Vec<(Value, Value)>> {
 		if !self.is_alist() {
-			return Err(runtime!("attempted to read alist pairs of a non-alist"));
+			return Err(runtime!("cannot read alist pairs from a non-alist value"));
 		}
 
 		let id = unsafe { self.value.raw.data.id } as usize;
 		let record = unsafe {
-			// raw reads of BYOND's table, so a stale id has to be turned away
-			// here
 			if id >= *raw_types::funcs::ALIST_TABLE_COUNT as usize {
-				return Err(runtime!("alist id {} is outside the alist table", id));
+				return Err(runtime!("alist ID {} is outside the alist table", id));
 			}
-			// BYOND reallocates the table as it grows, so read the pointer
-			// every time
 			*(*raw_types::funcs::ALIST_TABLE).add(id)
 		};
 		if record.is_null() {
-			return Err(runtime!("alist id {} has no record", id));
+			return Err(runtime!("alist ID {} has no record", id));
 		}
 
 		let mut pairs = vec![];
 		let mut node = unsafe { (*record).root };
 		let mut pending = vec![];
-		// left, node, right, without recursing
 		while !node.is_null() || !pending.is_empty() {
 			while !node.is_null() {
 				pending.push(node);
@@ -146,10 +154,14 @@ impl List {
 		Ok(pairs)
 	}
 
-	/// Whether DM's `islist()` says yes to this value.
+	/// Returns `true` if BYOND's `islist()` accepts `value`.
 	///
-	/// This asks BYOND instead of matching on the tag, because a tag can't
-	/// answer it: a `filters` list and a single filter share one.
+	/// Queries BYOND directly because a `filters` list and a single filter
+	/// share the same raw value tag. A pointer to a list returns `false`.
+	///
+	/// # Panics
+	///
+	/// Panics if the call into BYOND fails.
 	pub fn is_list(value: &Value) -> bool {
 		let mut is_list: u8 = 0;
 		unsafe {

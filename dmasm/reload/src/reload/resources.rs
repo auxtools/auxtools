@@ -1,0 +1,224 @@
+use std::collections::HashMap;
+
+use dreammaker::ast::Term;
+use dreammaker::constants::Constant;
+use dreammaker::objtree::TypeRef;
+use dreammaker::FileId;
+
+use crate::diagnostic::{Diagnostic, Id};
+use crate::syntax;
+
+use super::{
+    default_value, inits, is_builtin, Changes, ConstValue, InitProc, ProcKey, ProcReload, Refusal,
+    Snapshot, VarDefault, BUILTIN_VARS,
+};
+
+#[derive(Debug, Default)]
+pub(super) struct Users {
+    procs: Vec<ProcKey>,
+    defaults: Vec<(String, String)>,
+    inits: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Index(HashMap<String, Users>);
+
+fn normalized(name: &str) -> String {
+    name.replace('\\', "/").to_ascii_lowercase()
+}
+
+impl Index {
+    pub(super) fn build(snapshot: &Snapshot) -> Index {
+        let mut index = Index::default();
+        let mut names = vec![];
+        for key in snapshot.procs.keys() {
+            let Some((_, value)) = snapshot.find(key) else {
+                continue;
+            };
+            names.clear();
+            syntax::walk_proc(value, &mut |node| {
+                if let syntax::Node::Term(Term::Resource(name)) = node {
+                    names.push(normalized(name));
+                }
+            });
+            names.sort();
+            names.dedup();
+            for name in names.drain(..) {
+                index.0.entry(name).or_default().procs.push(key.clone());
+            }
+        }
+        for ty in snapshot.tree.iter_types() {
+            for (var, value) in ty.get().vars.iter() {
+                if value.value.location.file == FileId::BUILTINS {
+                    continue;
+                }
+                names.clear();
+                if let Some(expression) = &value.value.expression {
+                    syntax::walk_expression(expression, &mut |node| {
+                        if let syntax::Node::Term(Term::Resource(name)) = node {
+                            names.push(normalized(name));
+                        }
+                    });
+                }
+                if let Some(constant) = &value.value.constant {
+                    syntax::walk_constant(constant, &mut |constant| {
+                        if let Constant::Resource(name) = constant {
+                            names.push(normalized(name));
+                        }
+                    });
+                }
+                names.sort();
+                names.dedup();
+                for name in names.drain(..) {
+                    let users = index.0.entry(name).or_default();
+                    match default_value(ty, var) {
+                        Some(Some(_)) => users
+                            .defaults
+                            .push((ty.get().path.clone(), var.to_string())),
+                        _ => users.inits.push(ty.get().path.clone()),
+                    }
+                }
+            }
+        }
+        index
+    }
+}
+
+impl Snapshot {
+    pub fn resource_users(&self, names: &[String]) -> Changes {
+        let index = self.resource_index.get_or_init(|| Index::build(self));
+        let mut changes = Changes::default();
+        let mut procs: Vec<&ProcKey> = vec![];
+        let mut defaults: Vec<(&str, &str)> = vec![];
+        let mut init_types: Vec<&str> = vec![];
+        for name in names {
+            let Some(users) = index.0.get(&normalized(name)) else {
+                continue;
+            };
+            procs.extend(&users.procs);
+            defaults.extend(users.defaults.iter().map(|(t, v)| (t.as_str(), v.as_str())));
+            init_types.extend(users.inits.iter().map(String::as_str));
+        }
+        procs.sort();
+        procs.dedup();
+        defaults.sort();
+        defaults.dedup();
+
+        let wanted: Vec<String> = names.iter().map(|name| normalized(name)).collect();
+        let names_one = |expression: &dreammaker::ast::Expression| {
+            let mut found = false;
+            syntax::walk_expression(expression, &mut |node| {
+                found |= matches!(node, syntax::Node::Term(Term::Resource(name))
+                    if wanted.contains(&normalized(name)));
+            });
+            found
+        };
+        for key in procs {
+            let reload = self.compile_code(key).and_then(|mut reload| {
+                self.compile_in_lists(key, &mut reload, |_, list| names_one(list))?;
+                Ok(reload)
+            });
+            match reload {
+                Ok(reload) => changes.plan.reloads.push(ProcReload {
+                    proc: key.clone(),
+                    ..reload
+                }),
+                Err(e) => changes.refused.push(self.uncompiled(key, &e)),
+            }
+        }
+
+        for (path, var) in defaults {
+            let Some(ty) = self.find_type(path) else {
+                continue;
+            };
+            self.resource_default(ty, var, &mut changes);
+        }
+
+        let mut memo = HashMap::new();
+        for ty in self.tree.iter_types() {
+            if ty.is_root() {
+                continue;
+            }
+            let list = inits(ty, &mut memo).to_vec();
+            if !list
+                .iter()
+                .any(|init| init_types.contains(&init.on.as_str()))
+            {
+                continue;
+            }
+            match self.compile_init(ty, &list) {
+                Ok(code) => changes.plan.init_procs.push(InitProc {
+                    type_path: ty.get().path.clone(),
+                    code: Some(code),
+                }),
+                Err(e) => changes.refused.push(
+                    Refusal::new(
+                        Id::InitializerFailed,
+                        ty.get().path.clone(),
+                        format!("failed to compile initializer: {e}"),
+                    )
+                    .at(self, self.type_location(ty)),
+                ),
+            }
+        }
+        changes.collect_warnings();
+        changes
+    }
+
+    fn resource_default(&self, ty: TypeRef, var: &str, changes: &mut Changes) {
+        let shown = if ty.is_root() {
+            "(global)"
+        } else {
+            ty.get().path.as_str()
+        };
+        let Some(declaration) = ty.get_var_declaration(var) else {
+            return;
+        };
+        let flags = declaration.get().var_type.flags;
+        if ty.is_root() || flags.is_static() {
+            return;
+        }
+        if flags.is_const() {
+            changes.warnings.push(
+                Diagnostic::warning(
+                    Id::ConstUsesEditedResource,
+                    format!("`const` variable `{var}` references the edited resource, so compiled uses retain the old file until a rebuild"),
+                )
+                .about(shown),
+            );
+            return;
+        }
+        let Some(Some(value @ ConstValue::Resource(_))) = default_value(ty, var) else {
+            return;
+        };
+        let mut types = vec![];
+        for sub in self.tree.iter_types() {
+            let mut at = sub;
+            loop {
+                if at.index() == ty.index() {
+                    types.push(sub.get().path.clone());
+                    break;
+                }
+                if at.get().vars.contains_key(var) {
+                    break;
+                }
+                match at.parent_type() {
+                    Some(parent) => at = parent,
+                    None => break,
+                }
+            }
+        }
+        let default = VarDefault {
+            var: var.to_owned(),
+            value,
+            types,
+        };
+        if is_builtin(ty, var) {
+            if BUILTIN_VARS.contains(&var) {
+                changes.plan.builtin_defaults.push(default);
+            }
+        } else {
+            changes.plan.var_defaults.push(default);
+        }
+    }
+}

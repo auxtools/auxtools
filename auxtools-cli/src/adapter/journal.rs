@@ -1,19 +1,11 @@
-//! Journal events observed by the launcher: reload results, including compile
-//! errors, and output from launched worlds. Attached sessions subscribe to
-//! reload reports from other launchers.
-
 use std::sync::mpsc::RecvTimeoutError;
 
 use super::*;
 
-/// Batch world output for this interval to reduce message traffic.
 const OUTPUT_BATCH: Duration = Duration::from_millis(250);
-/// The most lines a message has
 const OUTPUT_BATCH_LINES: usize = 200;
-/// Maximum output lines buffered while disconnected during load or reboot.
 const OUTPUT_WAITING: usize = 2000;
 
-/// Gathers the lines sent to it and passes them on as `Input::WorldOutput`
 pub(super) fn batch_output(inputs: mpsc::Sender<Input>) -> mpsc::Sender<String> {
 	let (lines, receiver) = mpsc::channel::<String>();
 	std::thread::Builder::new()
@@ -50,12 +42,11 @@ pub(super) fn batch_output(inputs: mpsc::Sender<Input>) -> mpsc::Sender<String> 
 				}
 			}
 		})
-		.expect("couldn't start a thread");
+		.expect("could not start a thread");
 	lines
 }
 
 impl Adapter {
-	/// Journal world output, or buffer it until connected.
 	pub(super) fn journal_output(&mut self, lines: Vec<String>) {
 		self.waiting_output.extend(lines);
 		let extra = self.waiting_output.len().saturating_sub(OUTPUT_WAITING);
@@ -63,7 +54,6 @@ impl Adapter {
 		self.send_output();
 	}
 
-	/// Sends the world's record the output that's waiting, if it's connected
 	pub(super) fn send_output(&mut self) {
 		if self.waiting_output.is_empty() {
 			return;
@@ -75,8 +65,18 @@ impl Adapter {
 		let _ = debuggee.send(&AuxRequest::JournalAdd(aux::JournalEvent::Output { lines }));
 	}
 
-	/// What came of a hot reload, for the world's record
 	pub(super) fn journal_reload(&mut self, applied: bool, summary: String, errors: Vec<String>, warnings: Vec<String>) {
+		self.journal_reload_failures(applied, summary, errors, warnings, vec![]);
+	}
+
+	pub(super) fn journal_reload_failures(
+		&mut self,
+		applied: bool,
+		summary: String,
+		errors: Vec<String>,
+		warnings: Vec<String>,
+		failures: Vec<String>
+	) {
 		let Some(debuggee) = &mut self.debuggee else {
 			return;
 		};
@@ -84,14 +84,13 @@ impl Adapter {
 			applied,
 			summary,
 			errors,
-			warnings
+			warnings,
+			failures
 		}));
 	}
 
-	/// Subscribe to reload reports from other clients so attached sessions
-	/// can display them.
 	pub(super) fn follow_reloads(&mut self) {
-		if self.game.is_some() {
+		if self.world.game.is_some() {
 			return;
 		}
 		let _ = self.request(&AuxRequest::Journal {
@@ -103,15 +102,29 @@ impl Adapter {
 	}
 }
 
-/// Display another launcher's reload result, errors and warnings.
 pub fn reload_by_another(entry: &aux::JournalEntry) -> Option<String> {
 	let aux::JournalEvent::Reload {
-		summary, errors, warnings, ..
+		summary,
+		errors,
+		warnings,
+		failures,
+		..
 	} = &entry.event
 	else {
 		return None;
 	};
-	let mut text = format!("Hot reload (by another launcher): {}", summary);
+	let mut text = if failures.is_empty() {
+		format!("Hot reload from another session: {}", summary)
+	} else {
+		format!(
+			"Hot reload partially applied by another session: {}. {}",
+			summary,
+			auxtools_cli::reload::RESTART
+		)
+	};
+	for f in failures {
+		text += &format!("\n    failed: {}", f);
+	}
 	for e in errors {
 		text += &format!("\n    {}", e);
 	}

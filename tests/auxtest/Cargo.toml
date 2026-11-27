@@ -1,5 +1,6 @@
 [package]
 name = "auxtest"
+description = "Test library loaded by the auxtest_host world under test_runner to exercise the auxtools crate API inside BYOND"
 version = "0.1.0"
 authors = ["Sophie Wallace <sophie@wiox.me>"]
 edition = "2018"
@@ -10,6 +11,3 @@ crate-type = ["cdylib"]
 
 [dependencies]
 auxtools = { path = "../../auxtools" }
-
-[dev-dependencies]
-test-cdylib = "1"

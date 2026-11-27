@@ -1,20 +1,14 @@
-//! Remap breakpoint lines after source edits.
+use std::collections::HashMap;
 
-/// Map old source lines to new source lines.
 pub struct LineMap {
-	/// Zero-based new line index for each old line.
 	to: Vec<u32>,
 	new_len: u32
 }
 
-/// Maximum old-line count × new-line count for detailed matching.
-/// Larger changed regions use positional mapping.
 const MOST_CELLS: usize = 4_000_000;
 
 impl LineMap {
 	pub fn new(old: &[String], new: &[String]) -> Self {
-		// Trim unchanged prefixes and suffixes before matching the edited
-		// region.
 		let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
 		let suffix = old[prefix..]
 			.iter()
@@ -24,18 +18,14 @@ impl LineMap {
 			.count();
 		let (old_mid, new_mid) = (&old[prefix..old.len() - suffix], &new[prefix..new.len() - suffix]);
 
-		// Map changed runs between matching lines by relative position,
-		// clamping to the replacement's last line. Deleted runs map to the next
-		// surviving line.
 		let matches = matching_lines(old_mid, new_mid);
 		let mut mid = vec![0u32; old_mid.len()];
 		let mut i = 0;
-		// Where the new lines of the run being looked at start
-		let mut run_new = 0;
+		let mut run_new_start = 0;
 		while i < old_mid.len() {
 			if let Some(j) = matches[i] {
 				mid[i] = (prefix + j) as u32;
-				run_new = j + 1;
+				run_new_start = j + 1;
 				i += 1;
 				continue;
 			}
@@ -44,10 +34,26 @@ impl LineMap {
 				i += 1;
 			}
 			let run_new_end = if i < old_mid.len() { matches[i].unwrap() } else { new_mid.len() };
-			let in_place = run_new_end - run_new;
+			let in_place = run_new_end - run_new_start;
+			let reindented = reindented_lines(&old_mid[run_old..i], &new_mid[run_new_start..run_new_end]);
 			for (n, line) in mid[run_old..i].iter_mut().enumerate() {
-				let within = if in_place == 0 { 0 } else { n.min(in_place - 1) };
-				*line = (prefix + run_new + within) as u32;
+				let within = reindented[n].unwrap_or(if in_place == 0 { 0 } else { n.min(in_place - 1) });
+				*line = (prefix + run_new_start + within) as u32;
+			}
+		}
+		let (old_unique, new_unique) = (unique_lines(old.iter().map(String::as_str)), unique_lines(new.iter().map(String::as_str)));
+		let (old_trimmed, new_trimmed) = (
+			unique_lines(old.iter().map(|line| line.trim())),
+			unique_lines(new.iter().map(|line| line.trim()))
+		);
+		for (i, text) in old_mid.iter().enumerate() {
+			if matches[i].is_some() {
+				continue;
+			}
+			let trimmed = Some(text.trim()).filter(|text| !text.is_empty());
+			let now = moved_to(&old_unique, &new_unique, text, prefix + i).or_else(|| moved_to(&old_trimmed, &new_trimmed, trimmed?, prefix + i));
+			if let Some(now) = now {
+				mid[i] = now as u32;
 			}
 		}
 
@@ -62,31 +68,24 @@ impl LineMap {
 		}
 	}
 
-	/// Map a one-based old line to its new position. Changed lines map to their
-	/// replacement; deleted lines map to the next surviving line.
 	pub fn line(&self, old: u32) -> u32 {
 		let last = self.new_len.max(1);
-		// An empty file has nothing to go by: the line is where it was, if
-		// the new text has it
 		if self.to.is_empty() {
 			return old.clamp(1, last);
 		}
 		match self.to.get(old.saturating_sub(1) as usize) {
 			Some(new) => (new + 1).min(last),
-			// Past the end of the old text: as far past the end of the new
 			None => old.saturating_sub(self.to.len() as u32) + self.new_len
 		}
 	}
 }
 
-/// Find matching lines using the longest common subsequence.
 fn matching_lines(old: &[String], new: &[String]) -> Vec<Option<usize>> {
 	let mut matches = vec![None; old.len()];
 	if old.is_empty() || new.is_empty() || old.len() * new.len() > MOST_CELLS {
 		return matches;
 	}
 
-	// common[i][j]: how many lines old[i..] and new[j..] have in common
 	let width = new.len() + 1;
 	let mut common = vec![0u32; (old.len() + 1) * width];
 	for i in (0..old.len()).rev() {
@@ -114,7 +113,32 @@ fn matching_lines(old: &[String], new: &[String]) -> Vec<Option<usize>> {
 	matches
 }
 
-/// A file's lines, if it can be read
+fn unique_lines<'a>(lines: impl Iterator<Item = &'a str>) -> HashMap<&'a str, Option<usize>> {
+	let mut found = HashMap::new();
+	for (i, line) in lines.enumerate() {
+		found.entry(line).and_modify(|at| *at = None).or_insert(Some(i));
+	}
+	found
+}
+
+fn moved_to(old: &HashMap<&str, Option<usize>>, new: &HashMap<&str, Option<usize>>, text: &str, at: usize) -> Option<usize> {
+	(old.get(text) == Some(&Some(at))).then(|| new.get(text).copied().flatten()).flatten()
+}
+
+fn reindented_lines(old: &[String], new: &[String]) -> Vec<Option<usize>> {
+	let (old_unique, new_unique) = (
+		unique_lines(old.iter().map(|line| line.trim())),
+		unique_lines(new.iter().map(|line| line.trim()))
+	);
+	(old.iter().enumerate())
+		.map(|(i, line)| {
+			let text = line.trim();
+			let unique = !text.is_empty() && old_unique.get(text) == Some(&Some(i));
+			new_unique.get(text).copied().flatten().filter(|_| unique)
+		})
+		.collect()
+}
+
 pub fn read(path: &str) -> Option<Vec<String>> {
 	let text = std::fs::read_to_string(path).ok()?;
 	Some(text.lines().map(str::to_owned).collect())
@@ -150,7 +174,6 @@ mod tests {
 	fn lines_taken_away_above_pull_the_rest_up() {
 		let new = "/proc/b()\n\tvar/x = 1\n\treturn x\n";
 		assert_eq!(moved(OLD, new, &[4, 5, 6]), [1, 2, 3]);
-		// What was taken away is where the next line left is
 		assert_eq!(moved(OLD, new, &[1, 2, 3]), [1, 1, 1]);
 	}
 
@@ -170,10 +193,8 @@ mod tests {
 
 	#[test]
 	fn lines_written_in_place_of_others_take_them_in_order() {
-		// Two lines for three: the third is on the second
 		let new = "/proc/a()\n\treturn 1\n\n/proc/c()\n\treturn 2\n";
 		assert_eq!(moved(OLD, new, &[3, 4, 5, 6]), [3, 4, 5, 5]);
-		// Three lines for one: it's on the first
 		let new = "/proc/a()\n\tvar/y = 1\n\ty += 1\n\treturn y\n\n/proc/b()\n\tvar/x = 1\n\treturn x\n";
 		assert_eq!(moved(OLD, new, &[2, 3, 4]), [2, 5, 6]);
 	}
@@ -182,8 +203,38 @@ mod tests {
 	fn lines_swapped_around_are_matched_where_they_can_be() {
 		let old = "a\nb\nc\nd\ne\n";
 		let new = "a\nd\nb\nc\ne\n";
-		// b and c kept their order, d moved past them
 		assert_eq!(moved(old, new, &[1, 2, 3, 5]), [1, 3, 4, 5]);
+	}
+
+	#[test]
+	fn lines_moved_past_others_go_with_their_text() {
+		assert_eq!(moved("a\nb\nc\nd\n", "a\nc\nb\nd\n", &[2, 3]), [3, 2]);
+		assert_eq!(moved("a\nb\nc\nd\ne\n", "a\nd\nb\nc\ne\n", &[4]), [2]);
+	}
+
+	#[test]
+	fn a_statement_put_in_a_block_goes_with_its_text() {
+		let old = "/proc/f()\n\tdo_work()\n\treturn\n";
+		let new = "/proc/f()\n\tif (enabled)\n\t\tdo_work()\n\treturn\n";
+		assert_eq!(moved(old, new, &[2, 3]), [3, 4]);
+		assert_eq!(moved(new, old, &[2, 3, 4]), [2, 2, 3]);
+		let trimmed = "/proc/f()\n\tif (enabled)\n\t\tdo_work()\n\treturn\n";
+		assert_eq!(moved("/proc/f()\n\tdo_work()  \n\treturn\n", trimmed, &[2, 3]), [3, 4]);
+	}
+
+	#[test]
+	fn a_statement_moved_into_the_next_block_goes_with_its_text() {
+		let old = "/proc/f()\n\tnotify()\n\tif (ready)\n\t\tdo_work()\n\treturn\n";
+		let new = "/proc/f()\n\tif (ready)\n\t\tdo_work()\n\t\tnotify()\n\treturn\n";
+		assert_eq!(moved(old, new, &[2, 3, 4, 5]), [4, 2, 3, 5]);
+		assert_eq!(moved(new, old, &[2, 3, 4, 5]), [3, 4, 2, 5]);
+	}
+
+	#[test]
+	fn a_reindented_statement_with_a_twin_in_the_block_is_placed_in_order() {
+		let old = "/proc/f()\n\tdo_work()\n\tdo_work()\n";
+		let new = "/proc/f()\n\tif (enabled)\n\t\tdo_work()\n\t\tdo_work()\n";
+		assert_eq!(moved(old, new, &[2, 3]), [2, 3]);
 	}
 
 	#[test]
@@ -209,7 +260,6 @@ mod tests {
 		let new: String = (0..3000).map(|i| format!("new {}\n", i)).collect();
 		let old = format!("first\n{}last\n", old);
 		let new = format!("first\n{}more\nlast\n", new);
-		// Too much changed to match up: its lines keep their order
 		assert_eq!(moved(&old, &new, &[1, 2, 100, 3002]), [1, 2, 100, 3003]);
 	}
 }

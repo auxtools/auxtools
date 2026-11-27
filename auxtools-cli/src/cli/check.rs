@@ -1,5 +1,3 @@
-//! Check project source for known BYOND bugs.
-
 use std::path::{Path, PathBuf};
 
 use dmasm::{
@@ -11,10 +9,8 @@ use serde_json::json;
 use super::{args, Failure, Result};
 use crate::code::parse_define;
 
-/// Exit code for known BYOND bug findings.
 pub const FOUND: i32 = 5;
 
-/// Format proc overrides with the standard `#N` suffix.
 fn proc_name(proc: &ProcKey) -> String {
 	match proc.override_id {
 		0 => proc.path.clone(),
@@ -22,17 +18,16 @@ fn proc_name(proc: &ProcKey) -> String {
 	}
 }
 
-/// Find the only `.dme` in the current directory.
 fn only_dme() -> Result<PathBuf> {
 	let mut found: Vec<PathBuf> = std::fs::read_dir(".")
-		.map_err(|e| format!("cannot read the current directory: {}.", e))?
+		.map_err(|e| format!("cannot read current directory: {}", e))?
 		.filter_map(|entry| Some(entry.ok()?.path()))
 		.filter(|path| path.extension().is_some_and(|extension| extension == "dme"))
 		.collect();
 	match found.len() {
 		1 => Ok(found.remove(0)),
-		0 => Err("no .dme in the current directory: specify DME.".into()),
-		_ => Err("more than one .dme in the current directory: specify DME.".into())
+		0 => Err("no .dme file found in the current directory. Specify DME.".into()),
+		_ => Err("multiple .dme files found in the current directory. Specify DME.".into())
 	}
 }
 
@@ -48,13 +43,12 @@ pub fn check(args: &args::Check) -> Result<()> {
 		Some(dme) => dme.clone(),
 		None => only_dme()?
 	};
-	let dme = std::path::absolute(&dme).map_err(|e| format!("invalid path {}: {}.", dme.display(), e))?;
+	let dme = std::path::absolute(&dme).map_err(|e| format!("invalid path {}: {}", dme.display(), e))?;
 	if !dme.is_file() {
-		return Err(format!("{} does not exist.", dme.display()).into());
+		return Err(format!("{} does not exist", dme.display()).into());
 	}
-	// Match DreamMaker's working directory and report relative paths.
 	let dir = dme.parent().unwrap_or(Path::new("."));
-	std::env::set_current_dir(dir).map_err(|e| format!("cannot enter {}: {}.", dir.display(), e))?;
+	std::env::set_current_dir(dir).map_err(|e| format!("cannot enter directory {}: {}", dir.display(), e))?;
 	let name = PathBuf::from(dme.file_name().unwrap_or_default());
 
 	let latest = ByondVersion::LATEST;
@@ -63,12 +57,11 @@ pub fn check(args: &args::Check) -> Result<()> {
 		defines: args.defines.iter().map(|define| parse_define(define)).collect(),
 		byond: Some((major, build))
 	};
-	// Compilation panics are reported as unchecked procs.
 	std::panic::set_hook(Box::new(|_| {}));
-	let mut snapshot = Snapshot::parse(&name, &options).map_err(|e| format!("{}.", e))?;
+	let mut snapshot = Snapshot::parse(&name, &options).map_err(|e| format!("{}", e))?;
 	snapshot.set_byond(ByondVersion::new(major, build));
 
-	let unread: Vec<String> = snapshot.parse_errors().into_iter().map(|(_, error)| error).collect();
+	let unread: Vec<String> = snapshot.parse_errors().iter().map(ToString::to_string).collect();
 	let found = snapshot.known_bugs();
 	let procs = snapshot.procs().count() - found.not_checked.len();
 
@@ -79,6 +72,7 @@ pub fn check(args: &args::Check) -> Result<()> {
 				"byond": format!("{}.{}", major, build),
 				"procs": procs,
 				"found": found.bugs.iter().map(|bug| json!({
+					"id": bug.id,
 					"file": bug.file,
 					"line": bug.line,
 					"proc": bug.proc.path,
@@ -112,7 +106,7 @@ pub fn check(args: &args::Check) -> Result<()> {
 	let mut summary = format!(
 		"{} found in {} for BYOND {}.{}",
 		match found.bugs.len() {
-			0 => "nothing".to_owned(),
+			0 => "no issues".to_owned(),
 			n => counted(n, "issue", "issues")
 		},
 		counted(procs, "proc", "procs"),
@@ -120,13 +114,13 @@ pub fn check(args: &args::Check) -> Result<()> {
 		build
 	);
 	if !found.not_checked.is_empty() {
-		summary += &format!("; {} not checked", counted(found.not_checked.len(), "proc", "procs"));
+		summary += &format!(", {} not checked", counted(found.not_checked.len(), "proc", "procs"));
 	}
 	if !unread.is_empty() {
-		summary += &format!("; {}", counted(unread.len(), "parse error", "parse errors"));
+		summary += &format!(", {}", counted(unread.len(), "parse error", "parse errors"));
 	}
 	if !found.bugs.is_empty() {
-		return Err(Failure(FOUND, format!("{}.", summary)));
+		return Err(Failure(FOUND, format!("{}", summary)));
 	}
 	if !args.json {
 		say!("{}", summary);

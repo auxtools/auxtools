@@ -1,15 +1,12 @@
 [package]
 name = "auxtools"
-description = "library for interfacing with low-level BYOND internals"
+description = "Rust library for building native BYOND extensions with DM proc hooks, BYOND values, and bytecode replacement"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.88"
 repository.workspace = true
 license.workspace = true
-
-[lib]
-crate-type = ["lib", "cdylib"]
 
 [build-dependencies]
 cc = "1.0"

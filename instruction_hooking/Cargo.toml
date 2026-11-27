@@ -1,17 +1,17 @@
 [package]
 name = "instruction_hooking"
+description = "InstructionHook trait and disassembler environment for debug_server to intercept bytecode instructions before BYOND executes them"
 version = "1.0.0"
 authors = ["Sophie Wallace <sophie@wiox.me>", "Jordan Dominion <Cyberboss@users.noreply.github.com>"]
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-license.workspace = true
+license = "GPL-3.0"
 
 [dependencies]
 auxtools = { path = "../auxtools" }
-dmasm = { workspace = true }
-retour = { workspace = true }
+dmasm-bytecode = { path = "../dmasm/bytecode" }
 
 [lints]
 workspace = true

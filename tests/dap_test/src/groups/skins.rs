@@ -1,17 +1,13 @@
-//! Skin edits, reboot restoration and changed .dme includes, inspected with
-//! `#skin`.
-
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use serde_json::json;
 
-use crate::{ok, paths, paths::ByondCommand, world::World};
+use crate::{ok, paths, world::World};
 
 const SKIN: &str = "macro \"default\"\n\telem \"k_f\"\n\t\tname = \"F\"\n\t\tcommand = \"say \\\"f\\\"\"\n\nwindow \"mainwindow\"\n\telem \
                     \"mainwindow\"\n\t\ttype = MAIN\n\t\tsize = 640x480\n\t\tis-default = true\n\t\ttitle = \"first\"\n\telem \"label\"\n\t\ttype = \
                     LABEL\n\t\tpos = 0,0\n\t\tsize = 100x20\n\t\timage = 'built.png'\n";
 
-/// The skin's resource and text, as `#skin` gives them
 fn skin(world: &mut World) -> (String, String) {
 	let shown = world.eval_global("#skin");
 	let (resource, text) = shown.split_once('\n').unwrap_or((&shown, ""));
@@ -24,14 +20,14 @@ fn text_of(dir: &Path, file: &str) -> String {
 }
 
 pub fn run() {
-	let dir = super::reloading::long_name(super::reloading::copy_of_the_world("skins"));
+	let copy = super::reloading::copy_of_the_world("skins");
+	let dir = super::reloading::long_name(copy.to_path_buf());
 	std::fs::write(dir.join("skin.dmf"), SKIN).unwrap();
 	std::fs::write(dir.join("built.png"), b"\x89PNG\r\n\x1a\n").unwrap();
 	let dme = dir.join("dap_test_host.dme");
 	let source = std::fs::read_to_string(&dme).unwrap();
 	std::fs::write(&dme, source + "#include \"skin.dmf\"\n").unwrap();
-	let built = Command::new(paths::find_dm()).with_byond_paths().arg(&dme).status().unwrap();
-	assert!(built.success(), "dreammaker build failed");
+	paths::compile(&dme);
 
 	let mut world = World::launch_in(dir.clone(), json!({ "hotReload": true }));
 	world.catch_runtimes(false);
@@ -41,8 +37,6 @@ pub fn run() {
 	assert_eq!(text, SKIN);
 	ok("built skin");
 
-	// The idle-world waker connects without logging in. Its client has no
-	// key and must not receive winset() calls.
 	let port: u16 = world.eval_global("world.port").parse().unwrap();
 	let _waker = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
 	let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -72,11 +66,9 @@ pub fn run() {
 	world.run("reboot");
 	world.wait_count("dap: world/New", 2);
 	world.reloaded("skin skin.dmf");
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	let (_, text) = skin(&mut world);
 	assert_eq!(text, text_of(&dir, "skin.dmf"));
-	// Skin changes must not enter resource reloads and defer code until
-	// world/New.
 	assert!(
 		!world.output.contains("reloaded skin.dmf") && !world.output.contains("doesn't have (skin.dmf)"),
 		"the skin was reloaded as a resource file:\n{}",
@@ -96,5 +88,4 @@ pub fn run() {
 	ok("last included skin");
 
 	world.end();
-	let _ = std::fs::remove_dir_all(&dir);
 }

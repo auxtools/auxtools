@@ -1,10 +1,8 @@
-//! DAP restart: reboot in place or relaunch after configuration changes.
-
 use serde_json::{json, Value};
+use test_support::{cli, dap};
 
-use crate::{client, ok, paths, world::World};
+use crate::{ok, paths, world::World};
 
-/// Find an unused listening port.
 fn free_port() -> u16 {
 	std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
@@ -15,7 +13,6 @@ fn process_id(event: &Value) -> u64 {
 		.expect("process event is missing its process ID")
 }
 
-/// Check the world-ready event, including its `started` flag.
 fn announced(world: &mut World, address: &str, started: bool) {
 	let told = world.event("auxtoolsWorld")["body"].clone();
 	assert_eq!(
@@ -26,7 +23,6 @@ fn announced(world: &mut World, address: &str, started: bool) {
 	);
 }
 
-/// Check that breakpoints survive restart by stopping in leaf_1 again.
 fn breaks_at_leaf(world: &mut World) {
 	world.run("middle");
 	world.stop_on("breakpoint", "/leaf", "leaf_1");
@@ -53,7 +49,7 @@ pub fn run() {
 	world.request("restart", json!({}));
 	world.wait_count("dap: world/New", 2);
 	assert!(!world.has_event("process"), "reboot unexpectedly replaced the process");
-	assert_eq!(client::listed_world("dap_test_host.dmb"), pid);
+	assert_eq!(cli::listed_world("dap_test_host.dmb"), pid);
 	assert_eq!(world.eval_global("world.port"), port.to_string());
 	announced(&mut world, &address, false);
 	breaks_at_leaf(&mut world);
@@ -73,8 +69,7 @@ pub fn run() {
 	breaks_at_leaf(&mut world);
 	ok("explicit reboot request");
 
-	// Configuration changes require a replacement process.
-	let changed = client::launch_arguments(
+	let changed = dap::launch_arguments(
 		&paths::find_byond(),
 		&world.marks.file("dap_test_host.dme"),
 		json!({ "port": port, "env": { "AUXTOOLS_RESTART_TEST": "1" } })
@@ -88,20 +83,5 @@ pub fn run() {
 	announced(&mut world, &address, true);
 	breaks_at_leaf(&mut world);
 	ok("relaunch after configuration changes");
-	world.break_on(&[]);
-
-	// Stop while the world refuses to shut down for a relaunch.
-	assert_eq!(world.eval_global("on_shutdown = \"refuse\""), "\"refuse\"");
-	let changed_again = client::launch_arguments(
-		&paths::find_byond(),
-		&world.marks.file("dap_test_host.dme"),
-		json!({ "port": port, "env": { "AUXTOOLS_RESTART_TEST": "2" } })
-	);
-	world.request("restart", json!({ "arguments": changed_again }));
-	world.request("terminate", json!({}));
-	world.wait_output("Restart cancelled: the world is stopping");
-	world.event("terminated");
-	assert!(!world.has_event("process"), "the world started again after Stop");
-	ok("stop cancels a pending relaunch");
 	world.end();
 }

@@ -1,14 +1,15 @@
-//! Bytecode: the disassembly of the code a frame runs, old code included
-
 use serde_json::{json, Value};
+use test_support::cli;
 
 use crate::{
-	groups::reloading::{copy_of_the_world, edit},
+	groups::{
+		logpoints::logged,
+		reloading::{copy_of_the_world, edit}
+	},
 	ok,
 	world::World
 };
 
-/// An address as the launcher writes it
 fn address(text: &Value) -> u64 {
 	let text = text.as_str().unwrap_or_else(|| panic!("{} isn't an address", text));
 	u64::from_str_radix(text.strip_prefix("0x").unwrap(), 16).unwrap()
@@ -18,10 +19,8 @@ fn hex(address: u64) -> String {
 	format!("0x{:016X}", address)
 }
 
-/// The proc and which of its codes an address is in, as an address
 const CODE: u64 = !0xFFFF;
 
-/// `count` instructions from `shift` on from the one at `reference`
 fn disassemble(world: &mut World, reference: u64, shift: i64, count: i64) -> Vec<Value> {
 	let answer = world.request(
 		"disassemble",
@@ -30,12 +29,10 @@ fn disassemble(world: &mut World, reference: u64, shift: i64, count: i64) -> Vec
 	answer["instructions"].as_array().unwrap().clone()
 }
 
-/// Whether it's one of the code's, not a place before or after it
 fn is_code(instruction: &Value) -> bool {
 	instruction["presentationHint"] != "invalid"
 }
 
-/// The whole of the code an address is in, from its start
 fn listing(world: &mut World, reference: u64) -> Vec<Value> {
 	disassemble(world, reference & CODE, 0, 1000).into_iter().filter(is_code).collect()
 }
@@ -44,21 +41,17 @@ fn texts(listing: &[Value]) -> Vec<String> {
 	listing.iter().map(|i| i["instruction"].as_str().unwrap().to_owned()).collect()
 }
 
-/// Makes these the client's instruction breakpoints, and returns them as
-/// the launcher answered
 fn break_at(world: &mut World, addresses: &[u64]) -> Vec<Value> {
 	let breakpoints: Vec<Value> = addresses.iter().map(|&a| json!({ "instructionReference": hex(a) })).collect();
 	let set = world.request("setInstructionBreakpoints", json!({ "breakpoints": breakpoints }));
 	set["breakpoints"].as_array().unwrap().clone()
 }
 
-/// The address of the first instruction of a listing with this text
 fn find(listing: &[Value], text: &str) -> u64 {
 	let found = listing.iter().find(|i| i["instruction"] == text);
 	address(&found.unwrap_or_else(|| panic!("no {} in {:?}", text, texts(listing)))["address"])
 }
 
-/// A step of `granularity`, and where it stopped: the proc and the address
 fn step_by(world: &mut World, command: &str, granularity: &str) -> (String, u64) {
 	let thread = world.thread;
 	world.request(command, json!({ "threadId": thread, "granularity": granularity }));
@@ -67,7 +60,6 @@ fn step_by(world: &mut World, command: &str, granularity: &str) -> (String, u64)
 	(stop.proc, frame_address(world))
 }
 
-/// The paused frame's instruction
 fn frame_address(world: &mut World) -> u64 {
 	let frame = world.top_frame();
 	address(&frame["instructionPointerReference"])
@@ -88,11 +80,10 @@ pub fn run() {
 	assert_eq!(one[0]["symbol"], "/leaf");
 	ok("frame instruction disassembly and source location");
 
-	// Start and stop profiling through the adapter.
 	world.request("auxtoolsProfile", json!({ "action": "start" }));
 	assert_eq!(
 		world.refused("auxtoolsProfile", json!({ "action": "start" })),
-		"another profile is running"
+		"another profile is already running"
 	);
 	let evaluated = world.request("evaluate", json!({ "expression": "middle(1)", "context": "repl" }));
 	assert_eq!(evaluated["result"], "14");
@@ -117,7 +108,6 @@ pub fn run() {
 	);
 	ok("profile report");
 
-	// Far more than leaf() has, on both sides
 	let window = disassemble(&mut world, here, -100, 300);
 	assert_eq!(window.len(), 300);
 	let addresses: Vec<u64> = window.iter().map(|i| address(&i["address"])).collect();
@@ -138,7 +128,6 @@ pub fn run() {
 		.all(|i| i["instruction"] == "" && i["instructionBytes"].is_null()));
 	ok("padded disassembly window");
 
-	// Each instruction's words take up the addresses to the next one
 	for pair in window[first..=last + 1].windows(2) {
 		let words = pair[0]["instructionBytes"].as_str().unwrap().split(' ').count() as u64;
 		assert_eq!(
@@ -151,12 +140,9 @@ pub fn run() {
 	}
 	ok("word-based instruction addresses");
 
-	// What's around an instruction is the same, whichever of them a client
-	// counts from
 	let from_start = disassemble(&mut world, here & CODE, 0, 5);
 	let from_third = disassemble(&mut world, address(&from_start[2]["address"]), -2, 5);
 	assert_eq!(from_start, from_third);
-	// A reference in the middle of an instruction is that instruction
 	let wide = window[first..=last]
 		.iter()
 		.find(|i| i["instructionBytes"].as_str().unwrap().contains(' '))
@@ -165,8 +151,6 @@ pub fn run() {
 	assert_eq!(&inside[0], wide);
 	ok("instruction reference normalization");
 
-	// leaf(x): `var/y = x + 1` and `return y * 2`. The opcodes' numbers
-	// differ between BYOND versions; their names don't.
 	let leaf = listing(&mut world, here);
 	let texts = texts(&leaf);
 	let lines: Vec<u64> = leaf.iter().filter_map(|i| i["line"].as_u64()).collect();
@@ -191,7 +175,6 @@ pub fn run() {
 
 fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	let at = world.marks.clone();
-	// `return y * 2`: the multiplication, which no line starts at
 	let mul = find(leaf, "Mul");
 	let set = break_at(world, &[mul]);
 	assert_eq!(set[0]["verified"], true, "{}", set[0]);
@@ -214,8 +197,6 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	world.resume_through("middle");
 	ok("instruction breakpoint removal");
 
-	// Inside an instruction of more than one word: in its words, a
-	// breakpoint would turn the rest into instructions of their own
 	let wide = leaf.iter().find(|i| i["instructionBytes"].as_str().unwrap().contains(' ')).unwrap();
 	let wide = address(&wide["address"]);
 	let past = break_at(world, &[(mul & CODE) + 0xFFF0]);
@@ -223,7 +204,7 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	let set = break_at(world, &[wide + 1, wide]);
 	assert_eq!(set[0]["verified"], false, "{}", set[0]);
 	let why = set[0]["message"].as_str().unwrap();
-	assert!(why.contains("in the middle of an instruction") && why.contains(&hex(wide)), "{}", why);
+	assert!(why.contains("is inside an instruction in") && why.contains(&hex(wide)), "{}", why);
 	assert_eq!(set[1]["verified"], true, "{}", set[1]);
 	world.run("middle");
 	let stop = world.stop();
@@ -234,8 +215,6 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	world.resume_through("middle");
 	ok("invalid instruction boundary rejection");
 
-	// The instruction a line's breakpoint is on, with one of each: each is
-	// its own
 	let line_2 = leaf
 		.iter()
 		.position(|i| i["instruction"] == format!("DbgLine {}", at.line("leaf_2")))
@@ -256,8 +235,20 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	world.resume_through("middle");
 	ok("independent line and instruction breakpoints");
 
-	// A condition and a hit count, and a reboot: the proc is the same proc
-	// in the world that starts again
+	let (file, line) = at.place("leaf_2");
+	world.set_breakpoints(&file, json!([{ "line": line, "logMessage": "y is {y}" }]));
+	let by_address = break_at(world, &[after])[0]["id"].as_u64().unwrap();
+	let from = world.outputs.len();
+	world.run("middle");
+	let stop = world.stop();
+	assert_eq!((stop.reason.as_str(), &stop.hit), ("instruction breakpoint", &vec![by_address]));
+	assert_eq!(logged(world, from, 1), ["y is 4\n"]);
+	break_at(world, &[]);
+	world.resume_through("middle");
+	assert_eq!(logged(world, from, 2), ["y is 4\n", "y is 9\n"]);
+	world.set_breakpoints(&file, json!([]));
+	ok("logpoint on an instruction breakpoint's instruction");
+
 	let set = world.request(
 		"setInstructionBreakpoints",
 		json!({ "breakpoints": [{ "instructionReference": hex(mul), "condition": "x == 8", "hitCondition": "2" }] })
@@ -266,8 +257,7 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	let worlds = world.count("dap: world/New");
 	world.run("reboot");
 	world.wait_count("dap: world/New", worlds + 1);
-	world.wait_output("The world restarted");
-	// Each run calls leaf(3) and leaf(8): the second x == 8 stops
+	world.wait_output("Reconnected to the world");
 	world.run("middle");
 	world.finish("middle");
 	assert!(!world.has_event("stopped"), "it stopped at the first hit");
@@ -279,10 +269,9 @@ fn instruction_breakpoints(world: &mut World, leaf: &[Value]) {
 	ok("instruction conditions, counts and reboot restoration");
 }
 
-/// A frame on code a hot reload replaced disassembles to that code
 fn old_code() {
 	let dir = copy_of_the_world("bytecode");
-	let mut world = World::launch_in(dir, json!({ "hotReload": true }));
+	let mut world = World::launch_in(dir.to_path_buf(), json!({ "hotReload": true }));
 	world.catch_runtimes(false);
 	world.configure();
 	world.wait_output("Hot reload active");
@@ -296,7 +285,6 @@ fn old_code() {
 		"\tvar/y = x + 1 // @leaf_1\n",
 		"\tvar/y = x + 1 // @leaf_1\n\tvar/extra = 5 // @leaf_extra\n\ty += extra\n"
 	);
-	// Its last line is two further down in the new code
 	let extra = format!("DbgLine {}", world.marks.line("leaf_2"));
 
 	let frame = world.top_frame();
@@ -325,7 +313,225 @@ fn old_code() {
 	ok("current and pre-reload disassembly");
 
 	world.resume_through("middle");
+	let mul = find(&now, "Mul");
+	let set = break_at(&mut world, &[mul]);
+	assert_eq!(set[0]["verified"], true, "{}", set[0]);
+	let id = set[0]["id"].as_u64().unwrap();
+	edit(&mut world, "stepping.dm", "\ty += extra\n", "\ty += extra\n\textra = 0\n");
+	let moved = find(&listing(&mut world, mul), "Mul");
+	assert_ne!(moved, mul, "the reload didn't move the Mul");
+	let event = world.event("breakpoint");
+	let changed = &event["body"]["breakpoint"];
+	assert_eq!(
+		(changed["id"].as_u64(), address(&changed["instructionReference"])),
+		(Some(id), moved),
+		"{}",
+		event
+	);
+	world.run("middle");
+	let stop = world.stop();
+	assert_eq!(
+		(stop.reason.as_str(), stop.proc.as_str(), &stop.hit),
+		("instruction breakpoint", "/leaf", &vec![id])
+	);
+	assert_eq!(frame_address(&mut world), moved);
+	world.resume();
+	world.stopped("instruction breakpoint");
+	world.resume_through("middle");
+	ok("instruction breakpoint moved by a reload");
+
+	let set = world.request(
+		"setInstructionBreakpoints",
+		json!({ "breakpoints": [{ "instructionReference": hex(mul), "condition": "x > 3" }] })
+	);
+	let edited = &set["breakpoints"][0];
+	assert_eq!(
+		(&edited["verified"], edited["id"].as_u64(), address(&edited["instructionReference"])),
+		(&json!(true), Some(id), moved),
+		"{}",
+		edited
+	);
+	world.run("middle");
+	let stop = world.stop();
+	assert_eq!(
+		(stop.reason.as_str(), &stop.hit, frame_address(&mut world), world.eval("x")),
+		("instruction breakpoint", &vec![id], moved, "18".to_owned())
+	);
+	world.resume_through("middle");
+	ok("condition edit of a moved instruction breakpoint");
+
+	let after = listing(&mut world, moved);
+	let ret = address(&after[after.iter().position(|i| address(&i["address"]) == moved).unwrap() + 1]["address"]);
+	let set = break_at(&mut world, &[mul, ret]);
+	assert_eq!(address(&set[0]["instructionReference"]), moved, "{}", set[0]);
+	assert_eq!(set[1]["verified"], true, "{}", set[1]);
+	let by_ret = set[1]["id"].as_u64().unwrap();
+	world.run("middle");
+	let stop = world.stop();
+	assert_eq!(frame_address(&mut world), moved);
+	assert_eq!((stop.reason.as_str(), &stop.hit), ("instruction breakpoint", &vec![id]));
+	world.resume();
+	let stop = world.stop();
+	assert_eq!(
+		(stop.reason.as_str(), &stop.hit, frame_address(&mut world)),
+		("instruction breakpoint", &vec![by_ret], ret)
+	);
+	break_at(&mut world, &[]);
+	world.resume_through("middle");
+	ok("moved instruction breakpoint kept when another is added");
+
+	let zero = |world: &World| format!("DbgLine {}", world.marks.line_starting("stepping.dm", "\textra = 0"));
+	let after = |listing: &[Value], text: &str| {
+		let line = find(listing, text);
+		address(&listing[listing.iter().position(|i| address(&i["address"]) == line).unwrap() + 1]["address"])
+	};
+	let leaf = listing(&mut world, moved);
+	let (first, second) = (
+		after(&leaf, &zero(&world)),
+		after(&leaf, &format!("DbgLine {}", world.marks.line("leaf_2")))
+	);
+	let breakpoints = [(first, "x == 3"), (second, "x == 18")];
+	let send = |world: &mut World, order: [usize; 2]| {
+		let wanted = order.map(|i| json!({ "instructionReference": hex(breakpoints[i].0), "condition": breakpoints[i].1 }));
+		let set = world.request("setInstructionBreakpoints", json!({ "breakpoints": wanted }));
+		let set = set["breakpoints"].as_array().unwrap().clone();
+		set.iter()
+			.map(|b| (b["id"].as_u64().unwrap(), address(&b["instructionReference"])))
+			.collect::<Vec<_>>()
+	};
+	let ids = send(&mut world, [0, 1]).iter().map(|(id, _)| *id).collect::<Vec<_>>();
+	edit(&mut world, "stepping.dm", "\textra = 0\n", "\textra = 7\n\textra = 0\n");
+	let shift = second - first;
+	assert_eq!(
+		after(&listing(&mut world, moved), &zero(&world)),
+		second,
+		"the reload didn't move extra = 0 to the next statement"
+	);
+	world.drop_events("breakpoint");
+	let now = [second, second + shift];
+	for order in [[1, 0], [0, 1]] {
+		assert_eq!(
+			send(&mut world, order),
+			order.map(|i| (ids[i], now[i])),
+			"the breakpoints sent in the order {:?}",
+			order
+		);
+	}
+	world.run("middle");
+	for (i, x) in [(0, "3"), (1, "18")] {
+		let stop = world.stop();
+		assert_eq!(
+			(&stop.hit, frame_address(&mut world), world.eval("x")),
+			(&vec![ids[i]], now[i], x.to_owned())
+		);
+		world.resume();
+	}
+	world.finish("middle");
+	ok("moved instruction breakpoints sent again in another order");
+
+	for (wrong, right) in [
+		(json!({ "condition": "x ==" }), json!({ "condition": "x == 3" })),
+		(json!({ "hitCondition": "often" }), json!({ "hitCondition": "1" }))
+	] {
+		let mut send = |trigger: &Value| {
+			let mut wanted = trigger.clone();
+			wanted["instructionReference"] = hex(first).into();
+			let set = world.request("setInstructionBreakpoints", json!({ "breakpoints": [wanted] }));
+			set["breakpoints"][0].clone()
+		};
+		let refused = send(&wrong);
+		assert_eq!(
+			(refused["id"].as_u64(), &refused["verified"]),
+			(Some(ids[0]), &json!(false)),
+			"{}",
+			refused
+		);
+		let set = send(&right);
+		assert_eq!(
+			(set["id"].as_u64(), &set["verified"], address(&set["instructionReference"])),
+			(Some(ids[0]), &json!(true), second),
+			"{} corrected to {}: {}",
+			wrong,
+			right,
+			set
+		);
+	}
+	world.run("middle");
+	let stop = world.stop();
+	assert_eq!((&stop.hit, frame_address(&mut world)), (&vec![ids[0]], second));
+	world.resume();
+	world.stop();
+	world.resume_through("middle");
+	break_at(&mut world, &[]);
+	ok("moved instruction breakpoint kept through a refused trigger");
+	let moved = find(&listing(&mut world, moved), "Mul");
+
+	let id = break_at(&mut world, &[moved])[0]["id"].as_u64().unwrap();
+	edit(&mut world, "stepping.dm", "\treturn y * 2 // @leaf_2\n", "");
+	let event = world.event("breakpoint");
+	let removed = &event["body"]["breakpoint"];
+	assert_eq!((removed["id"].as_u64(), &removed["verified"]), (Some(id), &json!(false)), "{}", event);
+	let set = break_at(&mut world, &[moved]);
+	assert_eq!((set[0]["id"].as_u64(), &set[0]["verified"]), (Some(id), &json!(false)), "{}", set[0]);
+	world.run_through("middle");
+	break_at(&mut world, &[]);
+	ok("instruction breakpoint removed by a reload");
 	world.end();
+	moved_by_another();
+}
+
+fn moved_by_another() {
+	let dir = copy_of_the_world("bytecode_another");
+	let mut a = World::launch_in(dir.to_path_buf(), json!({ "hotReload": true }));
+	a.catch_runtimes(false);
+	a.configure();
+	a.wait_output("Hot reload active");
+	a.run_to("middle", "/leaf", "leaf_1");
+	let here = frame_address(&mut a);
+	let mul = find(&listing(&mut a, here), "Mul");
+	a.resume_through("middle");
+
+	let mut b = World::attach_in(dir.to_path_buf(), cli::listed_world("dap_test_host.dmb"));
+	b.catch_runtimes(false);
+	let id = break_at(&mut b, &[mul])[0]["id"].as_u64().unwrap();
+	edit(
+		&mut a,
+		"stepping.dm",
+		"\tvar/y = x + 1 // @leaf_1\n",
+		"\tvar/y = x + 1 // @leaf_1\n\ty += 0\n"
+	);
+	let moved = find(&listing(&mut a, mul), "Mul");
+	assert_ne!(moved, mul, "the reload didn't move the Mul");
+	let event = b.event("breakpoint");
+	let changed = &event["body"]["breakpoint"];
+	assert_eq!(
+		(changed["id"].as_u64(), address(&changed["instructionReference"])),
+		(Some(id), moved),
+		"{}",
+		event
+	);
+	let set = break_at(&mut b, &[mul]);
+	assert_eq!(
+		(set[0]["id"].as_u64(), address(&set[0]["instructionReference"])),
+		(Some(id), moved),
+		"{}",
+		set[0]
+	);
+	a.run("middle");
+	for _ in 0..2 {
+		let stop = b.stop();
+		assert_eq!(
+			(stop.reason.as_str(), &stop.hit, frame_address(&mut b)),
+			("instruction breakpoint", &vec![id], moved)
+		);
+		a.stopped("breakpoint");
+		b.resume();
+		a.event("continued");
+	}
+	a.finish("middle");
+	ok("instruction breakpoint moved by another client's reload");
+	b.end();
+	a.end();
 }
 
 fn instruction_steps(world: &mut World) {
@@ -346,8 +552,6 @@ fn instruction_steps(world: &mut World) {
 	ok("line stepping after instruction stepping");
 	world.resume_through("middle");
 
-	// `var/r = leaf(a)`: each step is the next of middle()'s instructions,
-	// the call to leaf() among them, until the next line
 	world.run_to("middle", "/middle", "middle_1");
 	let mut here = frame_address(world);
 	let middle = listing(world, here);
@@ -372,7 +576,6 @@ fn instruction_steps(world: &mut World) {
 	ok("instruction Step Over across a call");
 	world.resume_through("middle");
 
-	// The same again, into leaf() at the call
 	world.run_to("middle", "/middle", "middle_1");
 	let mut last = frame_address(world);
 	let entered = loop {
@@ -393,7 +596,6 @@ fn instruction_steps(world: &mut World) {
 	assert_eq!((proc.as_str(), now), ("/leaf", entered + first));
 	world.step_on("stepOut", "/middle", "middle_1");
 	world.step_on("next", "/middle", "middle_2");
-	// Steps by statement are steps by line
 	let thread = world.thread;
 	world.request("next", json!({ "threadId": thread, "granularity": "statement" }));
 	let stop = world.stop();

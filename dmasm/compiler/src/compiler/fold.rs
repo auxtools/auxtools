@@ -1,0 +1,848 @@
+use dreammaker::ast::{BinaryOp, Expression, Follow, Term, UnaryOp};
+
+use super::Compiler;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Constant {
+    Null,
+    Number(f32),
+    Text(Vec<u8>),
+    Path(String),
+    New,
+}
+
+impl Constant {
+    pub fn truthy(&self) -> bool {
+        match self {
+            Constant::Null => false,
+            Constant::Number(n) => *n != 0.0,
+            Constant::Text(t) => !t.is_empty(),
+            Constant::Path(_) | Constant::New => true,
+        }
+    }
+}
+
+pub(super) fn int(x: f32) -> i32 {
+    if x.is_nan() || !(-2147483648.0..2147483648.0).contains(&x) {
+        i32::MIN
+    } else {
+        x as i32
+    }
+}
+
+pub(super) fn bits(x: f32) -> u32 {
+    ((x as i32) as u32) & 0xFFFFFF
+}
+
+fn not_bits(x: f32) -> u32 {
+    let n = if x.is_nan() || x < 0.0 {
+        0
+    } else if x > 4294967295.0 {
+        u32::MAX
+    } else {
+        (x as u64) as u32
+    };
+    !n & 0xFFFFFF
+}
+
+pub(super) fn number(c: &Compiler, expr: &Expression) -> Option<f32> {
+    match value(c, expr)? {
+        Constant::Number(n) => Some(n),
+        _ => None,
+    }
+}
+
+pub(super) fn constant(c: &Compiler, expr: &Expression) -> Option<Constant> {
+    match expr {
+        Expression::BinaryOp {
+            op: op @ (BinaryOp::And | BinaryOp::Or),
+            lhs,
+            rhs,
+        } => {
+            let decides = value(c, lhs)?.truthy() == (*op == BinaryOp::Or);
+            return constant(c, if decides { lhs } else { rhs });
+        }
+        Expression::TernaryOp { cond, if_, else_ } => {
+            let chosen = if value(c, cond)?.truthy() { if_ } else { else_ };
+            return constant(c, chosen);
+        }
+        _ => {}
+    }
+    if let Expression::Base { term, follow } = expr {
+        if follow.is_empty() && matches!(term.elem, Term::String(_) | Term::Null | Term::Prefab(_))
+        {
+            return None;
+        }
+        if follow.is_empty()
+            && !c.byond.folds_nan_tests_cleanly()
+            && matches!(&term.elem, Term::Call(name, args)
+                if args.len() == 1 && super::versions::nan_test(name.as_str(), 0.0).is_some())
+        {
+            return None;
+        }
+        if matches!(
+            follow.last().map(|f| &f.elem),
+            Some(Follow::StaticField(_) | Follow::Field(..))
+        ) {
+            return None;
+        }
+        if follow.is_empty() {
+            match &term.elem {
+                Term::Ident(name) if !super::procs::is_builtin_const(c, name.as_str()) => {
+                    return None
+                }
+                Term::GlobalIdent(_) => return None,
+                Term::Expr(inner) if constant(c, inner).is_none() => return None,
+                _ => {}
+            }
+        }
+    }
+    value(c, expr).filter(|v| *v != Constant::New)
+}
+
+pub(super) fn choice(c: &mut Compiler, expr: &Expression) -> Option<Constant> {
+    let no_fold = c.no_fold;
+    c.no_fold = no_fold && !c.live_only;
+    let found = value(c, expr);
+    c.no_fold = no_fold;
+    found
+}
+
+pub(super) fn value(c: &Compiler, expr: &Expression) -> Option<Constant> {
+    if c.no_fold {
+        return None;
+    }
+    match expr {
+        Expression::Base { term, follow } => {
+            let statics = follow
+                .iter()
+                .take_while(|f| matches!(f.elem, Follow::StaticField(_)))
+                .count();
+            let fields = follow
+                .iter()
+                .take_while(|f| {
+                    matches!(
+                        f.elem,
+                        Follow::Field(
+                            dreammaker::ast::PropertyAccessKind::Dot
+                                | dreammaker::ast::PropertyAccessKind::Colon,
+                            _
+                        )
+                    )
+                })
+                .count();
+            let (mut v, follow) = if let Some((v, at)) = scoped_const(c, expr) {
+                (v, &follow[at + 1..])
+            } else if statics > 0 {
+                (
+                    static_const(c, &term.elem, &follow[..statics])?,
+                    &follow[statics..],
+                )
+            } else if fields > 0 {
+                (field_const(c, term, &follow[..fields])?, &follow[fields..])
+            } else {
+                (base_value(c, &term.elem)?, &follow[..])
+            };
+            for f in follow.iter() {
+                v = match (&f.elem, v) {
+                    (Follow::Unary(UnaryOp::Neg), Constant::Number(n)) => Constant::Number(-n),
+                    (Follow::Unary(UnaryOp::Not), c) => Constant::Number(!c.truthy() as i32 as f32),
+                    (Follow::Unary(UnaryOp::BitNot), Constant::Number(n)) => {
+                        Constant::Number(not_bits(n) as f32)
+                    }
+                    (Follow::Unary(UnaryOp::BitNot), Constant::Text(_) | Constant::Null) => {
+                        Constant::Number(not_bits(0.0) as f32)
+                    }
+                    _ => return None,
+                };
+            }
+            Some(v)
+        }
+        _ => binary_value(c, expr),
+    }
+}
+
+fn field_const(
+    c: &Compiler,
+    term: &dreammaker::ast::Spanned<Term>,
+    fields: &[dreammaker::ast::Spanned<Follow>],
+) -> Option<Constant> {
+    let Follow::Field(_, name) = &fields[fields.len() - 1].elem else {
+        return None;
+    };
+    if fields.len() == 1 && matches!(&term.elem, Term::Ident(i) if i.as_str() == "global") {
+        return from_objtree(&super::procs::global_const_value(c, name.as_str())?);
+    }
+    let holder = Expression::Base {
+        term: Box::new(term.clone()),
+        follow: fields[..fields.len() - 1].to_vec().into_boxed_slice(),
+    };
+    let ty = super::procs::expr_type(c, &holder);
+    let decl = match &fields[fields.len() - 1].elem {
+        Follow::Field(dreammaker::ast::PropertyAccessKind::Colon, _) => {
+            super::procs::colon_var(c, ty, name.as_str())?
+        }
+        _ => super::procs::member_var(ty?, name.as_str())?,
+    };
+    if !decl.get().var_type.flags.is_const()
+        || decl.get().location.file == dreammaker::FileId::BUILTINS
+    {
+        return None;
+    }
+    from_objtree(decl.ty().get_value(name.as_str())?.constant.as_ref()?)
+}
+
+fn scoped_const(c: &Compiler, expr: &Expression) -> Option<(Constant, usize)> {
+    let Expression::Base { term, follow } = expr else {
+        return None;
+    };
+    let at = follow
+        .iter()
+        .rposition(|f| !matches!(f.elem, Follow::Unary(_)))?;
+    let Follow::StaticField(name) = &follow[at].elem else {
+        return None;
+    };
+    let chain = Expression::Base {
+        term: term.clone(),
+        follow: follow[..=at].to_vec().into_boxed_slice(),
+    };
+    let (found, decl) = super::procs::last_scoped_static(c, &chain)?;
+    let flags = decl.get().var_type.flags;
+    if found != at || !flags.is_const() || decl.get().location.file == dreammaker::FileId::BUILTINS
+    {
+        return None;
+    }
+    Some((
+        from_objtree(decl.ty().get_value(name.as_str())?.constant.as_ref()?)?,
+        at,
+    ))
+}
+
+fn static_const(
+    c: &Compiler,
+    term: &Term,
+    steps: &[dreammaker::ast::Spanned<Follow>],
+) -> Option<Constant> {
+    if c.debugger {
+        return None;
+    }
+    let term = super::procs::unparenthesised(term);
+    let ty = match term {
+        Term::Prefab(prefab) if prefab.vars.is_empty() => {
+            Some(super::procs::scope_head_type(c, prefab)?)
+        }
+        other => super::procs::start_type(c, other).0,
+    };
+    let names: Vec<&str> = steps
+        .iter()
+        .map(|f| match &f.elem {
+            Follow::StaticField(name) => name.as_str(),
+            _ => unreachable!(),
+        })
+        .collect();
+    let decl = super::procs::static_chain(c, ty, &names)?;
+    let flags = decl.get().var_type.flags;
+    let from_type = matches!(term, Term::Prefab(_)) && names.len() == 1;
+    if !(flags.is_const() || from_type && !flags.is_static()) {
+        return None;
+    }
+    if !from_type && decl.get().location.file == dreammaker::FileId::BUILTINS {
+        return None;
+    }
+    let owner = if from_type { ty? } else { decl.ty() };
+    from_objtree(owner.get_value(names[names.len() - 1])?.constant.as_ref()?)
+}
+
+fn warn_angle(c: &Compiler, what: &str, folded: f32, radians: f64) {
+    if !c.byond.has_single_inverse_trig() {
+        return;
+    }
+    let rounded = super::versions::degrees_of_single_radians(radians) as f32;
+    if rounded != folded && !folded.is_nan() {
+        c.warn(
+            crate::diagnostic::Id::FoldedAngle,
+            &format!(
+                "`{what}` is folded to {folded}, matching DreamMaker on Windows and on Linux with \
+             glibc before 2.41 (Linux DreamMaker with glibc 2.41 or later folds it to {rounded})"
+            ),
+        );
+    }
+}
+
+fn arctan2_radians(x: f32, y: f32) -> f64 {
+    (y as f64 + 0.0).atan2(x as f64)
+}
+
+fn math1(name: &str, x: f32, byond: crate::ByondVersion) -> Option<Option<f32>> {
+    let d = x as f64;
+    let degrees = super::versions::degrees;
+    let r = match name {
+        "sqrt" => (d >= 0.0 || d.is_nan()).then(|| d.sqrt()),
+        "ceil" => Some(d.ceil()),
+        "floor" | "round" => Some(d.floor()),
+        "trunc" => Some(d.trunc()),
+        "fract" => Some(if d.is_infinite() { 0.0 } else { d.fract() }),
+        "abs" => Some(if d < 0.0 { -d } else { d }),
+        "sign" => Some(if d > 0.0 {
+            1.0
+        } else if d < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }),
+        "sin" | "cos" => Some(super::versions::sin_cos(byond, name == "sin", d)),
+        "tan" => Some(if x.is_finite() {
+            super::versions::tan(byond, x) as f64
+        } else if x.is_infinite() {
+            let nan = super::versions::DEFAULT_NAN;
+            if x < 0.0 && byond.is_516() {
+                -nan
+            } else {
+                nan
+            }
+        } else {
+            d
+        }),
+        "arccos" if d.is_nan() && !byond.is_516() => Some(d.abs()),
+        "arcsin" | "arccos" | "arctan" if d.is_nan() => Some(d),
+        "arcsin" => (!(d < -1.0 || d > 1.0)).then(|| degrees(d.asin())),
+        "arccos" => (!(d < -1.0 || d > 1.0)).then(|| degrees(d.acos())),
+        "arctan" => Some(degrees(d.atan())),
+        _ => return None,
+    };
+    Some(r.map(|r| r as f32))
+}
+
+fn from_objtree(constant: &dreammaker::constants::Constant) -> Option<Constant> {
+    use dreammaker::constants::Constant as C;
+    Some(match constant {
+        C::Null(_) => Constant::Null,
+        C::Float(n) => Constant::Number(*n),
+        C::String(s) => Constant::Text(super::strings::parse(s.as_str()).ok()?.0),
+        _ => return None,
+    })
+}
+
+fn base_value(c: &Compiler, term: &Term) -> Option<Constant> {
+    Some(match term {
+        Term::Int(i) => Constant::Number(*i as f32),
+        Term::Float(f) => Constant::Number(*f),
+        Term::Null => Constant::Null,
+        Term::Prefab(prefab) if prefab.vars.is_empty() => Constant::Path(prefab.path.to_string()),
+        Term::NewPrefab { prefab, args }
+            if prefab.vars.is_empty() && args.as_ref().is_none_or(|a| constant_args(c, a)) =>
+        {
+            Constant::New
+        }
+        Term::List(args) | Term::Alist(args) if constant_args(c, args) => Constant::New,
+        Term::Call(name, args)
+            if name.as_str() == "rgb2num" && super::builtin_procs::rgb2num_is_constant(c, args) =>
+        {
+            Constant::New
+        }
+        Term::__TYPE__ if c.proc_macros_known() => match &c.proc {
+            p if p.ty.is_root() => Constant::Null,
+            p => Constant::Path(p.ty.get().path.clone()),
+        },
+        Term::__PROC__ if c.proc_macros_known() && c.byond.has_proc_macro() => {
+            Constant::Path(c.proc.proc_path.clone())
+        }
+        Term::Call(name, args) if name.as_str() == "newlist" && constant_args(c, args) => {
+            Constant::New
+        }
+        Term::String(s) => Constant::Text(super::strings::parse(s).ok()?.0),
+        Term::Expr(inner) => value(c, inner)?,
+        Term::Call(name, args)
+            if args.len() == 1
+                && math1(name.as_str(), 0.0, c.byond).is_some()
+                && super::versions::folds(c.byond, name.as_str()) =>
+        {
+            match value(c, &args[0])? {
+                Constant::Number(n) => {
+                    let folded = math1(name.as_str(), n, c.byond)??;
+                    let radians = match name.as_str() {
+                        "arcsin" => Some((n as f64).asin()),
+                        "arccos" => Some((n as f64).acos()),
+                        "arctan" => Some((n as f64).atan()),
+                        _ => None,
+                    };
+                    if let Some(radians) = radians {
+                        warn_angle(c, &format!("{name}({n})"), folded, radians);
+                    }
+                    Constant::Number(folded)
+                }
+                _ => return None,
+            }
+        }
+        Term::Call(name, args) if args.len() == 1 && matches!(name.as_str(), "md5" | "sha1") => {
+            let Constant::Text(text) = value(c, &args[0])? else {
+                return None;
+            };
+            Constant::Text(hash(name.as_str(), &text).into_bytes())
+        }
+        Term::Call(name, args) if name.as_str() == "arctan" && args.len() == 2 => {
+            let (Constant::Number(x), Constant::Number(y)) =
+                (value(c, &args[0])?, value(c, &args[1])?)
+            else {
+                return None;
+            };
+            if x == 0.0 && y == 0.0 {
+                return Some(Constant::Number(0.0));
+            }
+            let radians = arctan2_radians(x, y);
+            let folded = super::versions::degrees(radians) as f32;
+            warn_angle(c, &format!("arctan({x}, {y})"), folded, radians);
+            Constant::Number(folded)
+        }
+        Term::Call(name, args)
+            if args.len() == 1
+                && super::versions::nan_test(name.as_str(), 0.0).is_some()
+                && c.byond.folds_within_nan_tests() =>
+        {
+            match value(c, &args[0])? {
+                Constant::Number(n) => {
+                    Constant::Number(super::versions::nan_test(name.as_str(), n)? as i32 as f32)
+                }
+                _ => return None,
+            }
+        }
+        Term::Call(name, args) if name.as_str() == "nameof" && args.len() == 1 => {
+            let name = super::builtin_procs::last_identifier(&args[0])?;
+            if name == "__PROC__" {
+                return None;
+            }
+            Constant::Text(name.into_bytes())
+        }
+        Term::Call(name, args) if name.as_str() == "rgb" => {
+            Constant::Text(super::builtin_procs::rgb_constant(c, args)?.into_bytes())
+        }
+        Term::Call(name, args)
+            if name.as_str() == "hsl2rgb"
+                && args.len() == 3
+                && c.proc.tree.root().get_proc("hsl2rgb").is_none() =>
+        {
+            let n = |e| match value(c, e)? {
+                Constant::Number(n) => Some(n),
+                _ => None,
+            };
+            Constant::Text(hsl_text(n(&args[0])?, n(&args[1])?, n(&args[2])?, 0.0).into_bytes())
+        }
+        Term::Call(name, args)
+            if matches!(name.as_str(), "text2ascii" | "text2ascii_char") && args.len() == 1 =>
+        {
+            match value(c, &args[0])? {
+                Constant::Text(t) => {
+                    let c = String::from_utf8_lossy(&t).chars().next().unwrap_or('\0');
+                    Constant::Number(c as u32 as f32)
+                }
+                _ => return None,
+            }
+        }
+        Term::Call(name, args) if name.as_str() == "log" && matches!(args.len(), 1 | 2) => {
+            let n = |e| match value(c, e)? {
+                Constant::Number(n) => Some(n),
+                _ => None,
+            };
+            let x = n(&args[args.len() - 1])?;
+            if x <= 0.0 {
+                return None;
+            }
+            if args.len() == 1 {
+                Constant::Number(x.ln())
+            } else {
+                let base = n(&args[0])?;
+                if base <= 0.0 || base == 1.0 {
+                    return None;
+                }
+                Constant::Number(super::versions::log(c.byond, x, base))
+            }
+        }
+        Term::Call(name, args)
+            if name.as_str() == "round"
+                && args.len() == 2
+                && super::versions::folds(c.byond, "round") =>
+        {
+            let (Constant::Number(x), Constant::Number(to)) =
+                (value(c, &args[0])?, value(c, &args[1])?)
+            else {
+                return None;
+            };
+            if to == 0.0 {
+                return None;
+            }
+            Constant::Number(((x as f64 / to as f64 + 0.5).floor() * to as f64) as f32)
+        }
+        Term::Call(name, args) if name.as_str() == "clamp" && args.len() == 3 => {
+            let n = |e| match value(c, e)? {
+                Constant::Number(n) => Some(n),
+                _ => None,
+            };
+            let (x, a, b) = (n(&args[0])?, n(&args[1])?, n(&args[2])?);
+            let (low, high) = (a.min(b), a.max(b));
+            Constant::Number(if x < low {
+                low
+            } else if x > high {
+                high
+            } else {
+                x
+            })
+        }
+        Term::Ident(name) => from_objtree(&super::procs::const_value(c, name.as_str())?)?,
+        Term::GlobalIdent(name) => {
+            from_objtree(&super::procs::global_const_value(c, name.as_str())?)?
+        }
+        _ => return None,
+    })
+}
+
+pub(super) fn has_logic(expr: &Expression) -> bool {
+    match expr {
+        Expression::BinaryOp {
+            op: BinaryOp::And | BinaryOp::Or,
+            ..
+        } => true,
+        Expression::BinaryOp { lhs, rhs, .. } => has_logic(lhs) || has_logic(rhs),
+        Expression::TernaryOp { cond, if_, else_ } => {
+            has_logic(cond) || has_logic(if_) || has_logic(else_)
+        }
+        Expression::AssignOp { .. } => false,
+        Expression::Base { term, .. } => match &term.elem {
+            Term::Expr(inner) => has_logic(inner),
+            Term::Call(_, args) => args.iter().any(has_logic),
+            _ => false,
+        },
+    }
+}
+
+pub(super) fn is_logic(expr: &Expression) -> bool {
+    match expr {
+        Expression::BinaryOp {
+            op: BinaryOp::And | BinaryOp::Or,
+            ..
+        } => true,
+        Expression::Base { term, follow } if follow.is_empty() => match &term.elem {
+            Term::Expr(inner) => is_logic(inner),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn constant_args(c: &Compiler, args: &[Expression]) -> bool {
+    args.iter().all(|arg| match arg {
+        Expression::AssignOp {
+            op: dreammaker::ast::AssignOp::Assign,
+            lhs,
+            rhs,
+        } => {
+            let key = matches!(&**lhs, Expression::Base { term, follow }
+                if follow.is_empty() && matches!(term.elem, Term::Ident(_)));
+            (key || value(c, lhs).is_some()) && value(c, rhs).is_some()
+        }
+        arg => value(c, arg).is_some(),
+    })
+}
+
+fn hash(name: &str, text: &[u8]) -> String {
+    use sha1::Digest;
+    let digest: Vec<u8> = if name == "md5" {
+        md5::Md5::digest(text).to_vec()
+    } else {
+        sha1::Sha1::digest(text).to_vec()
+    };
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn binary_value(c: &Compiler, expr: &Expression) -> Option<Constant> {
+    match expr {
+        Expression::BinaryOp {
+            op: BinaryOp::And,
+            lhs,
+            rhs,
+        } => {
+            let a = value(c, lhs)?;
+            if !a.truthy() {
+                return Some(a);
+            }
+            value(c, rhs)
+        }
+        Expression::BinaryOp {
+            op: BinaryOp::Or,
+            lhs,
+            rhs,
+        } => {
+            let a = value(c, lhs)?;
+            if a.truthy() {
+                return Some(a);
+            }
+            value(c, rhs)
+        }
+        Expression::BinaryOp { op, lhs, rhs } => {
+            let a = value(c, lhs)?;
+            let b = value(c, rhs)?;
+            match (a, b) {
+                (Constant::Number(a), Constant::Number(b)) => {
+                    if is_bit_op(*op) && c.debugger && (wide(a) || wide(b)) {
+                        return None;
+                    }
+                    if is_bit_op(*op) {
+                        warn_bits(c, a);
+                        warn_bits(c, b);
+                    }
+                    numbers(*op, a, b).map(Constant::Number)
+                }
+                (Constant::Text(mut a), Constant::Text(b)) if *op == BinaryOp::Add => {
+                    a.extend(b);
+                    Some(Constant::Text(a))
+                }
+                (a, b)
+                    if matches!(op, BinaryOp::LShift | BinaryOp::RShift)
+                        && [&a, &b].iter().all(|v| {
+                            matches!(v, Constant::Number(_) | Constant::Text(_) | Constant::Null)
+                        }) =>
+                {
+                    let n = |v: &Constant| match v {
+                        Constant::Number(n) => *n,
+                        _ => 0.0,
+                    };
+                    numbers(*op, n(&a), n(&b)).map(Constant::Number)
+                }
+                (Constant::Number(a), Constant::Text(_) | Constant::Null)
+                    if *op == BinaryOp::Div =>
+                {
+                    Some(Constant::Number(a))
+                }
+                _ => None,
+            }
+        }
+        Expression::TernaryOp { cond, if_, else_ } => {
+            if value(c, cond)?.truthy() {
+                value(c, if_)
+            } else {
+                value(c, else_)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_bit_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::LShift | BinaryOp::RShift
+    )
+}
+
+pub(super) fn wide(x: f32) -> bool {
+    !(-2147483648.0..2147483648.0).contains(&x)
+}
+
+pub(super) fn warn_bits(c: &Compiler, x: f32) {
+    if wide(x) {
+        c.warn(
+            crate::diagnostic::Id::BitOperandOutOfRange,
+            &format!(
+            "bitwise operand {x} is outside the 32-bit range, so its conversion differs from DreamMaker"
+        ),
+        );
+    }
+}
+
+fn mod_int(x: f32) -> i32 {
+    if x > 2147483648.0 {
+        i32::MAX
+    } else if x < -2147483648.0 {
+        -i32::MAX
+    } else {
+        int(x)
+    }
+}
+
+fn numbers(op: BinaryOp, a: f32, b: f32) -> Option<f32> {
+    let shift = |x: f32| {
+        if x < 0.0 {
+            0
+        } else {
+            x.min(65535.0) as u32 & 31
+        }
+    };
+    Some(match op {
+        BinaryOp::Add => a + b,
+        BinaryOp::Sub => a - b,
+        BinaryOp::Mul => a * b,
+        BinaryOp::Div if b != 0.0 => a / b,
+        BinaryOp::Pow if a == 0.0 && (b < 0.0 || b.is_nan()) => {
+            if b == -1.0 {
+                f32::INFINITY
+            } else {
+                0.0
+            }
+        }
+        BinaryOp::Pow => a.powf(b),
+        BinaryOp::Mod if int(b) != 0 => mod_int(a).wrapping_rem(mod_int(b)) as f32,
+        BinaryOp::FloatMod if b != 0.0 => (a as f64 % b as f64) as f32,
+        BinaryOp::BitAnd => (bits(a) & bits(b)) as f32,
+        BinaryOp::BitOr => (bits(a) | bits(b)) as f32,
+        BinaryOp::BitXor => (bits(a) ^ bits(b)) as f32,
+        BinaryOp::LShift => ((bits(a.max(0.0)) << shift(b)) & 0xFFFFFF) as f32,
+        BinaryOp::RShift => (bits(a) >> shift(b)) as f32,
+        _ => return None,
+    })
+}
+
+fn hex_byte(v: f64) -> String {
+    format!("{:02x}", v.clamp(0.0, 255.0) as u8)
+}
+
+fn share(percent: f64) -> f64 {
+    (percent / 100.0) as f32 as f64
+}
+
+fn channel(share: f64, nudge: f64) -> String {
+    hex_byte(((share * 255.0) as f32 as f64 + 0.5 + nudge).floor())
+}
+
+pub(super) fn hsv_text(byond: crate::ByondVersion, h: f32, s: f32, v: f32, nudge: f64) -> String {
+    let range = if byond.clamps_hsv_colours() {
+        (0.0, 100.0)
+    } else {
+        (f64::MIN, f64::MAX)
+    };
+    let (h, s, v) = (
+        h as f64,
+        share((s as f64).clamp(range.0, range.1)),
+        share((v as f64).clamp(range.0, range.1)),
+    );
+    let chroma = v * s;
+    let h6 = h.rem_euclid(360.0) / 60.0;
+    let x = chroma * (1.0 - (h6 % 2.0 - 1.0).abs());
+    let (r, g, b) = match h6 as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = v - chroma;
+    let byte = |c: f64| channel(c + m, nudge);
+    format!("#{}{}{}", byte(r), byte(g), byte(b))
+}
+
+pub(super) fn hcy_text(h: f32, c: f32, y: f32, nudge: f64) -> String {
+    let (h, c, y) = (h as f64, share(c as f64), share(y as f64));
+    let h6 = h.rem_euclid(360.0) / 60.0;
+    let k = 1.0 - (h6 % 2.0 - 1.0).abs();
+    let (r, g, b) = match h6 as u32 {
+        0 => (1.0, k, 0.0),
+        1 => (k, 1.0, 0.0),
+        2 => (0.0, 1.0, k),
+        3 => (0.0, k, 1.0),
+        4 => (k, 0.0, 1.0),
+        _ => (1.0, 0.0, k),
+    };
+    let weight = 0.299 * r + 0.557 * g + 0.114 * b;
+    let chroma = if y < weight {
+        c * y / weight
+    } else if weight < 1.0 {
+        c * (1.0 - y) / (1.0 - weight)
+    } else {
+        0.0
+    };
+    let m = y - weight * chroma;
+    let byte = |v: f64| channel(v * chroma + m, nudge);
+    format!("#{}{}{}", byte(r), byte(g), byte(b))
+}
+
+pub(super) fn rgb_text(
+    byond: crate::ByondVersion,
+    space: u32,
+    channels: [f32; 3],
+    alpha: Option<f32>,
+) -> Option<(String, bool)> {
+    let [a, b, c] = channels;
+    let rounded = |nudge: f64| match space {
+        1 => hsv_text(byond, a, b, c, nudge),
+        2 => hsl_text(a, b, c, nudge),
+        _ => hcy_text(a, b, c, nudge),
+    };
+    let mut boundary = false;
+    let mut text = match space {
+        0 => format!(
+            "#{}{}{}",
+            hex_byte(a as f64),
+            hex_byte(b as f64),
+            hex_byte(c as f64)
+        ),
+        1..=3 => {
+            boundary = rounded(1e-3) != rounded(-1e-3);
+            if boundary && !byond.rounds_colours_as_folded() {
+                return None;
+            }
+            rounded(0.0)
+        }
+        _ => return None,
+    };
+    if let Some(alpha) = alpha {
+        text += &hex_byte(alpha as f64);
+    }
+    Some((text, boundary))
+}
+
+pub(super) fn hsl_text(h: f32, s: f32, l: f32, nudge: f64) -> String {
+    let (h, s, l) = (
+        h as f64,
+        share((s as f64).clamp(0.0, 100.0)),
+        share((l as f64).clamp(0.0, 100.0)),
+    );
+    let chroma = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h6 = h.rem_euclid(360.0) / 60.0;
+    let x = chroma * (1.0 - (h6 % 2.0 - 1.0).abs());
+    let (r, g, b) = match h6 as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = l - chroma / 2.0;
+    let byte = |v: f64| channel(v + m, nudge);
+    format!("#{}{}{}", byte(r), byte(g), byte(b))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn inverse_trig_folds_to_dreammakers_bits() {
+        let byond = crate::ByondVersion::LATEST;
+        for (name, x, bits) in [
+            ("arctan", 2.0, 0x427dbd63),
+            ("arctan", -2.0, 0xc27dbd63),
+            ("arctan", 16777215.0, 0x42b40000),
+            ("arctan", 0.5, 0x41d4853a),
+            ("arccos", 0.7071, 0x42340091),
+            ("arccos", -0.99, 0x432be3f1),
+            ("arccos", 0.8660254, 0x41f00001),
+            ("arccos", 0.725, 0x422e1fe6),
+            ("arcsin", 0.8660254, 0x42700000),
+            ("arcsin", 0.22378391, 0x414ee6ed),
+            ("arcsin", 0.06897236, 0x407d1e25),
+            ("arcsin", -0.4847809, 0xc1e7fc26),
+        ] {
+            let folded = super::math1(name, x, byond).flatten().map(f32::to_bits);
+            assert_eq!(folded, Some(bits), "{name}({x})");
+        }
+        for (x, y, bits) in [
+            (1.0, 2.0, 0x427dbd63),
+            (3.0, -4.0, 0xc254853a),
+            (2.0, 1.0, 0x41d4853a),
+            (-3.0, 4.0, 0x42fdbd63),
+            (-344.5, 1.2506207, 0x4333cac1),
+        ] {
+            let folded = super::super::versions::degrees(super::arctan2_radians(x, y)) as f32;
+            assert_eq!(folded.to_bits(), bits, "arctan({x}, {y})");
+        }
+    }
+}

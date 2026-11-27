@@ -1,9 +1,11 @@
 use crate::*;
 use std::{ffi::CStr, fmt};
 
-/// Decode BYOND text without macros, as `world.log` and `json_encode` do.
-/// Macros such as `\improper` and `\bold` are stored as 0xFF followed by a
-/// macro code. The 0xFF byte cannot occur in UTF-8 text.
+/// Converts raw BYOND string bytes to a `String`, stripping text macros and
+/// replacing invalid UTF-8 with `U+FFFD`.
+///
+/// BYOND encodes text macros such as `\improper` as `0xFF` followed by a type
+/// byte. This is a pure function and may be called from any thread.
 pub fn text_of(bytes: &[u8]) -> String {
 	if !bytes.contains(&0xFF) {
 		return String::from_utf8_lossy(bytes).into_owned();
@@ -20,8 +22,17 @@ pub fn text_of(bytes: &[u8]) -> String {
 	String::from_utf8_lossy(&text).into_owned()
 }
 
-/// A wrapper around [Values](struct.Value.html) that make working with strings
-/// a little easier
+/// A reference-counted handle to a BYOND string.
+///
+/// Holds one BYOND reference and is not `Send`. `String::from` extracts plain
+/// text with BYOND text macros removed, while `Display` (`to_string`) and
+/// `Debug` format a quoted DM string literal with escape sequences and
+/// spelled-out macros. `data` borrows the raw bytes for the lifetime of the
+/// `StringRef`.
+///
+/// `new` and `from_raw` return `Err` if the input contains a NUL byte. There is
+/// no `From<&str>` implementation, so APIs accepting `Into<StringRef>` require
+/// a `StringRef`, `&StringRef`, or `byond_string!`.
 pub struct StringRef {
 	pub value: Value
 }
@@ -44,13 +55,15 @@ impl StringRef {
 			return None;
 		}
 
-		// Here we're going from value -> raw -> new value because to get that
-		// juicy static lifetime
-		Some(StringRef {
-			value: unsafe { Value::from_raw(value.raw) }
-		})
+		Some(StringRef { value })
 	}
 
+	/// Creates a `StringRef` from a BYOND string ID, taking a new reference.
+	///
+	/// # Safety
+	///
+	/// Must be called on BYOND's thread, and `id` must refer to a currently
+	/// live entry in BYOND's string table.
 	pub unsafe fn from_id(id: raw_types::strings::StringId) -> Self {
 		StringRef {
 			value: Value::from_raw(raw_types::values::Value {
@@ -60,6 +73,14 @@ impl StringRef {
 		}
 	}
 
+	/// Returns the name of the variable identified by `id` as a `StringRef`,
+	/// taking a new reference.
+	///
+	/// # Safety
+	///
+	/// Must be called on BYOND's thread while the library is initialized (the
+	/// variable name table pointer is null after shutdown), and `id` must be
+	/// less than BYOND's variable count.
 	pub unsafe fn from_variable_id(id: raw_types::strings::VariableId) -> Self {
 		let string_id = *(*raw_types::funcs::VARIABLE_NAME_ENTRIES).add(id.0 as usize);
 
@@ -87,7 +108,7 @@ impl StringRef {
 
 impl Clone for StringRef {
 	fn clone(&self) -> Self {
-		Self::from_value(self.value.clone()).unwrap()
+		StringRef { value: self.value.clone() }
 	}
 }
 
@@ -105,8 +126,6 @@ impl fmt::Debug for StringRef {
 
 		while let Some(&byte) = iter.next() {
 			if byte == 0xFF {
-				// NOTE: Doesn't hold state for formatting, so some strings
-				// relying on are a little off
 				format.extend_from_slice(match iter.next() {
 					None => break,
 					Some(1) | Some(2) | Some(3) | Some(4) => b"[]",
@@ -151,7 +170,7 @@ impl fmt::Debug for StringRef {
 					Some(43) => b"\\icon[]",
 					Some(44) => b"\\roman[]",
 					Some(45) => b"\\Roman[]",
-					Some(_) => b"[UNKNONWN FORMAT SPECIFIER]"
+					Some(_) => b"[UNKNOWN FORMAT SPECIFIER]"
 				});
 				continue;
 			}
@@ -166,7 +185,6 @@ impl fmt::Debug for StringRef {
 				continue;
 			}
 
-			// Escape \[]"" chars
 			if byte == b'\\' || byte == b'[' || byte == b']' || byte == b'"' {
 				format.push(b'\\');
 			}

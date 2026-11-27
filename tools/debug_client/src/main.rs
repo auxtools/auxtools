@@ -1,26 +1,23 @@
-//! Debug server probe for real codebases. Launch a world, set a breakpoint,
-//! inspect stacks and variables, then evaluate the requested watches.
-//! Print every protocol message to identify the request preceding a crash.
-
 use std::{
-	collections::HashMap,
-	io::{Read, Write},
+	collections::{HashMap, VecDeque},
 	path::{Path, PathBuf},
 	time::Duration
 };
 
 use auxtools_cli::{
 	byond::{self, Server},
-	game::{Game, Launch},
-	local::{self, Shared},
-	server_types::{ContinueKind, EvalResponse, InstructionRef, ProcRef, Request, Response}
+	client::{when_listening, Client, Heard},
+	game::{Game, Launch}
 };
+use auxtools_protocol::{ContinueKind, EvalResponse, InstructionRef, ProcRef, Request, RequestId, Response, WORLD_SHUTTING_DOWN};
+
+const SEE_THE_WORLD_RESUME: Duration = Duration::from_secs(3);
 
 const USAGE: &str = "\
 usage: debug_client WORLD.dmb --proc PATH --line N [options] [WATCH...]
 
-Starts the world in DreamDaemon with the debug library loaded into it, as the
-launcher does, and ends it when done.
+Starts the world in DreamDaemon with the debug library loaded the same way
+the launcher does, and ends the world when done.
 
   --byond DIR         where BYOND is (default: where it's installed)
   --library PATH      the debug library (default: the one next to debug_client)
@@ -33,8 +30,8 @@ launcher does, and ends it when done.
   --skip-inspect      go straight to the watches, without the requests VS Code sends on a stop
   --wait-file PATH    before the watches, wait until PATH exists (time to attach a debugger)
 
-A WATCH is evaluated in the top frame like a VS Code watch; prefix it with
-`repl:` to evaluate it like the debug console does.";
+A WATCH is evaluated in the top frame like a VS Code watch. Prefix it with
+`repl:` to evaluate it like the Debug Console does.";
 
 struct Options {
 	dmb: PathBuf,
@@ -103,52 +100,67 @@ fn parse_args() -> Result<Options, String> {
 	})
 }
 
-struct Connection(Shared);
+struct Connection {
+	client: Client,
+	early_events: VecDeque<Response>
+}
 
 impl Connection {
 	fn send(&mut self, request: &Request) {
-		let data = bincode::serialize(request).unwrap();
-		self.0.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
-		self.0.write_all(&data).unwrap();
+		self.client.tell(request, None).unwrap();
 		println!(">> {:?}", request);
 	}
 
-	/// The next message, or None once DreamDaemon has gone
-	fn recv_any(&mut self) -> Option<Response> {
-		let mut len = [0u8; 4];
-		if let Err(e) = self.0.read_exact(&mut len) {
-			println!("!! connection lost: {}", e);
-			return None;
+	fn recv_any(&mut self) -> Option<(Option<RequestId>, Response)> {
+		match self.client.hear(None) {
+			Ok(Some(Heard::Answer { to, response, .. })) => Some((Some(to), response)),
+			Ok(Some(Heard::Event(event))) => Some((None, event)),
+			Ok(None) | Err(_) => {
+				println!("!! connection lost");
+				None
+			}
 		}
-		let mut data = vec![0u8; u32::from_le_bytes(len) as usize];
-		if let Err(e) = self.0.read_exact(&mut data) {
-			println!("!! connection lost mid-message: {}", e);
-			return None;
-		}
-		Some(bincode::deserialize(&data).unwrap())
 	}
 
-	/// The next message that isn't a notification, printing those on the way
-	fn recv(&mut self) -> Option<Response> {
+	fn recv_skipping_notifications(&mut self) -> Option<(Option<RequestId>, Response)> {
 		loop {
 			match self.recv_any()? {
-				Response::Notification { message } => println!("<< notification: {}", message.trim_end()),
-				response => {
+				(_, Response::Notification { message }) => println!("<< notification: {}", message.trim_end()),
+				(_, Response::ShuttingDown) => println!("<< notification: {}", WORLD_SHUTTING_DOWN),
+				(to, response) => {
 					let text = format!("{:?}", response);
 					if text.len() > 2000 {
 						println!("<< {}... ({} chars)", &text[..2000], text.len());
 					} else {
 						println!("<< {}", text);
 					}
-					return Some(response);
+					return Some((to, response));
 				}
 			}
 		}
 	}
 
+	fn recv_event(&mut self) -> Option<Response> {
+		if let Some(event) = self.early_events.pop_front() {
+			return Some(event);
+		}
+		loop {
+			if let (None, event) = self.recv_skipping_notifications()? {
+				return Some(event);
+			}
+		}
+	}
+
 	fn request(&mut self, request: Request) -> Option<Response> {
-		self.send(&request);
-		self.recv()
+		let id = self.client.ask(&request, None).unwrap();
+		println!(">> {:?}", request);
+		loop {
+			match self.recv_skipping_notifications()? {
+				(Some(to), answer) if Some(to) == id => return Some(answer),
+				(Some(_), _) => {}
+				(None, event) => self.early_events.push_back(event)
+			}
+		}
 	}
 }
 
@@ -179,14 +191,11 @@ fn on_stop(conn: &mut Connection, options: &Options) -> Option<()> {
 	}
 
 	for watch in &options.watches {
-		let (context, command) = match watch.strip_prefix("repl:") {
-			Some(command) => ("repl", command),
-			None => ("watch", watch.as_str())
-		};
+		let command = watch.strip_prefix("repl:").unwrap_or(watch);
 		let response = conn.request(Request::Eval {
 			frame_id: Some(0),
 			command: command.to_owned(),
-			context: Some(context.to_owned())
+			ending: false
 		})?;
 		if let Response::Eval(Ok(EvalResponse { variables: Some(vars), .. })) = response {
 			conn.request(Request::Variables {
@@ -219,17 +228,13 @@ fn main() {
 			std::process::exit(1);
 		}
 	};
-	// It listens once the world has loaded
-	let stream = loop {
-		if let Ok(stream) = local::connect(game.pid()) {
-			break stream;
-		}
-		if !local::alive(game.pid()) {
-			std::process::exit(1);
-		}
-		std::thread::sleep(Duration::from_millis(100));
+	let Ok(client) = when_listening(game.pid(), None, Client::connect) else {
+		std::process::exit(1);
 	};
-	let mut conn = Connection(Shared::new(stream));
+	let mut conn = Connection {
+		client,
+		early_events: VecDeque::new()
+	};
 	println!("== connected to DreamDaemon");
 
 	let offset = match conn.request(Request::Offset {
@@ -247,12 +252,13 @@ fn main() {
 		offset
 	};
 	conn.request(Request::BreakpointSet {
-		instruction: instruction.clone(),
+		instruction,
 		condition: options.condition.clone(),
 		hit: None,
-		log: None
+		log: None,
+		exact: false,
+		id: 1
 	});
-	// Runtimes would stop us somewhere else. This one gets no reply.
 	conn.send(&Request::CatchRuntimes {
 		uncaught: None,
 		caught: None
@@ -260,7 +266,7 @@ fn main() {
 	conn.request(Request::Configured);
 
 	loop {
-		let Some(response) = conn.recv() else {
+		let Some(response) = conn.recv_event() else {
 			std::process::exit(1);
 		};
 		if let Response::BreakpointHit { .. } = response {
@@ -273,17 +279,15 @@ fn main() {
 	}
 
 	println!("== watches done, continuing");
-	conn.request(Request::BreakpointUnset { instruction });
+	conn.request(Request::BreakpointUnset { id: 1 });
 	conn.request(Request::Continue {
 		kind: ContinueKind::Continue
 	});
-	// Long enough to see the world carry on before we let go of it
-	std::thread::sleep(Duration::from_secs(3));
+	std::thread::sleep(SEE_THE_WORLD_RESUME);
 	conn.send(&Request::Disconnect);
 	game.kill();
 }
 
-/// Starts the world, which waits for us
 fn start(options: &Options) -> Result<Game, String> {
 	let bin = byond::bin_dir(options.byond.as_deref())?;
 	let library = match &options.library {
@@ -293,13 +297,14 @@ fn start(options: &Options) -> Result<Game, String> {
 			std::env::current_exe().map_err(|e| e.to_string())?.with_file_name(name)
 		}
 	};
+	let wait_for_debugger = true;
 	Game::start(
 		Launch {
 			program: bin.join(Server::DreamDaemon.program()),
 			dmb: &options.dmb,
 			args: &options.args,
 			env: &HashMap::new(),
-			debug: Some((library, true))
+			debug: Some((library, wait_for_debugger))
 		},
 		|_, line| print!("  | {}", line),
 		|code| println!("== the world exited ({:?})", code)

@@ -1,6 +1,3 @@
-// The world tests/hot_reload_test edits while it runs. The test copies this
-// directory somewhere else first, so the files here stay as they are.
-
 // BEGIN_INTERNALS
 // END_INTERNALS
 
@@ -15,5 +12,8 @@
 // BEGIN_INCLUDE
 #include "main.dm"
 #include "reload.dm"
+#include "dependents.dm"
+#include "statics.dm"
 #include "resources.dm"
 // END_INCLUDE
+#define AFTER_THE_CODE

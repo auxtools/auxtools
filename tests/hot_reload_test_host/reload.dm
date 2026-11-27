@@ -1,15 +1,24 @@
-// The procs the test changes. It edits this file by replacing exact text, so
-// mind the tests when changing anything here.
-
 var/sleeper_state = "not started"
 var/sleeper_release = FALSE
 var/runtime_armed = FALSE
 var/breakpoint_armed = FALSE
 
+#define PARAM_TWINS(first, first_param, second, second_param) /proc/first(first_param) { twin_waiting += 1; while (twin_hold) sleep(1); twin_runs += first_param; } /proc/second(second_param) { twin_waiting += 1; while (twin_hold) sleep(1); twin_runs += second_param; }
+PARAM_TWINS(twin_e, e_param, twin_f, f_param)
+
+var/big_count = 0
+#define BIG1 big_count += 1;
+#define BIG4 BIG1 BIG1 BIG1 BIG1
+#define BIG16 BIG4 BIG4 BIG4 BIG4
+#define BIG64 BIG16 BIG16 BIG16 BIG16
+#define BIG256 BIG64 BIG64 BIG64 BIG64
+#define BIG1K BIG256 BIG256 BIG256 BIG256
+#define BIG4K BIG1K BIG1K BIG1K BIG1K
+#define BIG_PROC(name, param) /proc/name(param) { BIG4K BIG4K BIG4K BIG256 BIG256 BIG256 BIG16 BIG16 BIG16 BIG1 BIG1 }
+
 /proc/answer()
 	return 1
 
-// Started when the world starts, and waits until the test lets it finish
 /proc/sleeper()
 	sleeper_state = "sleeping"
 	while (!sleeper_release)
@@ -32,7 +41,6 @@ var/breakpoint_armed = FALSE
 	var/a = 1
 	return a
 
-// Gives the world a locals table with room for six
 /proc/many_locals()
 	var/a = 1
 	var/b = 2
@@ -61,14 +69,22 @@ var/breakpoint_armed = FALSE
 	x += 1
 	return x
 
-// Pause beneath a caller's try block for a reload.
+#define TWINS(first, second) /proc/first() { twin_waiting += 1; while (twin_hold) sleep(1); twin_runs += 1; } /proc/second() { twin_waiting += 1; while (twin_hold) sleep(1); twin_runs += 1; }
+var/twin_runs = 0
+var/twin_waiting = 0
+var/twin_hold = FALSE
+var/twin_armed = null
+TWINS(twin_a, twin_b)
+#define NAMED_TWINS(first, first_local, second, second_local) /proc/first() { var/first_local = 1; twin_waiting += 1; while (twin_hold) sleep(1); twin_runs += first_local; } /proc/second() { var/second_local = 1; twin_waiting += 1; while (twin_hold) sleep(1); twin_runs += second_local; }
+NAMED_TWINS(twin_c, c_local, twin_d, d_local)
+
 var/caught_armed = FALSE
 var/caught_by_tick = null
 var/caught_done = 0
 
 /proc/caught_target()
 	var/y = 1
-	y += 1 // @caught_target
+	y += 1
 	caught_done = y
 
 /proc/tick()
@@ -81,11 +97,14 @@ var/caught_done = 0
 	if (breakpoint_armed)
 		breakpoint_armed = FALSE
 		breakpoint_target()
+	if (twin_armed)
+		var/twin = twin_armed
+		twin_armed = null
+		spawn()
+			call(twin)(1)
 	if (runtime_armed)
 		runtime_armed = FALSE
 		runtime_target()
-
-// Phase 5: procs, overrides and var defaults the test adds or changes
 
 /datum/animal
 	var/sound = "..."
@@ -144,8 +163,6 @@ var/datum/animal/dog/legs_written = new
 /proc/in_lists(mob/m in world, o in global.vars)
 	return 1
 
-// Defaults that aren't constants, which the types' init procs set
-
 /datum/bag
 	var/list/items = list("a")
 
@@ -160,8 +177,6 @@ var/datum/bag/old_bag = new
 	var/datum/bag/b = new type
 	return b.items ? jointext(b.items, ",") : "none"
 
-// New types
-
 /obj/crate
 	name = "crate"
 	var/capacity = 4
@@ -173,8 +188,6 @@ var/datum/bag/old_bag = new
 /proc/crate_report(type)
 	var/obj/crate/c = new type
 	return "[c.name]|[c.desc]|[c.icon_state]|[c.density]|[c.capacity]|[c.describe_crate()]|[c.contents_log[1]]|[c.text]"
-
-// An override gets its settings from the declaration
 
 /datum/napper/proc/nap()
 	set waitfor = FALSE
@@ -188,8 +201,6 @@ var/datum/bag/old_bag = new
 /proc/nap_skipped(type)
 	var/datum/napper/n = new type
 	return isnull(n.nap())
-
-// Verbs
 
 /mob/helper/verb/greet()
 	set name = "Greet"
@@ -209,7 +220,93 @@ var/mob/helper/small/old_helper = new
 /proc/helper_greets(mob/helper/m)
 	return m.greet()
 
-// Another definition of a global proc
-
 /proc/first_def()
 	return "first"
+
+/datum/early/speak()
+	return "override"
+
+/datum/early/proc/speak()
+	return "declaration, then [..()]"
+
+/datum/early_apart/proc/speak()
+	return "declaration apart, then [..()]"
+
+/datum/late/proc/speak()
+	return "late declaration, then [..()]"
+
+/proc/early_global()
+	return "early declared"
+
+/proc/calls_early_global()
+	return early_global()
+
+/datum/twice/proc/speak()
+	return "declaration"
+
+/datum/twice/speak()
+	return "first override"
+
+/datum/twice/speak()
+	return "second override"
+
+/datum/inserted/proc/speak()
+	return "declaration"
+
+/datum/inserted/speak()
+	return "old first override"
+
+/datum/kin/proc/speak()
+	return "declaration"
+
+/datum/kin/middle/speak()
+	return "parent override"
+
+/datum/kin/middle/child
+
+/datum/lone/proc/speak()
+	return "declaration"
+
+/datum/lone/speak()
+	return "lone override"
+
+/obj/picker
+
+/datum/handled/proc/respond()
+	return "declaration"
+
+/datum/handled/respond()
+	return "override"
+
+/datum/holder
+
+/datum/gone/proc/speak()
+	return "gone declaration"
+
+/datum/last/proc/speak()
+	return "declaration"
+
+/datum/last/speak()
+	return "first override"
+
+/datum/last/speak()
+	return "last override"
+
+/datum/kept/proc/speak()
+	return "kept declaration"
+
+/datum/kept/speak()
+	return "kept first override"
+
+/datum/kept/speak()
+	return "kept second override"
+
+/datum/kept/speak()
+	return "kept third override"
+
+/datum/tallied
+
+/datum/asking
+
+/datum/config_limits
+	var/limit = 5

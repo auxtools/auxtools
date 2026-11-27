@@ -1,8 +1,3 @@
-// Resource files edited individually, together and with shared content
-// by the hot reload tests.
-
-
-
 /obj/lamp
 	icon = 'lamp.dmi'
 	icon_state = "on"
@@ -20,8 +15,6 @@ var/obj/lamp/placed_lamp
 var/obj/lamp_holder/lamp_holder
 var/obj/crate/placed_crate
 
-// Retain a built resource and create an instance from it after reload.
-
 var/held_lamp_icon = 'lamp.dmi'
 var/obj/held_lamp
 
@@ -37,7 +30,6 @@ var/obj/held_lamp
 	held_lamp.icon = held_lamp_icon
 	return "made"
 
-// Compiled proc referencing a resource through a constant.
 /proc/lamp_states()
 	return jointext(icon_states('lamp.dmi'), ",")
 
@@ -65,7 +57,9 @@ var/obj/held_lamp
 /proc/crate_ref()
 	return "\ref['crate.dmi']"
 
-// After 65,535 appearances, BYOND inserts a blank node for its reserved ID.
+/mob/lamp_chooser/verb/choose_lamp_state(state in icon_states('lamp.dmi'))
+	return state
+
 var/list/many_appearances
 
 /proc/make_many_appearances()
@@ -75,3 +69,8 @@ var/list/many_appearances
 		thing.name = "thing [i]"
 		many_appearances += thing
 	return "made"
+
+var/last_calls = 0
+
+/proc/last_in_file()
+	return "last [++last_calls]"

@@ -11,9 +11,12 @@ whose files aren't built is left out, with a warning.
 
 A .vsix is a zip: the extension under `extension/`, a manifest and a list of
 content types. This writes it directly, so there's nothing to install.
+
+Every file in this directory is packaged, apart from the names in NOT_PACKAGED.
 """
 
 import argparse
+import fnmatch
 import json
 import re
 import shutil
@@ -27,13 +30,25 @@ from xml.sax.saxutils import escape
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
-# VS Code platform, Rust target and files copied into bin/PLATFORM.
 PLATFORMS = [
 	("win32", "i686-pc-windows-msvc", ["auxtools.exe", "debug_server.dll"]),
 	("linux", "i686-unknown-linux-gnu", ["auxtools", "libdebug_server.so"]),
 ]
 
-EXTENSION_FILES = ["package.json", "extension.js", "expression.js", "unsaved.js", "buildflags.js", "langclient.js", "README.md"]
+NOT_PACKAGED = ["*.test.js", "package.py", "*.vsix", ".*"]
+
+
+def extension_files():
+	"""The files of this directory that are packaged, by their path from it.
+	`bin` is left to the platforms' programs, which come from `target/`."""
+	found = []
+	for path in sorted(HERE.rglob("*")):
+		parts = path.relative_to(HERE).parts
+		if parts[0] == "bin" or any(fnmatch.fnmatch(part, pattern) for part in parts for pattern in NOT_PACKAGED):
+			continue
+		if path.is_file():
+			found.append("/".join(parts))
+	return found
 
 
 def manifest(package):
@@ -68,7 +83,6 @@ def content_types(paths):
 	lines = ['<?xml version="1.0" encoding="utf-8"?>', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">']
 	for extension, kind in defaults.items():
 		lines.append(f'\t<Default Extension="{extension}" ContentType="{kind}" />')
-	# Everything else, binaries mostly, by name
 	for path in paths:
 		if Path(path).suffix not in defaults:
 			lines.append(f'\t<Override PartName="/{escape(path)}" ContentType="application/octet-stream" />')
@@ -112,29 +126,30 @@ def main():
 	args = parser.parse_args()
 
 	package = json.loads((HERE / "package.json").read_text())
-	# Require matching extension and binary versions.
 	if package["version"] != cargo_version():
 		sys.exit(f'package.json\'s version is {package["version"]}, and Cargo.toml\'s is {cargo_version()}: they go together')
 	out = Path(args.out) if args.out else Path(f'{package["name"]}-{package["version"]}.vsix')
 
 	files = {}
-	for name in EXTENSION_FILES:
+	for name in extension_files():
 		files[f"extension/{name}"] = ((HERE / name).read_bytes(), False)
-	files["extension/LICENSE"] = ((HERE / "LICENSE").read_bytes(), False)
+	for name in ["package.json", "README.md", "LICENSE", package["main"]]:
+		if f"extension/{Path(name).as_posix()}" not in files:
+			sys.exit(f"{HERE / name} is missing or left out of the package by NOT_PACKAGED")
 
 	platforms = 0
 	for platform, target, names in PLATFORMS:
 		built = [ROOT / "target" / target / args.profile / name for name in names]
 		missing = [str(path) for path in built if not path.is_file()]
 		if missing:
-			print(f"warning: omitting {platform}; missing binaries: {', '.join(missing)}", file=sys.stderr)
+			print(f"warning: omitting {platform} due to missing binaries: {', '.join(missing)}", file=sys.stderr)
 			continue
 		for path in built:
 			files[f"extension/bin/{platform}/{path.name}"] = (stripped(path), True)
 		platforms += 1
 
 	if platforms == 0:
-		sys.exit("no platform binaries found; build a target before packaging")
+		sys.exit("no platform binaries found, so build a target before packaging")
 
 	with zipfile.ZipFile(out, "w") as archive:
 		add(archive, "extension.vsixmanifest", manifest(package))

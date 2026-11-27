@@ -1,85 +1,91 @@
-use crate::{byond_string, raw_types, DMResult, Value};
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use crate::{byond_string, raw_types, DMResult, StringRef, Value};
+use std::{
+	collections::hash_map::RandomState,
+	hash::BuildHasher,
+	sync::{
+		atomic::{AtomicU64, Ordering::Relaxed},
+		LazyLock
+	}
+};
 
-fn get_next_id() -> f32 {
-	// This can (should) be only called from the main thread but we need to shut
-	// Rust up.
-	static NEXT_WEAKREF_ID: AtomicU32 = AtomicU32::new(1);
-	let id = NEXT_WEAKREF_ID.fetch_add(1, Relaxed);
-	id as f32
+type Id = (u64, u64);
+
+struct Issuer {
+	namespace: u64,
+	next: AtomicU64
 }
 
-/// A weak reference to some datum or atom in the game.
+impl Issuer {
+	fn new() -> Self {
+		Self {
+			namespace: RandomState::new().hash_one(std::process::id()),
+			next: AtomicU64::new(1)
+		}
+	}
+
+	fn issue(&self) -> Id {
+		(self.namespace, self.next.fetch_add(1, Relaxed))
+	}
+}
+
+static ISSUER: LazyLock<Issuer> = LazyLock::new(Issuer::new);
+
+fn id_text((namespace, serial): Id) -> String {
+	format!("{:x}-{}", namespace, serial)
+}
+
+fn parse_id(text: &[u8]) -> Option<Id> {
+	let (namespace, serial) = std::str::from_utf8(text).ok()?.split_once('-')?;
+	Some((u64::from_str_radix(namespace, 16).ok()?, serial.parse().ok()?))
+}
+
+fn id_of(val: &Value) -> Option<Id> {
+	let text = StringRef::from_value(val.get(byond_string!("__auxtools_weakref_id")).ok()?)?;
+	parse_id(text.data())
+}
+
+/// A non-owning weak reference to a DM datum.
 ///
-/// Normal [`Value`]s are not safe to move between threads.
-/// Using methods like [`Value::set`] or [`Value::call`] can at best cause
-/// undefined behavior, at worst crash the server.
+/// `Copy`, `Send`, and `Sync`, so it can be stored in statics or sent across
+/// threads without keeping the datum alive. Create one with `Value::as_weak`
+/// and call [`WeakValue::upgrade`] only on BYOND's thread.
 ///
-/// A way to bypass that limitation is to store a raw value
-/// and use [`Value::from_raw`] on the main thread to actually work
-/// with it. However, if that [`Value`] is deleted, your stored value
-/// will point to another datum or to simply nothing.
-///
-/// This struct serves to solve the latter problem. You can use
-/// [`Value::as_weak`] to create a weak reference to it.
-/// The reference can be stored in global structures or passed to
-/// other threads. You can then return it to the main thread as needed,
-/// and call [`WeakValue::upgrade`] to turn it back into a real [`Value`].
-/// If the datum pointed to was deleted in the meantime, `upgrade` will
-/// return None, otherwise you get your datum back.
-///
-/// However, this struct is not entirely thread safe, since you can
-/// [`WeakValue::upgrade`] on another thread and invoke undefined behavior with
-/// the resulting [`Value`]. So, don't do that.
-///
-/// Using this struct requires all datums to have a `__auxtools_weakref_id`
-/// variable.
-///
-/// # Example
-/// ```ignore
-/// let weakref = thing.as_weak()?;
-/// callbacks.set(some_id, weakref);
-///
-/// ... some proc calls later ...
-///
-/// let weakref = callbacks.get(some_id);
-/// if let Some(thing) = weakref.upgrade() {
-///     thing.call("callback", &[])?;
-/// }
-/// ```
+/// Target datum types must declare `var/__auxtools_weakref_id` in DM so
+/// auxtools can tag instances with a unique text ID (reused across multiple
+/// auxtools libraries in the same world).
 #[derive(Copy, Clone)]
 pub struct WeakValue {
 	inner: raw_types::values::Value,
-	id: f32
+	id: Id
 }
 
 impl WeakValue {
-	/// Creates a weak reference to the given datum.
 	pub(crate) fn new(val: &Value) -> DMResult<Self> {
-		if let Ok(id) = val.get_number(byond_string!("__auxtools_weakref_id")) {
+		if let Some(id) = id_of(val) {
 			return Ok(Self { inner: val.raw, id });
 		}
 
-		let id = get_next_id();
-		val.set(byond_string!("__auxtools_weakref_id"), Value::from(id))?;
+		let id = ISSUER.issue();
+		val.set(byond_string!("__auxtools_weakref_id"), Value::from_string(id_text(id))?)?;
 		Ok(Self { inner: val.raw, id })
 	}
 
-	/// Converts the stored raw value to a full fledged [`Value`]
-	/// and checks if it has been deleted in the meantime.
+	/// Attempts to upgrade this weak reference to an owning `Value`.
+	///
+	/// Call on BYOND's thread. Returns `None` if the datum was deleted (even if
+	/// another datum reused its slot) or if DM code changed its
+	/// `__auxtools_weakref_id` variable. Use `upgrade_or_null` to receive
+	/// `Value::NULL` instead of `None`.
 	pub fn upgrade(&self) -> Option<Value> {
 		let real_val = unsafe { Value::from_raw(self.inner) };
-		let id = real_val.get_number(byond_string!("__auxtools_weakref_id")).ok()?;
 
-		if self.id != id {
+		if id_of(&real_val) != Some(self.id) {
 			return None;
 		}
 
 		Some(real_val)
 	}
 
-	/// Same as [`WeakValue::upgrade`] but returns a null if the datum was
-	/// deleted, so you can pass it straight into DM.
 	pub fn upgrade_or_null(&self) -> Value {
 		match self.upgrade() {
 			Some(v) => v,
@@ -89,8 +95,48 @@ impl WeakValue {
 }
 
 impl Value {
-	/// Creates a [`WeakValue`] referencing this datum.
+	/// Creates a `WeakValue` referencing this datum.
+	///
+	/// Reads the datum's `__auxtools_weakref_id` variable and assigns a new ID
+	/// if it does not already hold one.
+	///
+	/// # Errors
+	///
+	/// Returns an error if this value does not have an `__auxtools_weakref_id`
+	/// variable.
 	pub fn as_weak(&self) -> DMResult<WeakValue> {
 		WeakValue::new(self)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn ids_past_f32_precision_stay_distinct() {
+		let namespace = Issuer::new().namespace;
+		let ids = [1 << 24, (1 << 24) + 1, u32::MAX as u64 + 1].map(|serial| (namespace, serial));
+		for id in ids {
+			assert_eq!(
+				parse_id(id_text(id).as_bytes()),
+				Some(id),
+				"parsing {:?} did not give back id {:?}",
+				id_text(id),
+				id
+			);
+		}
+		assert_ne!(id_text(ids[0]), id_text(ids[1]));
+	}
+
+	#[test]
+	fn a_second_library_never_reissues_an_adopted_id() {
+		let (first, second) = (Issuer::new(), Issuer::new());
+		let adopted = parse_id(id_text(first.issue()).as_bytes());
+		let reissued = parse_id(id_text(second.issue()).as_bytes());
+		assert_ne!(
+			adopted, reissued,
+			"the second library adopted the first library's id for a datum, then issued the same id to a new datum, which can reuse the slot"
+		);
 	}
 }

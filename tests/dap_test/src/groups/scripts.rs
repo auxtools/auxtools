@@ -1,12 +1,7 @@
-//! Client script reloads and reboot restoration, inspected with `#script`.
-
-use std::process::Command;
-
 use serde_json::json;
 
-use crate::{ok, paths, paths::ByondCommand, world::World};
+use crate::{ok, paths, world::World};
 
-/// Script string ID (or "none"), file resource IDs and combined login text.
 fn script(world: &mut World) -> (String, Vec<String>, String) {
 	let shown = world.eval_global("#script");
 	let mut lines = shown.splitn(3, '\n');
@@ -25,7 +20,6 @@ fn script(world: &mut World) -> (String, Vec<String>, String) {
 	)
 }
 
-/// Wait for a client script reload report.
 fn told(world: &mut World) {
 	world.wait_output("Hot reload: client script updated.");
 	let event = world.event("auxtoolsScript");
@@ -33,15 +27,15 @@ fn told(world: &mut World) {
 }
 
 pub fn run() {
-	let dir = super::reloading::long_name(super::reloading::copy_of_the_world("scripts"));
+	let copy = super::reloading::copy_of_the_world("scripts");
+	let dir = super::reloading::long_name(copy.to_path_buf());
 	std::fs::write(dir.join("x.dms"), "<style>x {}</style>\n").unwrap();
 	std::fs::write(dir.join("a.css"), "<style>a {}</style>\n").unwrap();
 	std::fs::write(dir.join("script.dm"), "/client/script = \"<style>first {}</style>\"\n").unwrap();
 	let dme = dir.join("dap_test_host.dme");
 	let source = std::fs::read_to_string(&dme).unwrap();
 	std::fs::write(&dme, source + "#include \"x.dms\"\n#include \"script.dm\"\n").unwrap();
-	let built = Command::new(paths::find_dm()).with_byond_paths().arg(&dme).status().unwrap();
-	assert!(built.success(), "dreammaker build failed");
+	paths::compile(&dme);
 
 	let mut world = World::launch_in(dir.clone(), json!({ "hotReload": true }));
 	world.catch_runtimes(false);
@@ -61,7 +55,9 @@ pub fn run() {
 	ok("client script text reload");
 
 	world.marks.edit("script.dm", "\"<style>second {}</style>\"", "'a.css'");
-	world.wait_output("client script: client/script references 'a.css'; resource-file scripts require a rebuild; the world keeps the script it has");
+	world.wait_output(
+		"client script not reloaded (keeping the current script): client/script references resource file 'a.css', which requires a rebuild"
+	);
 	assert_eq!(script(&mut world).2, full);
 	ok("resource-file script requires rebuild");
 
@@ -81,10 +77,9 @@ pub fn run() {
 	world.run("reboot");
 	world.wait_count("dap: world/New", 2);
 	world.reloaded("client script");
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	assert_eq!(script(&mut world).2, "<style>x {}</style>\n\n<style>third {}</style>");
 	ok("client script reload after reboot");
 
 	world.end();
-	let _ = std::fs::remove_dir_all(&dir);
 }

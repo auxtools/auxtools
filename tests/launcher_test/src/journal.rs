@@ -1,115 +1,42 @@
-//! The world's record of what happened in it, read from the command line:
-//! `log`, and the waits that come from it
-
 use std::{
-	io::{BufRead, BufReader, Read},
 	path::Path,
-	process::{Child, Command, Stdio},
-	sync::mpsc,
 	time::{Duration, Instant}
 };
 
-use crate::client::{launcher_command, launcher_path};
+use test_support::cli::{self, Background, Cli, TIMEOUT};
 
-const TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Runs a command against the world in process `pid`, and checks its exit code
+#[track_caller]
 pub fn run(pid: u64, args: &[&str], code: i32) -> String {
-	let pid = pid.to_string();
-	let args: Vec<&str> = ["--pid", pid.as_str()].iter().chain(args).copied().collect();
-	let (got, printed) = launcher_command(&args);
-	assert_eq!(got, code, "`{}` gave {}, not {}: {}", args.join(" "), got, code, printed);
+	Cli::new(pid).run(args, code)
+}
+
+#[track_caller]
+pub fn wait_at(pid: u64, place: &str) -> Background {
+	let mut waiting = Background::start(pid, &["wait", "pause", "--break", place, "--timeout", "15"]);
+	waiting.error_with("breakpoint set at ");
+	waiting
+}
+
+#[track_caller]
+pub fn paused_at(pid: u64, place: &str, trigger: impl FnOnce()) -> String {
+	let waiting = wait_at(pid, place);
+	trigger();
+	let (exit, printed) = waiting.finish();
+	assert_eq!(exit, 0, "`wait pause --break {}` gave {}: {}", place, exit, printed);
 	printed
 }
 
-/// A command left running, whose lines are read as they come
-pub struct Background {
-	child: Child,
-	lines: mpsc::Receiver<String>,
-	/// What it printed, so far
-	pub printed: String
-}
-
-impl Background {
-	pub fn start(pid: u64, args: &[&str]) -> Self {
-		let mut child = Command::new(launcher_path())
-			.arg("--pid")
-			.arg(pid.to_string())
-			.args(args)
-			.stdout(Stdio::piped())
-			.stderr(Stdio::piped())
-			.spawn()
-			.unwrap();
-		let (sender, lines) = mpsc::channel();
-		let stdout = child.stdout.take().unwrap();
-		let errors = sender.clone();
-		std::thread::spawn(move || {
-			for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-				let _ = sender.send(line);
-			}
-		});
-		let mut stderr = child.stderr.take().unwrap();
-		std::thread::spawn(move || {
-			let mut text = String::new();
-			let _ = stderr.read_to_string(&mut text);
-			for line in text.lines() {
-				let _ = errors.send(line.to_owned());
-			}
-		});
-		Self {
-			child,
-			lines,
-			printed: String::new()
-		}
-	}
-
-	/// Waits for a line that has `text` in it
-	pub fn line_with(&mut self, text: &str) -> String {
-		let deadline = Instant::now() + TIMEOUT;
-		loop {
-			let line = self
-				.lines
-				.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-				.unwrap_or_else(|_| panic!("no line with {:?} came; it printed {}", text, self.printed));
-			self.printed += &line;
-			self.printed += "\n";
-			if line.contains(text) {
-				return line;
-			}
-		}
-	}
-
-	/// Waits for it to exit: its exit code and everything it printed
-	pub fn finish(mut self) -> (i32, String) {
-		let deadline = Instant::now() + TIMEOUT;
-		let code = loop {
-			if let Some(status) = self.child.try_wait().unwrap() {
-				break status.code().unwrap_or(-1);
-			}
-			assert!(Instant::now() < deadline, "timed out waiting for process exit; output: {}", self.printed);
-			std::thread::sleep(Duration::from_millis(50));
-		};
-		// What's left to read is read by now, or soon
-		while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(2)) {
-			self.printed += &line;
-			self.printed += "\n";
-		}
-		(code, self.printed)
-	}
-
-	/// Its process id
-	#[cfg(unix)]
-	pub fn id(&self) -> u32 {
-		self.child.id()
-	}
-
-	pub fn stop(mut self) {
-		let _ = self.child.kill();
-		let _ = self.child.wait();
+#[track_caller]
+pub fn rounds_pass(pid: u64, more: u64) {
+	let rounds = || run(pid, &["eval", "rounds"], 0).trim().parse::<u64>().unwrap();
+	let (from, deadline) = (rounds(), Instant::now() + TIMEOUT);
+	while rounds() < from + more {
+		assert!(Instant::now() < deadline, "the world's loop stopped at round {}", from);
+		std::thread::sleep(Duration::from_millis(20));
 	}
 }
 
-/// The number of the newest entry in the record
+#[track_caller]
 pub fn newest(pid: u64) -> u64 {
 	let printed = run(pid, &["log", "--last", "1", "--json"], 0);
 	printed.lines().last().map_or(0, |line| {
@@ -117,8 +44,6 @@ pub fn newest(pid: u64) -> u64 {
 	})
 }
 
-/// Runtime errors go in the record, with their stacks, while the world runs
-/// on: `log --runtimes` prints them, and `--follow` as they come
 pub fn runtimes(pid: u64, dir: &Path) {
 	let before = newest(pid);
 	let since = before.to_string();
@@ -162,7 +87,6 @@ pub fn runtimes(pid: u64, dir: &Path) {
 	);
 	println!("ok: journal JSON Lines");
 
-	// It starts with what's there already, after --since
 	let mut follow = Background::start(pid, &["log", "--runtimes", "--follow", "--json", "--since", &before.to_string()]);
 	follow.line_with("cannot read from list");
 	let now = newest(pid);
@@ -178,21 +102,17 @@ pub fn runtimes(pid: u64, dir: &Path) {
 	println!("ok: follow runtime journal");
 }
 
-/// Hot reloads go in the record, applied or not, reported by the launcher
-/// that reloads the world: `wait reload` waits for one, and says whether
-/// it was applied in its exit code; an attached launcher shows them
 pub fn reloads(pid: u64, code: &Path) {
 	let source = std::fs::read_to_string(code).unwrap();
 	assert!(source.contains("\treturn 2\n"), "unexpected value() source after test setup");
 	let printed = run(pid, &["wait", "reload", "--timeout", "1"], 2);
-	assert_eq!(printed.trim(), "error: timed out after 1 second waiting for a hot reload attempt.");
+	assert_eq!(printed.trim(), "error: timed out after 1 second waiting for a hot reload attempt");
 
-	// Add a known-bug warning without moving subsequent proc lines.
 	let since = newest(pid).to_string();
 	let looped = "\tfor (var/a in list(1)) { try { for (var/b in list(2)) { a += b } } catch (var/e) { a = e } }\n\treturn 3\n";
 	assert!(source.contains("\treturn 2\n\n"), "unexpected value() source after test setup");
 	std::fs::write(code, source.replace("\treturn 2\n\n", looped)).unwrap();
-	let printed = run(pid, &["wait", "reload", "--since", &since, "--timeout", "60"], 0);
+	let printed = run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
 	assert!(
 		printed.starts_with('#') && printed.contains(" hot reload applied: reloaded /value"),
 		"unexpected wait reload output: {}",
@@ -207,7 +127,7 @@ pub fn reloads(pid: u64, code: &Path) {
 
 	let since = newest(pid).to_string();
 	std::fs::write(code, source.replace("\treturn 2\n", "\treturn nothing_called_this\n")).unwrap();
-	let printed = run(pid, &["wait", "reload", "--since", &since, "--timeout", "60", "--json"], 1);
+	let printed = run(pid, &["wait", "reload", "--since", &since, "--timeout", "15", "--json"], 1);
 	let entry: serde_json::Value = serde_json::from_str(printed.lines().next().unwrap()).unwrap();
 	assert_eq!((&entry["kind"], &entry["applied"]), (&"reload".into(), &false.into()), "{}", printed);
 	let errors = entry["errors"].to_string();
@@ -217,16 +137,15 @@ pub fn reloads(pid: u64, code: &Path) {
 		errors
 	);
 	assert!(
-		printed.ends_with("\nerror: the hot reload was rejected.\n"),
+		printed.ends_with("\nerror: the hot reload was rejected\n"),
 		"unexpected wait reload output: {}",
 		printed
 	);
 	println!("ok: rejected reload diagnostics ({})", errors);
 
-	// One with an error the launcher finds before the world is sent anything
 	let since = newest(pid).to_string();
 	std::fs::write(code, source.replace("\treturn 2\n", "\treturn ]\n")).unwrap();
-	let printed = run(pid, &["wait", "reload", "--since", &since, "--timeout", "60"], 1);
+	let printed = run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 1);
 	let error = printed
 		.lines()
 		.find(|line| line.starts_with("  error: "))
@@ -244,16 +163,14 @@ pub fn reloads(pid: u64, code: &Path) {
 		error.trim()
 	);
 
-	// One attached to the world, which doesn't reload it, hears of it
-	let mut attached = crate::client::Launcher::start();
+	let mut attached = test_support::dap::Launcher::start();
 	attached.initialize();
 	attached.request("attach", serde_json::json!({ "processId": pid, "hotReload": false }));
 	attached.event("initialized");
 	attached.request("configurationDone", serde_json::json!({}));
 
-	// The next one, waited for as it comes
-	let waiting = Background::start(pid, &["wait", "reload", "--timeout", "60"]);
-	std::thread::sleep(Duration::from_secs(1));
+	let since = newest(pid).to_string();
+	let waiting = Background::start(pid, &["wait", "reload", "--since", &since, "--timeout", "15"]);
 	std::fs::write(code, &source).unwrap();
 	let (exit, printed) = waiting.finish();
 	assert!(
@@ -262,7 +179,7 @@ pub fn reloads(pid: u64, code: &Path) {
 		exit,
 		printed
 	);
-	attached.wait_output("Hot reload (by another launcher): reloaded /value");
+	attached.wait_output("Hot reload from another session: reloaded /value");
 	attached.disconnect(serde_json::json!({}));
 	println!("ok: attached launcher reload reports");
 
@@ -307,30 +224,168 @@ pub fn reloads(pid: u64, code: &Path) {
 	);
 	println!("ok: uptime and latest reload status");
 
-	// A wait must recognize its breakpoint after reload moves it within the
-	// proc.
 	let place = format!("attach_host.dm:{}", crate::line_of(code, "\t\ttotal += i // first loop"));
-	let waiting = Background::start(pid, &["wait", "pause", "--break", &place, "--timeout", "60"]);
-	std::thread::sleep(Duration::from_secs(1));
+	let waiting = wait_at(pid, &place);
 	let since = newest(pid).to_string();
 	std::fs::write(code, source.replace("/proc/two_loops()\n", "/proc/two_loops()\n\tvar/moved = 1\n")).unwrap();
-	run(pid, &["wait", "reload", "--since", &since, "--timeout", "60"], 0);
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
 	run(pid, &["eval", "--spawn", "two_loops()"], 0);
 	let (exit, printed) = waiting.finish();
 	assert_eq!(exit, 0, "wait pause after a reload gave: {}", printed);
 	run(pid, &["continue"], 0);
 	let since = newest(pid).to_string();
 	std::fs::write(code, &source).unwrap();
-	run(pid, &["wait", "reload", "--since", &since, "--timeout", "60"], 0);
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
 	println!("ok: wait pause keeps its breakpoint through a reload");
+
+	let guard = code.with_file_name("guard");
+	let place = format!("attach_host.dm:{}", crate::line_of(code, "\t\ttotal += i // second loop"));
+	let waiting = wait_at(pid, &place);
+	let since = newest(pid).to_string();
+	let guarded = "\t\tif (fexists(\"guard\"))\n\t\t\ttotal += i // second loop\n";
+	std::fs::write(code, source.replace("\t\ttotal += i // second loop\n", guarded)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	run(pid, &["eval", "--spawn", "two_loops()"], 0);
+	rounds_pass(pid, 2);
+	std::fs::write(&guard, "yes").unwrap();
+	run(pid, &["eval", "--spawn", "two_loops()"], 0);
+	let (exit, printed) = waiting.finish();
+	let line = crate::line_of(code, "\t\t\ttotal += i // second loop");
+	assert!(
+		exit == 0 && printed.contains(&format!("#0 /two_loops  attach_host.dm:{}\n", line)),
+		"wait pause on a statement put under a condition gave {}: {}",
+		exit,
+		printed
+	);
+	run(pid, &["continue"], 0);
+	std::fs::remove_file(&guard).unwrap();
+	let since = newest(pid).to_string();
+	std::fs::write(code, &source).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	println!("ok: wait pause keeps its breakpoint on a statement put under a condition");
+
+	let before =
+		"/proc/notified()\n\tvar/total = 1\n\ttotal += 2 // notify\n\tif (fexists(\"guard\"))\n\t\ttotal *= 3\n\treturn total\n\n/proc/two_loops()\n";
+	let after = "/proc/notified()\n\tvar/total = 1\n\tif (fexists(\"guard\"))\n\t\ttotal *= 3\n\t\ttotal += 2 // notify\n\treturn \
+	             total\n\n/proc/two_loops()\n";
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", before)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	let place = format!("attach_host.dm:{}", crate::line_of(code, "\ttotal += 2 // notify"));
+	let waiting = wait_at(pid, &place);
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", after)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	run(pid, &["eval", "--spawn", "notified()"], 0);
+	rounds_pass(pid, 2);
+	std::fs::write(&guard, "yes").unwrap();
+	run(pid, &["eval", "--spawn", "notified()"], 0);
+	let (exit, printed) = waiting.finish();
+	let line = crate::line_of(code, "\t\ttotal += 2 // notify");
+	assert!(
+		exit == 0 && printed.contains(&format!("#0 /notified  attach_host.dm:{}\n", line)),
+		"wait pause on a statement moved into the next block gave {}: {}",
+		exit,
+		printed
+	);
+	run(pid, &["continue"], 0);
+	std::fs::remove_file(&guard).unwrap();
+	let since = newest(pid).to_string();
+	std::fs::write(code, &source).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	println!("ok: wait pause keeps its breakpoint on a statement moved into the next block");
+
+	let before = "/proc/looped()\n\tvar/total = 1\n\tfor (var/i in list(1, 2))\n\t\ttotal += i * 2 // notify\n\t\tif \
+	              (fexists(\"guard\"))\n\t\t\ttotal *= 3\n\treturn total\n\n/proc/two_loops()\n";
+	let after = "/proc/looped()\n\tvar/total = 1\n\tfor (var/i in list(1, 2))\n\t\tif (fexists(\"guard\"))\n\t\t\ttotal *= 3\n\t\t\ttotal += i * 2 \
+	             // notify\n\treturn total\n\n/proc/two_loops()\n";
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", before)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	let place = format!("attach_host.dm:{}", crate::line_of(code, "\t\ttotal += i * 2 // notify"));
+	let waiting = wait_at(pid, &place);
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", after)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	run(pid, &["eval", "--spawn", "looped()"], 0);
+	rounds_pass(pid, 2);
+	std::fs::write(&guard, "yes").unwrap();
+	run(pid, &["eval", "--spawn", "looped()"], 0);
+	let (exit, printed) = waiting.finish();
+	let line = crate::line_of(code, "\t\t\ttotal += i * 2 // notify");
+	assert!(
+		exit == 0 && printed.contains(&format!("#0 /looped  attach_host.dm:{}\n", line)),
+		"wait pause on a statement moved to the end of a loop's body gave {}: {}",
+		exit,
+		printed
+	);
+	run(pid, &["continue"], 0);
+	std::fs::remove_file(&guard).unwrap();
+	let since = newest(pid).to_string();
+	std::fs::write(code, &source).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	println!("ok: wait pause keeps its breakpoint on a statement moved to the end of a loop's body");
+
+	let before = "/proc/branched()\n\tvar/total = 1\n\ttotal += 2 // notify\n\tif (fexists(\"guard\"))\n\t\ttotal *= 3\n\telse\n\t\ttotal -= \
+	              1\n\treturn total\n\n/proc/two_loops()\n";
+	let after = "/proc/branched()\n\tvar/total = 1\n\tif (fexists(\"guard\"))\n\t\ttotal *= 3\n\t\ttotal += 2 // notify\n\telse\n\t\ttotal -= \
+	             1\n\treturn total\n\n/proc/two_loops()\n";
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", before)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	let place = format!("attach_host.dm:{}", crate::line_of(code, "\ttotal += 2 // notify"));
+	let waiting = wait_at(pid, &place);
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", after)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	run(pid, &["eval", "--spawn", "branched()"], 0);
+	rounds_pass(pid, 2);
+	std::fs::write(&guard, "yes").unwrap();
+	run(pid, &["eval", "--spawn", "branched()"], 0);
+	let (exit, printed) = waiting.finish();
+	let line = crate::line_of(code, "\t\ttotal += 2 // notify");
+	assert!(
+		exit == 0 && printed.contains(&format!("#0 /branched  attach_host.dm:{}\n", line)),
+		"wait pause on a statement moved to the end of an `if` with an `else` gave {}: {}",
+		exit,
+		printed
+	);
+	run(pid, &["continue"], 0);
+	std::fs::remove_file(&guard).unwrap();
+	let since = newest(pid).to_string();
+	std::fs::write(code, &source).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	println!("ok: wait pause keeps its breakpoint on a statement moved to the end of an `if` with an `else`");
+
+	let before = "/proc/spawned()\n\tvar/total = 1\n\ttotal += 2 // notify\n\ttotal -= 1\n\treturn total\n\n/proc/two_loops()\n";
+	let after = "/proc/spawned()\n\tvar/total = 1\n\tspawn(10)\n\t\ttotal += 2 // notify\n\ttotal -= 1\n\treturn total\n\n/proc/two_loops()\n";
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", before)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	let place = format!("attach_host.dm:{}", crate::line_of(code, "\ttotal += 2 // notify"));
+	let waiting = wait_at(pid, &place);
+	let since = newest(pid).to_string();
+	std::fs::write(code, source.replace("/proc/two_loops()\n", after)).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	run(pid, &["eval", "--spawn", "spawned()"], 0);
+	let (exit, printed) = waiting.finish();
+	let line = crate::line_of(code, "\t\ttotal += 2 // notify");
+	assert!(
+		exit == 0 && printed.contains(&format!("#0 /spawned  attach_host.dm:{}\n", line)),
+		"wait pause on a statement moved to the end of a `spawn` block gave {}: {}",
+		exit,
+		printed
+	);
+	run(pid, &["continue"], 0);
+	let since = newest(pid).to_string();
+	std::fs::write(code, &source).unwrap();
+	run(pid, &["wait", "reload", "--since", &since, "--timeout", "15"], 0);
+	println!("ok: wait pause keeps its breakpoint on a statement moved to the end of a `spawn` block");
 }
 
-/// A reboot goes in the record, whose numbers go on in the new world:
-/// `wait reboot` waits for it, and for the new world to answer
 pub fn reboot(pid: u64, dir: &Path) {
 	let before = newest(pid);
-	let waiting = Background::start(pid, &["wait", "reboot", "--timeout", "60"]);
-	std::thread::sleep(Duration::from_secs(1));
+	let waiting = Background::start(pid, &["wait", "reboot", "--since", &before.to_string(), "--timeout", "15"]);
 	std::fs::write(dir.join("reboot"), "yes").unwrap();
 	let (exit, printed) = waiting.finish();
 	assert!(
@@ -347,8 +402,6 @@ pub fn reboot(pid: u64, dir: &Path) {
 		"status said {}",
 		printed
 	);
-	// The load that's in the record already is one to wait for, given where to
-	// look from
 	let printed = run(pid, &["wait", "reboot", "--since", &before.to_string(), "--timeout", "5", "--json"], 0);
 	let entry: serde_json::Value = serde_json::from_str(&printed).unwrap_or_else(|_| panic!("unexpected wait reboot --json output: {}", printed));
 	assert!(
@@ -373,20 +426,19 @@ pub fn reboot(pid: u64, dir: &Path) {
 		"log --world said {}",
 		printed
 	);
-	// The launcher gives the new world the changes made since it was built
-	let printed = run(pid, &["wait", "reload", "--since", &number.to_string(), "--timeout", "60"], 0);
+	let printed = run(pid, &["wait", "reload", "--since", &number.to_string(), "--timeout", "15"], 0);
 	assert!(printed.contains("hot reload applied: "), "unexpected wait reload output: {}", printed);
 	println!("ok: journal continuity across reboot");
 }
 
-/// A `wait reboot` for a world that's about to end, not reboot
+#[track_caller]
 pub fn wait_for_reboot(pid: u64) -> Background {
-	let waiting = Background::start(pid, &["wait", "reboot", "--timeout", "60"]);
+	let waiting = Background::start(pid, &["wait", "reboot", "--timeout", "15"]);
 	std::thread::sleep(Duration::from_secs(1));
 	waiting
 }
 
-/// The world ended: the wait says it went away
+#[track_caller]
 pub fn world_went_away(waiting: Background) {
 	let (exit, printed) = waiting.finish();
 	assert!(
@@ -398,51 +450,42 @@ pub fn world_went_away(waiting: Background) {
 	println!("ok: world exit during reboot wait");
 }
 
-/// Waits for the world to be running again, and says how long that took
-fn until_running(pid: u64) -> Duration {
+#[track_caller]
+fn until_running(pid: u64) {
 	let started = Instant::now();
 	loop {
 		if run(pid, &["status"], 0).starts_with(&format!("pid {}: running\n", pid)) {
-			return started.elapsed();
+			return;
 		}
 		assert!(started.elapsed() < TIMEOUT, "the world stayed paused");
 		std::thread::sleep(Duration::from_millis(200));
 	}
 }
 
-/// A held pause with --hold-max ends by itself when nobody debugging comes
-/// back to it, and the record says so; AUXTOOLS_HOLD_MAX does the same
 pub fn hold_max(pid: u64) {
-	let printed = run(pid, &["pause", "--hold-max", "2"], 0);
+	let asked = Instant::now();
+	let printed = run(pid, &["pause", "--hold-max", "1.5"], 0);
 	assert!(
 		printed.starts_with(&format!("pid {}: paused by request", pid)),
 		"unexpected pause output: {}",
 		printed
 	);
-	assert!(
-		run(pid, &["status"], 0).starts_with(&format!("pid {}: paused", pid)),
-		"the pause wasn't held"
-	);
-	let took = until_running(pid);
-	assert!(took > Duration::from_secs(1), "the pause was let go after {:?}", took);
+	until_running(pid);
+	let took = asked.elapsed();
+	assert!(took >= Duration::from_millis(1500), "the pause was let go after {:?}", took);
 	let printed = run(pid, &["log", "--world", "--last", "1"], 0);
 	assert!(
-		printed.contains("retained pause resumed automatically: no debugger was connected for 2 seconds (--hold-max)"),
+		printed.contains("world resumed automatically after 1.5s with no debugger connected (--hold-max)"),
 		"log --world said {}",
 		printed
 	);
 	println!("ok: held-pause expiry journal");
 
-	let out = Command::new(launcher_path())
-		.args(["--pid", &pid.to_string(), "pause"])
-		.env("AUXTOOLS_HOLD_MAX", "1")
-		.output()
-		.unwrap();
-	assert!(out.status.success(), "unexpected pause output: {}", String::from_utf8_lossy(&out.stderr));
+	let paused = cli::ran(Cli::new(pid).command(&["pause"]).env("AUXTOOLS_HOLD_MAX", "0.5"), None);
+	assert_eq!(paused.code, 0, "unexpected pause output: {}", paused.err);
 	until_running(pid);
-	// Without it, a held pause lasts
 	run(pid, &["pause"], 0);
-	std::thread::sleep(Duration::from_secs(3));
+	std::thread::sleep(Duration::from_secs(2));
 	assert!(
 		run(pid, &["status"], 0).starts_with(&format!("pid {}: paused", pid)),
 		"a pause without --hold-max was let go"

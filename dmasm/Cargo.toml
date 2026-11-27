@@ -1,0 +1,17 @@
+[package]
+name = "dmasm"
+description = "Assembles, disassembles, and compiles DM bytecode for BYOND builds 515.1637 to 516.1689, re-exporting dmasm-bytecode, dmasm-compiler, and dmasm-reload"
+version = "0.1.0"
+authors = ["Sophie Wallace <sophie@wiox.me>"]
+edition = "2018"
+license = "GPL-3.0"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dmasm-bytecode = { path = "bytecode" }
+dmasm-compiler = { path = "compiler" }
+dmasm-reload = { path = "reload" }
+
+[features]
+serde = ["dmasm-bytecode/serde", "dmasm-compiler/serde", "dmasm-reload/serde"]

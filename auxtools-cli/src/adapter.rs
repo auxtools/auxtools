@@ -1,28 +1,28 @@
-//! Translate DAP requests and debug server events.
-//!
-//! The adapter launches or attaches to a world and reconnects after reboots.
-//! Launches without debugging still connect for hot reload.
-//!
-//! A single event loop handles client messages, connections, source changes
-//! and process exits. Breakpoints are retained for reconnection.
-
 use std::{
 	collections::{BTreeMap, HashMap, HashSet},
 	io::BufReader,
 	path::{Path, PathBuf},
-	sync::{mpsc, Arc, Mutex},
+	sync::{
+		atomic::{AtomicBool, Ordering},
+		mpsc, Arc, Mutex
+	},
 	time::{Duration, Instant}
 };
 
 use auxtools_cli::{
 	byond::{self, Server},
+	client::{
+		ops::{Asks, Ending, Operations, Placed, Trigger},
+		when_listening
+	},
 	game::{Game, Launch},
-	local::{self, Stream},
-	server_types::{
-		self as aux, ContinueKind, InstructionRef, ProcRef, Request as AuxRequest, Response as AuxResponse, ENDING_CONTEXT, GLOBAL_INIT, HELPER_FILE
-	}
+	local::{self, Stream}
+};
+use auxtools_protocol::{
+	self as aux, ContinueKind, InstructionRef, ProcRef, Request as AuxRequest, Response as AuxResponse, GLOBAL_INIT, HELPER_FILE
 };
 use dap_types::*;
+use dmasm::diagnostic::{Diagnostic, Id};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -37,48 +37,34 @@ mod data;
 mod files;
 mod join;
 mod journal;
+mod lifecycle;
 mod profile;
-mod restart;
 mod script;
 mod skin;
 mod status;
 
 pub use journal::reload_by_another;
+pub use lifecycle::{default_args, Ask, CommandLine};
 
-/// Exception filter for uncaught runtime errors.
 const RUNTIMES: &str = "runtimes";
-/// Exception filter for runtime errors inside a `try` block.
 const CAUGHT: &str = "caught";
-/// Source reference for stddef.dm.
 const STDDEF_REFERENCE: i64 = 1;
-/// Timeout for the client to disconnect after the world exits.
-const EXIT_GRACE: Duration = Duration::from_secs(5);
-/// Grace period before forcibly terminating the world.
-const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 
-/// Diagnostic for line breakpoints in a world built without debug information.
-pub const NO_LINES: &str =
-	"the world was compiled without debug information, so it has no line numbers: add #define DEBUG to the .dme and rebuild, or break on a proc";
-/// Diagnostic for a line with no executable code.
+pub const NO_LINES: &str = "the world has no line numbers because it was compiled without debug information. Add #define DEBUG to the .dme and \
+                            rebuild, or set a breakpoint on a proc";
 const NO_CODE: &str = "no executable code at or after this line";
-/// Storage key for function breakpoints.
+const REMOVED_BY_RELOAD: &str = "a hot reload removed the code at this address";
 const FUNCTION_BREAKPOINTS: &str = "<functions>";
-/// Progress operations indexed by their client-visible IDs.
 const STARTING: &str = "starting";
 const READING: &str = "reading";
 const RESTARTING: &str = "restarting";
 const RELOADING: &str = "reloading";
-/// Response to requests when debugger initialization failed.
 const UNAVAILABLE: &str = "debugger initialization failed";
-/// Retry interval while waiting for the debug server to listen.
-const CONNECT_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Events handled by the adapter.
 pub enum Input {
-	/// A message from the client
 	Message(String),
+	Asked(Ask),
 	StdinClosed,
-	/// Connected to the world's debug server.
 	Connected {
 		generation: u64,
 		stream: Stream
@@ -87,62 +73,50 @@ pub enum Input {
 		generation: u64,
 		reason: String
 	},
-	/// The world announced shutdown rather than reboot.
 	ShuttingDown {
 		generation: u64
 	},
-	/// Debugger initialization failure; reconnecting cannot recover it.
 	Unavailable {
 		generation: u64,
 		reason: String
 	},
-	/// Source worker event, tagged with the worker number.
 	Code {
 		worker: u64,
 		event: code::Event
 	},
-	/// Requested reboot still pending on connection `generation`.
 	RebootOverdue {
 		generation: u64
 	},
-	/// Another client hot reloaded the world
 	CodeChanged {
 		generation: u64
 	},
-	/// A data breakpoint's target no longer exists.
 	WatchEnded {
 		generation: u64,
 		id: u32,
 		reason: String
 	},
-	/// The world paused
 	Stopped {
 		generation: u64,
 		stop: aux::Stop,
-		/// One-based stop sequence number for this connection.
 		number: u64
 	},
-	/// Another client resumed execution.
 	Resumed {
 		generation: u64
 	},
-	/// A breakpoint with a message was hit
 	Logged {
 		message: String,
 		file: Option<String>,
 		line: Option<u32>
 	},
-	/// Output from the launched world, for the journal.
 	WorldOutput(Vec<String>),
-	/// The world the adapter launched exited
 	GameExited(Option<i32>),
-	/// The process attached to is gone
 	ProcessGone,
-	/// Shutdown grace period expired for `process`.
+	ExitOverdue {
+		process: u32
+	},
 	TerminateOverdue {
 		process: u32
 	},
-	/// Disconnect timeout expired.
 	Quit
 }
 
@@ -151,123 +125,56 @@ pub enum Input {
 struct LaunchArguments {
 	#[serde(default)]
 	no_debug: bool,
-	/// Project environment used for breakpoints, stack traces and hot reload.
 	dme: Option<PathBuf>,
-	/// World to launch, if its path differs from the `.dme` path with a `.dmb`
-	/// extension.
 	dmb: Option<PathBuf>,
 	server: Option<Server>,
-	/// Optional BYOND installation path.
 	byond_path: Option<PathBuf>,
-	/// Build defines (`NAME` or `NAME=VALUE`) used to parse the source.
 	#[serde(default)]
 	defines: Vec<String>,
-	/// Selected build flags, combined with `defines` for parsing.
-	/// Updated by `auxtoolsBuildFlags` when the build task uses these flags.
 	#[serde(default)]
 	build_flags: Vec<String>,
-	/// Swap changed code into the world as files are saved
 	#[serde(default = "yes")]
 	hot_reload: bool,
-	/// DreamDaemon port, passed before `args` or default arguments.
 	port: Option<u16>,
-	/// Command-line arguments after the `.dmb`, replacing the defaults.
 	args: Option<Vec<String>>,
 	#[serde(default)]
 	env: HashMap<String, String>,
-	/// Debug library path; defaults to the library beside the launcher.
 	debug_library: Option<PathBuf>,
-	/// Maximum sleeping procs to include in the thread list.
-	sleeping_threads: Option<u32>
-}
-
-/// Validated launch configuration.
-struct Prepared {
-	program: PathBuf,
-	dmb: PathBuf,
-	dme: Option<PathBuf>,
-	library: PathBuf,
-	/// Host arguments following the `.dmb`.
-	args: Vec<String>
-}
-
-impl Prepared {
-	fn of(args: &LaunchArguments) -> Result<Self, String> {
-		let dme = args.dme.clone().or_else(|| args.dmb.as_ref().map(|dmb| dmb.with_extension("dme")));
-		let dmb = args
-			.dmb
-			.clone()
-			.or_else(|| args.dme.as_ref().map(|dme| dme.with_extension("dmb")))
-			.ok_or("specify dme or dmb to select a world")?;
-
-		let bin = byond::bin_dir(args.byond_path.as_deref())?;
-		let server = args.server.unwrap_or_else(Server::default_for_platform);
-		let program = bin.join(server.program());
-		if !program.is_file() {
-			return Err(format!("{} was not found in {}", server.program(), bin.display()));
-		}
-		if !dmb.is_file() {
-			return Err(format!("file not found: {}", dmb.display()));
-		}
-		let library = match &args.debug_library {
-			Some(library) => library.clone(),
-			None => default_library()?
-		};
-		if args.port.is_some() && server == Server::DreamSeeker && cfg!(windows) {
-			return Err("port is unsupported with DreamSeeker; use server dreamdaemon".to_owned());
-		}
-		// BYOND expects the port before other arguments.
-		let mut game_args: Vec<String> = args.port.iter().map(u16::to_string).collect();
-		game_args.extend(args.args.clone().unwrap_or_else(|| default_args(server)));
-		Ok(Self {
-			program,
-			dmb,
-			dme,
-			library,
-			args: game_args
-		})
-	}
+	sleeping_threads: Option<u32>,
+	#[serde(skip)]
+	coverage: bool
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AttachArguments {
-	/// World process ID, as a number or numeric string.
 	process_id: Value,
-	/// Project environment, if it is not beside the running `.dmb`.
 	dme: Option<PathBuf>,
 	#[serde(default)]
 	defines: Vec<String>,
-	/// Disabled by default to avoid competing with the launching session's
-	/// reloads.
 	#[serde(default)]
 	hot_reload: bool,
-	/// Maximum sleeping procs to include in the thread list.
 	sleeping_threads: Option<u32>
 }
 
-/// Client capabilities used by this adapter.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ClientAbilities {
-	/// Supports progress events.
 	#[serde(default)]
 	supports_progress_reporting: bool,
-	/// Refreshes data named by `invalidated` events.
 	#[serde(default)]
 	supports_invalidated_event: bool
 }
 
-/// Arguments for `completions`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompletionsArguments {
 	frame_id: Option<i64>,
 	text: String,
+	line: Option<i64>,
 	column: i64
 }
 
-/// Arguments for `breakpointLocations`, which dap-types does not define.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BreakpointLocationsArguments {
@@ -276,7 +183,6 @@ struct BreakpointLocationsArguments {
 	end_line: Option<i64>
 }
 
-/// Arguments for `setVariable`, which dap-types does not define.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetVariableArguments {
@@ -286,7 +192,6 @@ struct SetVariableArguments {
 	format: Option<ValueFormat>
 }
 
-/// Arguments for `setExpression`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetExpressionArguments {
@@ -296,16 +201,12 @@ struct SetExpressionArguments {
 	format: Option<ValueFormat>
 }
 
-/// Arguments for the `auxtoolsUnsaved` extension request.
-/// DAP does not report unsaved files, so the VS Code extension sends updates.
 #[derive(Deserialize)]
 struct UnsavedArguments {
 	path: String,
 	unsaved: bool
 }
 
-/// Exception filters and optional conditions.
-/// The dap-types definition supports only filters.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExceptionBreakpointsArguments {
@@ -322,13 +223,10 @@ struct ExceptionFilterOption {
 	condition: Option<String>
 }
 
-/// Arguments for `next` and `stepIn`, including granularity missing from
-/// dap-types.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StepArguments {
 	thread_id: i64,
-	/// `instruction`, or `statement`/`line` for line stepping.
 	granularity: Option<String>
 }
 
@@ -338,21 +236,42 @@ impl StepArguments {
 	}
 }
 
-/// Arguments for `setInstructionBreakpoints`.
 #[derive(Deserialize)]
 struct InstructionBreakpointsArguments {
 	breakpoints: Vec<InstructionBreakpoint>
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct InstructionBreakpoint {
-	/// Instruction reference from disassembly or a stack frame.
 	instruction_reference: String,
-	/// Offset from the reference, in words.
 	offset: Option<i64>,
 	condition: Option<String>,
 	hit_condition: Option<String>
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstructionShown {
+	id: i64,
+	verified: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	message: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	line: Option<u32>,
+	instruction_reference: String
+}
+
+impl InstructionShown {
+	const fn unverified(id: i64, instruction_reference: String, message: String) -> Self {
+		Self {
+			id,
+			verified: false,
+			message: Some(message),
+			line: None,
+			instruction_reference
+		}
+	}
 }
 
 const fn yes() -> bool {
@@ -361,7 +280,6 @@ const fn yes() -> bool {
 
 type Handled = Result<Value, String>;
 
-/// Project source path, once resolved.
 struct CodeSettings {
 	dme: Option<PathBuf>,
 	defines: Vec<String>,
@@ -371,153 +289,100 @@ struct CodeSettings {
 pub struct Adapter {
 	out: Arc<Output>,
 	inputs: mpsc::Sender<Input>,
+	leaving: Arc<AtomicBool>,
+	answering: bool,
 
-	/// Whether the client debugs, rather than only running the world
 	debugging: bool,
-	/// The world's process, once launched or attached to
-	pid: Option<u32>,
-	/// The world the adapter launched
-	game: Option<Game>,
-	/// Configuration used to launch the current world.
-	launched: Option<LaunchArguments>,
-	/// Original launch flags, repeated by restart requests even after selection
-	/// changes.
-	configured_flags: Vec<String>,
-	/// Pending defines to send when the source worker starts.
 	wanted_defines: Option<Vec<String>>,
-	/// Pending configuration for relaunch after process exit.
-	relaunching: Option<(LaunchArguments, Prepared)>,
-	/// Session-requested reboot; suppress its expected disconnect message.
-	rebooting: bool,
-	/// DreamSeeker processes opened for this world.
 	joined: join::Joined,
-	/// Last hot reload state reported to the client.
 	reload_status: status::ReloadStatus,
 
-	/// Parse options retained until the first connection.
 	code_settings: Option<CodeSettings>,
-	/// Source worker thread, while active.
 	code: Option<mpsc::Sender<code::Command>>,
-	/// Current source worker number.
 	code_worker: u64,
 	hot_reload: bool,
-	/// Whether the initial source parse has finished, successfully or
-	/// otherwise.
 	code_read: bool,
-	/// Whether the source worker is watching files.
 	watching: bool,
-	/// Whether initial configuration is complete and `Output::ready` has been
-	/// sent.
-	configured: bool,
-	said_ready: bool,
 	stddef: Option<Stddef>,
-	/// Last macros sent to the world. Resend on connection in case a reboot
-	/// interrupted delivery.
 	macros: Option<Vec<aux::Macro>>,
 
 	debuggee: Option<Debuggee>,
-	generation: u64,
-	/// Termination requested; do not reconnect.
-	ending: bool,
-	/// Permanent debugger initialization failure. The world continues running.
-	unavailable: bool,
-	/// Suppress reconnect messages after shutdown until a world responds again.
-	shutting_down: bool,
-	/// Delay world configuration until the source worker finishes.
-	waiting_for_code: bool,
-	/// Whether the client has received the initialized event.
-	initialized: bool,
+	world: lifecycle::Lifecycle,
 	last_error: Arc<Mutex<LastError>>,
-	/// Start time of the latest reload request.
 	reload_started: Option<Instant>,
 
-	/// Client breakpoints indexed by file, with stable IDs.
 	breakpoints: BTreeMap<String, Vec<(i64, SourceBreakpoint)>>,
-	/// Client capabilities.
 	client: ClientAbilities,
-	/// Active client progress indicators.
 	progress: Vec<&'static str>,
-	/// Debug source names mapped to local files, shared with the output reader.
 	files: Arc<Mutex<files::WorldFiles>>,
-	/// World output buffered while disconnected.
 	waiting_output: Vec<String>,
-	/// Source text used to interpret each file's breakpoint lines.
-	/// `None` if the file could not be read.
 	breakpoint_texts: HashMap<String, Option<Vec<String>>>,
-	/// Files the client reports as unsaved.
 	unsaved: HashSet<String>,
-	/// Last source text sent to the world for each file with breakpoints.
-	/// Initially, the text read when the first breakpoint was set.
 	world_texts: HashMap<String, Option<Vec<String>>>,
-	/// Time of the last source synchronization, used to detect pending edits.
+	caught_up: Option<code::Texts>,
+	running_built: code::Texts,
 	world_as_of: Option<std::time::SystemTime>,
-	/// Files with breakpoints in unsaved editor text; defer until saved.
 	deferred: HashSet<String>,
-	/// Files with breakpoints in saved text; defer until reloaded.
 	waiting: HashSet<String>,
-	/// Time the pending reload's source changes were read.
 	reload_seen: Option<std::time::SystemTime>,
-	/// Resources cached by the last reload.
 	reloaded_resources: Vec<aux::ReloadedResource>,
-	/// Files already reported as changed since the world was built.
 	said_changed: HashSet<String>,
 	next_breakpoint_id: i64,
 	function_breakpoints: Vec<FunctionBreakpoint>,
-	/// The client's instruction breakpoints, with the ids they were given
 	instruction_breakpoints: Vec<(i64, InstructionBreakpoint)>,
-	/// The ids of `function_breakpoints`, in their order
+	removed_by_reload: HashSet<i64>,
+	refused_at: HashMap<i64, InstructionRef>,
+	relocated: HashSet<String>,
+	claims: u32,
 	function_breakpoint_ids: Vec<i64>,
-	/// Last breakpoint status reported to the client, indexed by ID.
 	told: HashMap<i64, (bool, Option<i64>, Option<String>)>,
-	/// Runtime error filters for uncaught and caught errors.
 	uncaught: Option<aux::RuntimeFilter>,
 	caught: Option<aux::RuntimeFilter>,
-	/// What's set in the world now, by file (or `FUNCTION_BREAKPOINTS`)
 	set: SetBreakpoints,
-	/// Maximum sleeping procs to include in the thread list.
 	sleeping_threads: u32,
-	/// Whether the client has been warned that the thread list is truncated.
 	said_more_sleep: bool,
 	data: data::DataBreakpoints
 }
 
-/// Runs the adapter on stdin and stdout until the client leaves
 pub fn run() {
 	let (inputs, receiver) = mpsc::channel();
+	let leaving = Arc::new(AtomicBool::new(false));
 
 	let stdin_inputs = inputs.clone();
+	let stdin_leaving = leaving.clone();
 	std::thread::spawn(move || {
 		let mut stdin = BufReader::new(std::io::stdin());
 		while let Ok(Some(message)) = dap::read_message(&mut stdin) {
+			if asks_to_disconnect(&message) {
+				stdin_leaving.store(true, Ordering::Relaxed);
+			}
 			if stdin_inputs.send(Input::Message(message)).is_err() {
 				return;
 			}
 		}
+		stdin_leaving.store(true, Ordering::Relaxed);
 		let _ = stdin_inputs.send(Input::StdinClosed);
 	});
 
-	serve(Output::new(), inputs, &receiver);
+	serve(Output::new(), inputs, &receiver, leaving);
 }
 
-/// Run the event loop until the client disconnects or the world exits.
-/// A world launched by this adapter is terminated when the loop ends.
-/// In-process callers (`auxtools launch`) supply requests through `inputs`
-/// and receive events through `out`.
-///
-/// Run on the main thread: Linux terminates the child when its launching
-/// thread exits.
-pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver<Input>) {
+fn asks_to_disconnect(message: &str) -> bool {
+	#[derive(Deserialize)]
+	struct Asked {
+		command: Option<String>
+	}
+	message.contains("disconnect") && serde_json::from_str::<Asked>(message).is_ok_and(|asked| asked.command.as_deref() == Some("disconnect"))
+}
+
+pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver<Input>, leaving: Arc<AtomicBool>) {
 	let mut adapter = Adapter {
 		out: Arc::new(out),
 		inputs,
+		leaving,
+		answering: false,
 		debugging: true,
-		pid: None,
-		game: None,
-		launched: None,
-		relaunching: None,
-		configured_flags: vec![],
 		wanted_defines: None,
-		rebooting: false,
 		joined: join::Joined::default(),
 		reload_status: status::ReloadStatus::default(),
 		code_settings: None,
@@ -526,17 +391,10 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 		hot_reload: false,
 		code_read: false,
 		watching: false,
-		configured: false,
-		said_ready: false,
 		stddef: None,
 		macros: None,
 		debuggee: None,
-		generation: 0,
-		ending: false,
-		unavailable: false,
-		shutting_down: false,
-		waiting_for_code: false,
-		initialized: false,
+		world: lifecycle::Lifecycle::default(),
 		last_error: Arc::new(Mutex::new(LastError::default())),
 		reload_started: None,
 		client: ClientAbilities::default(),
@@ -551,11 +409,17 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 		reload_seen: None,
 		reloaded_resources: vec![],
 		world_texts: HashMap::new(),
+		caught_up: None,
+		running_built: code::Texts::new(),
 		world_as_of: None,
 		said_changed: HashSet::new(),
 		next_breakpoint_id: 1,
 		function_breakpoints: vec![],
 		instruction_breakpoints: vec![],
+		removed_by_reload: HashSet::new(),
+		refused_at: HashMap::new(),
+		relocated: HashSet::new(),
+		claims: 0,
 		function_breakpoint_ids: vec![],
 		told: HashMap::new(),
 		uncaught: Some(aux::RuntimeFilter::default()),
@@ -575,20 +439,17 @@ pub fn serve(out: Output, inputs: mpsc::Sender<Input>, receiver: &mpsc::Receiver
 	if let Some(debuggee) = &mut adapter.debuggee {
 		let _ = debuggee.send(&AuxRequest::Disconnect);
 	}
-	if let Some(game) = adapter.game.take() {
+	if let Some(game) = adapter.world.game.take() {
 		game.kill();
 	}
 	adapter.joined.world_ended();
 }
 
-/// Arguments for `auxtoolsBuildFlags`.
 #[derive(Deserialize)]
 struct BuildFlagsArguments {
-	/// Selected defines: `NAME` or `NAME=VALUE`.
 	flags: Vec<String>
 }
 
-/// Combine launch defines and build flags without duplicates.
 fn all_defines(args: &LaunchArguments) -> Vec<String> {
 	let mut all = args.defines.clone();
 	for flag in &args.build_flags {
@@ -599,12 +460,11 @@ fn all_defines(args: &LaunchArguments) -> Vec<String> {
 	all
 }
 
-/// Treat omitted or null request arguments as an empty object.
 fn arguments<T: for<'de> Deserialize<'de>>(arguments: Option<Value>) -> Result<T, String> {
 	let arguments = arguments
 		.filter(|arguments| !arguments.is_null())
 		.unwrap_or_else(|| Value::Object(Default::default()));
-	serde_json::from_value(arguments).map_err(|e| format!("bad arguments: {}", e))
+	serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {}", e))
 }
 
 fn json(value: impl serde::Serialize) -> Handled {
@@ -612,24 +472,33 @@ fn json(value: impl serde::Serialize) -> Handled {
 }
 
 impl Adapter {
-	/// Returns whether to keep going
 	fn handle(&mut self, input: Input) -> bool {
 		match input {
-			Input::Message(message) => return self.message(&message),
+			Input::Message(message) => {
+				self.answering = true;
+				let more = self.message(&message);
+				self.answering = false;
+				return more;
+			}
+			Input::Asked(ask) => {
+				self.answering = true;
+				let more = self.asked(ask);
+				self.answering = false;
+				return more;
+			}
 			Input::StdinClosed | Input::Quit => return false,
 			Input::Connected { generation, stream } => {
-				if generation == self.generation && self.debuggee.is_none() {
+				if generation == self.world.generation && self.debuggee.is_none() {
 					self.connected(stream);
 				}
 			}
 			Input::ConnectionClosed { generation, reason } => self.connection_closed(generation, &reason),
 			Input::ShuttingDown { generation } => {
 				if self.debuggee.as_ref().is_some_and(|d| d.generation == generation) {
-					self.shutting_down = true;
+					self.world_shutting_down();
 				}
 			}
 			Input::Unavailable { generation, reason } => self.debugger_unavailable(generation, &reason),
-			// Ignore events from replaced workers.
 			Input::Code { worker, event } => {
 				if worker == self.code_worker {
 					self.code_event(event);
@@ -638,9 +507,8 @@ impl Adapter {
 			Input::RebootOverdue { generation } => self.reboot_overdue(generation),
 			Input::WorldOutput(lines) => self.journal_output(lines),
 			Input::Logged { message, file, line } => {
-				// Include the source location so the client can create a link.
 				let source = file.map(|file| self.file_source(&file));
-				self.out.event(OutputEvent {
+				self.out.output_event(OutputEvent {
 					output: message + "\n",
 					category: Some("console".to_owned()),
 					line: source.as_ref().and(line).map(i64::from),
@@ -648,7 +516,6 @@ impl Adapter {
 					..Default::default()
 				});
 			}
-			// Send after the response to the request that resumed execution.
 			Input::Stopped { generation, stop, number } => {
 				if let Some(debuggee) = self.debuggee.as_mut().filter(|d| d.generation == generation) {
 					debuggee.stopped_at(stop, number);
@@ -661,7 +528,8 @@ impl Adapter {
 			}
 			Input::CodeChanged { generation } => {
 				if self.debuggee.as_ref().is_some_and(|d| d.generation == generation) {
-					self.reapply_breakpoints();
+					self.follow_reloaded_breakpoints();
+					self.reapply_breakpoints(None);
 				}
 			}
 			Input::WatchEnded { generation, id, reason } => {
@@ -669,57 +537,12 @@ impl Adapter {
 					self.watch_ended(id, &reason);
 				}
 			}
-			Input::GameExited(code) => {
-				self.game = None;
-				if let Some((args, prepared)) = self.relaunching.take() {
-					self.relaunched(args, prepared);
-					return true;
-				}
-				match code {
-					Some(code) => self.out.console(format!("The world exited with code {}", code)),
-					None => self.out.console("The world was terminated")
-				}
-				self.ended(code.unwrap_or(-1));
-			}
-			Input::TerminateOverdue { process } => {
-				if self.ending && self.world_process() == Some(process) {
-					self.out.console(format!(
-						"Shutdown timed out after {} seconds; terminating process {}",
-						TERMINATE_GRACE.as_secs(),
-						process
-					));
-					self.kill_world();
-				}
-			}
-			Input::ProcessGone => {
-				if self.game.is_none() {
-					self.out.console("The world's process has ended");
-					self.ended(0);
-				}
-			}
+			Input::GameExited(code) => self.game_exited(code),
+			Input::ExitOverdue { process } => self.exit_overdue(process),
+			Input::TerminateOverdue { process } => self.terminate_overdue(process),
+			Input::ProcessGone => self.process_gone()
 		}
 		true
-	}
-
-	/// Report the world's exit before closing the launcher.
-	fn ended(&mut self, exit_code: i32) {
-		self.pid = None;
-		self.joined.world_ended();
-		if let Some(mut debuggee) = self.debuggee.take() {
-			debuggee.gone();
-		}
-		self.code = None;
-		for id in std::mem::take(&mut self.progress) {
-			self.out.event(dap::ProgressEnd { progressId: id.to_owned() });
-		}
-		self.out.event(TerminatedEvent::default());
-		self.out.event(ExitedEvent { exitCode: exit_code.into() });
-
-		let inputs = self.inputs.clone();
-		std::thread::spawn(move || {
-			std::thread::sleep(EXIT_GRACE);
-			let _ = inputs.send(Input::Quit);
-		});
 	}
 
 	fn message(&mut self, message: &str) -> bool {
@@ -837,7 +660,6 @@ impl Adapter {
 		})?;
 		capabilities["supportsInstructionBreakpoints"] = true.into();
 		capabilities["supportsSteppingGranularity"] = true.into();
-		// What dap-types has no fields for
 		let condition = "Comma-separated message filters, e.g. \"bounds, null\". Prefix exclusions with !, e.g. \"!libdreamluau\".";
 		capabilities["supportsExceptionFilterOptions"] = true.into();
 		capabilities["supportsCompletionsRequest"] = true.into();
@@ -863,184 +685,6 @@ impl Adapter {
 		Ok(capabilities)
 	}
 
-	fn launch(&mut self, args: LaunchArguments) -> Handled {
-		if self.pid.is_some() {
-			return Err("a world is already running".to_owned());
-		}
-		let prepared = Prepared::of(&args)?;
-		self.configured_flags = args.build_flags.clone();
-		self.start(args, prepared)?;
-		Ok(Value::Null)
-	}
-
-	/// Start the validated launch. Reuse the source worker on restart
-	/// when its settings are unchanged.
-	fn start(&mut self, args: LaunchArguments, prepared: Prepared) -> Result<(), String> {
-		self.debugging = !args.no_debug;
-		self.sleeping_threads = args.sleeping_threads.unwrap_or(aux::DEFAULT_SLEEPING_STACKS);
-		let same_code = self.launched.as_ref().is_some_and(|old| {
-			// Parse options depend on the BYOND build.
-			(&old.dme, &old.dmb, &old.defines, &old.build_flags, old.hot_reload, &old.byond_path)
-				== (&args.dme, &args.dmb, &args.defines, &args.build_flags, args.hot_reload, &args.byond_path)
-		});
-		if !same_code {
-			self.drop_code();
-			// The new worker sends its own macros.
-			self.macros = None;
-			self.code_read = false;
-			self.watching = false;
-			self.code_settings = Some(CodeSettings {
-				dme: prepared.dme.clone().filter(|dme| dme.is_file()),
-				defines: all_defines(&args),
-				hot_reload: args.hot_reload
-			});
-			self.wanted_defines = None;
-		}
-
-		// Debugged worlds wait for breakpoints. Hot reload also requires a wait
-		// after reboot; release the initial launch as soon as we connect.
-		let launch = Launch {
-			program: prepared.program,
-			dmb: &prepared.dmb,
-			args: &prepared.args,
-			env: &args.env,
-			debug: Some((prepared.library, self.debugging || args.hot_reload))
-		};
-		let (out, inputs, files) = (self.out.clone(), self.inputs.clone(), self.files.clone());
-		let batch = journal::batch_output(self.inputs.clone());
-		let game = Game::start(
-			launch,
-			// Pass BYOND's runtime error location to the client and journal.
-			move |category, line| {
-				// Exclude the launcher's own diagnostics.
-				if category != "console" {
-					let _ = batch.send(line.trim_end_matches(['\r', '\n']).to_owned());
-				}
-				match runtime_place(&line) {
-					Some((file, number)) => {
-						let path = files.lock().unwrap().path(file);
-						out.event(OutputEvent {
-							category: Some(category.to_owned()),
-							source: Some(source_at(&path)),
-							line: Some(number),
-							output: line,
-							..Default::default()
-						});
-					}
-					None => out.output(category, line)
-				}
-			},
-			move |code| {
-				let _ = inputs.send(Input::GameExited(code));
-			}
-		)?;
-		self.pid = Some(game.pid());
-		self.game = Some(game);
-		self.launched = Some(args);
-		self.out.event(dap::ProcessEvent {
-			name: prepared.dmb.to_string_lossy().into_owned(),
-			systemProcessId: self.pid.unwrap_or_default(),
-			isLocalProcess: true,
-			startMethod: "launch".to_owned()
-		});
-		self.progress_start(STARTING, "Starting the world".to_owned());
-		self.started(None);
-		Ok(())
-	}
-
-	fn attach(&mut self, args: AttachArguments) -> Handled {
-		if self.pid.is_some() {
-			return Err("a world is already running".to_owned());
-		}
-		let pid = match &args.process_id {
-			Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()),
-			Value::String(s) => s.trim().parse().ok(),
-			_ => None
-		}
-		.ok_or("specify processId to attach")?;
-		if !local::alive(pid) {
-			return Err(format!("process not found: {}", pid));
-		}
-		// The process exists, so try connecting immediately.
-		let stream = local::connect(pid).map_err(|e| {
-			format!(
-				"process {} isn't a world with this version of auxtools' debugger in it (protocol {}): {}",
-				pid,
-				aux::PROTOCOL_VERSION,
-				e
-			)
-		})?;
-
-		self.sleeping_threads = args.sleeping_threads.unwrap_or(aux::DEFAULT_SLEEPING_STACKS);
-		self.code_settings = Some(CodeSettings {
-			dme: args.dme,
-			defines: args.defines,
-			hot_reload: args.hot_reload
-		});
-		self.pid = Some(pid);
-		self.out.console(format!("Attaching to process {}", pid));
-		self.out.event(dap::ProcessEvent {
-			name: format!("process {}", pid),
-			systemProcessId: pid,
-			isLocalProcess: true,
-			startMethod: "attach".to_owned()
-		});
-		self.started(Some(stream));
-		Ok(Value::Null)
-	}
-
-	/// The world is running: connect to it, unless that's done
-	fn started(&mut self, stream: Option<Stream>) {
-		// Without debugging, there are no breakpoints to wait for. Send the
-		// event once per session, including across relaunches.
-		if !self.debugging && !self.initialized {
-			self.initialized = true;
-			self.out.event(InitializedEvent);
-		}
-		match stream {
-			// Handled once the client has its answer
-			Some(stream) => {
-				self.generation += 1;
-				let _ = self.inputs.send(Input::Connected {
-					generation: self.generation,
-					stream
-				});
-			}
-			None => self.connect()
-		}
-	}
-
-	/// Connects to the world when it listens, in the background
-	fn connect(&mut self) {
-		let Some(pid) = self.pid.filter(|_| !self.unavailable) else {
-			return;
-		};
-		self.generation += 1;
-		let generation = self.generation;
-		let inputs = self.inputs.clone();
-		let launched = self.game.is_some();
-		std::thread::Builder::new()
-			.name("connect".to_owned())
-			.spawn(move || loop {
-				// The world isn't listening while it loads, or reboots
-				if let Ok(stream) = local::connect(pid) {
-					let _ = inputs.send(Input::Connected { generation, stream });
-					return;
-				}
-				// The launched process has its own exit event. A restart
-				// connects to the replacement process.
-				if !local::alive(pid) {
-					if !launched {
-						let _ = inputs.send(Input::ProcessGone);
-					}
-					return;
-				}
-				std::thread::sleep(CONNECT_INTERVAL);
-			})
-			.expect("couldn't start a thread");
-	}
-
-	/// Start a progress indicator if the client supports it.
 	fn progress_start(&mut self, id: &'static str, title: String) {
 		if self.client.supports_progress_reporting && !self.progress.contains(&id) {
 			self.progress.push(id);
@@ -1058,103 +702,6 @@ impl Adapter {
 		}
 	}
 
-	fn connected(&mut self, stream: Stream) {
-		self.progress_end(STARTING);
-		self.progress_end(RESTARTING);
-		let debuggee = Debuggee::new(
-			stream,
-			self.generation,
-			self.debugging,
-			self.out.clone(),
-			self.inputs.clone(),
-			self.last_error.clone(),
-			self.set.clone()
-		);
-		match debuggee {
-			Ok(debuggee) => self.debuggee = Some(debuggee),
-			Err(e) => {
-				self.out.console(format!("Debug server connection failed: {}", e));
-				return;
-			}
-		}
-		self.set.lock().unwrap().clear();
-		self.watches_lost();
-
-		// It hangs up straight away if it's on its way to a reboot
-		let byond = match self.request(&AuxRequest::ByondVersion) {
-			Ok(AuxResponse::ByondVersion { version, build }) => (version, build),
-			_ => return
-		};
-		// A responding world either recovered from failed shutdown or started
-		// anew.
-		self.shutting_down = false;
-		self.rebooting = false;
-		self.send_output();
-		self.give_macros();
-		self.follow_reloads();
-		// This session only launches and reloads; preserve pauses owned by
-		// other clients.
-		if !self.debugging {
-			let _ = self.ack(&AuxRequest::Watcher);
-		}
-		if self.stddef.is_none() {
-			if let Ok(AuxResponse::StdDef(Some(text))) = self.request(&AuxRequest::StdDef) {
-				self.stddef = Some(Stddef::new(text));
-			}
-		}
-
-		// Prevent multiple sessions from reloading the same change.
-		let reloads = match &self.code_settings {
-			Some(settings) => settings.hot_reload,
-			None => self.hot_reload && self.code.is_some()
-		};
-		if reloads && !self.claim_reloads() {
-			match &mut self.code_settings {
-				Some(settings) => settings.hot_reload = false,
-				// Stop watching if another session claimed reloads during
-				// disconnection.
-				None => {
-					self.hot_reload = false;
-					self.drop_code();
-				}
-			}
-		}
-
-		match self.code_settings.take() {
-			Some(settings) => self.start_code(settings),
-			None => self.out.console("The world restarted")
-		}
-		self.waiting_for_code = match &self.code {
-			// A world that restarted waits for its reloads again
-			Some(code) => {
-				let world = self.generation;
-				code.send(code::Command::Connected { byond, world }).is_ok() && self.code_read
-			}
-			None => false
-		};
-		if !self.waiting_for_code {
-			self.ready();
-		}
-	}
-
-	/// Claim hot reload ownership. Report an existing owner and return false if
-	/// denied.
-	fn claim_reloads(&mut self) -> bool {
-		let who = match self.game {
-			Some(_) => format!("the launcher (pid {})", std::process::id()),
-			None => format!("another debugger session (pid {})", std::process::id())
-		};
-		match self.request(&AuxRequest::Reloader { who }) {
-			Ok(AuxResponse::Reloader(Err(why))) => {
-				self.out.console(format!("Hot reload disabled: {}", why));
-				self.reload_state("off", Some(why));
-				false
-			}
-			_ => true
-		}
-	}
-
-	/// Stop the source worker, ignore its queued events and end its progress.
 	fn drop_code(&mut self) {
 		self.code = None;
 		self.code_worker += 1;
@@ -1163,10 +710,7 @@ impl Adapter {
 		self.forget_refusals();
 	}
 
-	/// Resolve and parse the project source for hot reload.
-	/// The world supplies proc locations independently.
 	fn start_code(&mut self, settings: CodeSettings) {
-		// The world's command line says which .dmb it runs
 		let dmb = match self.request(&AuxRequest::WorldInfo) {
 			Ok(AuxResponse::WorldInfo { args, cwd, .. }) => local::world_dmb(&args, &cwd),
 			_ => None
@@ -1186,8 +730,6 @@ impl Adapter {
 		};
 
 		let options = code::Options {
-			// Prefer the world's actual .dmb when available locally. Remote
-			// worlds may report paths that do not exist on this machine.
 			dmb: dmb.filter(|dmb| dmb.exists()).unwrap_or_else(|| dme.with_extension("dmb")),
 			dme,
 			defines: settings.defines.iter().map(|define| code::parse_define(define)).collect(),
@@ -1202,10 +744,8 @@ impl Adapter {
 		}
 	}
 
-	/// Update selected flags and hold reloads until the world is rebuilt.
 	fn build_flags_changed(&mut self, args: BuildFlagsArguments) -> Handled {
-		// Attach sessions do not control the build.
-		let Some(launched) = self.launched.as_mut() else {
+		let Some(launched) = self.world.launched.as_mut() else {
 			return Ok(Value::Null);
 		};
 		launched.build_flags = args.flags;
@@ -1222,35 +762,28 @@ impl Adapter {
 	}
 
 	fn code_event(&mut self, event: code::Event) {
-		// The initial parse has finished, successfully or otherwise.
 		if !matches!(event, code::Event::Reload { .. }) {
 			self.progress_end(READING);
 		}
 		match event {
-			code::Event::Changed => {
-				// The world now runs the source text captured for this reload.
-				self.world_as_of = self.reload_seen.take().or_else(|| Some(std::time::SystemTime::now()));
-				// Reapply breakpoints using the client's current line
-				// positions.
-				if self.code_read && !self.waiting_for_code && self.debuggee.is_some() && self.debugging {
-					self.reapply_breakpoints();
-				}
-				self.code_read = true;
-			}
+			code::Event::Changed(texts) => self.code_changed(texts.as_ref()),
 			code::Event::Failed(e) => {
 				self.out.console(format!("Hot reload disabled: could not parse source: {}", e));
 				self.reload_state("off", Some(format!("could not parse source: {}", e)));
 				self.code_read = true;
 				self.code = None;
 				self.say_ready();
-				if self.waiting_for_code {
-					self.waiting_for_code = false;
+				if self.world.waiting_for_code {
+					self.world.waiting_for_code = false;
 					self.ready();
 				}
 			}
 			code::Event::Ready => {
-				if self.waiting_for_code {
-					self.waiting_for_code = false;
+				if self.world.waiting_for_code {
+					self.world.waiting_for_code = false;
+					if let Some(texts) = self.caught_up.take() {
+						self.reapply_breakpoints(Some(&texts));
+					}
 					self.ready();
 				}
 			}
@@ -1267,34 +800,50 @@ impl Adapter {
 				request,
 				summary,
 				notes,
-				world
+				world,
+				texts
 			} => {
-				// A reboot invalidates pending reloads: a rebuilt .dmb may
-				// already contain the changes. The source worker will use the
-				// new baseline.
 				let applied = if self.debuggee.as_ref().is_some_and(|d| d.generation != world) {
-					self.out
-						.console(format!("Hot reload skipped: prepared before the world restarted: {}", summary.text(&[])));
+					self.out.console(format!(
+						"Hot reload skipped because the world restarted after it was prepared: {}",
+						summary.text(&[])
+					));
 					false
 				} else {
 					self.reload_seen = Some(std::time::SystemTime::now());
 					self.reload(*request, &summary, notes)
 				};
+				if let Some(texts) = texts.filter(|_| applied) {
+					self.code_changed(Some(&texts));
+				}
 				if let Some(code) = &self.code {
 					let _ = code.send(code::Command::Resources(std::mem::take(&mut self.reloaded_resources)));
 					let _ = code.send(code::Command::Reloaded(applied));
 				}
 			}
-			code::Event::NotReloaded { refused, warnings, .. } if !refused.is_empty() => self.refused(refused, warnings),
 			code::Event::NotReloaded {
-				summary, errors, warnings, ..
-			} => {
-				self.reload_state("failed", Some(summary.clone()));
-				self.journal_reload(false, summary, errors, warnings);
+				refused, warnings, built, ..
+			} if !refused.is_empty() => {
+				self.running_built.extend(built.into_iter().map(|file| (file, None)));
+				self.refused(refused, texts(&warnings));
 			}
-			code::Event::NothingChanged { warnings } => {
+			code::Event::NotReloaded {
+				summary,
+				errors,
+				warnings,
+				built,
+				..
+			} => {
+				self.running_built.extend(built.into_iter().map(|file| (file, None)));
+				self.reload_state("failed", Some(summary.clone()));
+				self.journal_reload(false, summary, errors, texts(&warnings));
+			}
+			code::Event::NothingChanged { warnings, texts: read } => {
+				if let Some(read) = read {
+					self.code_changed(Some(&read));
+				}
 				self.reload_state("reloaded", Some("no changes to the running code".to_owned()));
-				self.journal_reload(true, "no runtime changes".to_owned(), vec![], warnings);
+				self.journal_reload(true, "no runtime changes".to_owned(), vec![], texts(&warnings));
 			}
 			code::Event::Macros(macros) => {
 				self.macros = Some(macros);
@@ -1329,21 +878,42 @@ impl Adapter {
 		}
 	}
 
-	/// Gives the world the code's macros, if they've been read
+	fn code_changed(&mut self, texts: Option<&code::Texts>) {
+		match texts {
+			Some(texts) => self.running_built.retain(|file, _| !texts.contains_key(file)),
+			None => self.running_built.clear()
+		}
+		self.world_as_of = self.reload_seen.take().or_else(|| Some(std::time::SystemTime::now()));
+		if self.code_read && self.debuggee.is_some() && self.debugging {
+			match (self.world.waiting_for_code, texts) {
+				(false, _) => self.reapply_breakpoints(texts),
+				(true, Some(texts)) => self.caught_up.get_or_insert_default().extend(texts.clone()),
+				(true, None) => {}
+			}
+		}
+		self.code_read = true;
+	}
+
 	fn give_macros(&mut self) {
 		if let (Some(macros), Some(debuggee)) = (&self.macros, &mut self.debuggee) {
 			let _ = debuggee.send(&AuxRequest::Defines(macros.clone()));
 		}
 	}
 
-	/// Apply a reload and journal the result, including `notes`.
-	/// Returns whether it succeeded.
-	fn reload(&mut self, request: aux::HotReloadRequest, summary: &code::Summary, notes: Vec<String>) -> bool {
+	fn reload(&mut self, request: aux::HotReloadRequest, summary: &code::Summary, notes: Vec<Diagnostic>) -> bool {
 		self.reload_started = Some(Instant::now());
-		let result = match self.request(&AuxRequest::HotReload(request)) {
+		let unlinked: Vec<String> = request
+			.plan
+			.removed_procs
+			.iter()
+			.filter(|removed| removed.type_path.is_empty())
+			.map(|removed| removed.proc.path.clone())
+			.collect();
+		let result = match self.request(&AuxRequest::HotReload(Box::new(request))) {
 			Ok(AuxResponse::HotReload(result)) => result,
 			Ok(other) => {
 				let why = unexpected(other);
+				let notes = texts(&notes);
 				self.notes(&notes);
 				self.out.console(format!("Hot reload failed: {}", why));
 				self.reload_state("failed", Some(why.clone()));
@@ -1351,6 +921,7 @@ impl Adapter {
 				return false;
 			}
 			Err(e) => {
+				let notes = texts(&notes);
 				self.notes(&notes);
 				self.out.console(format!("Hot reload failed: {}", e));
 				self.reload_state("failed", Some(e.clone()));
@@ -1358,24 +929,27 @@ impl Adapter {
 				return false;
 			}
 		};
+		if result.applied {
+			self.follow_reloaded_breakpoints();
+		}
 		self.reloaded_resources = result.resources.clone();
-		// Exclude removals for procs absent from the running world.
 		let summary = summary.text(&result.skipped);
-		// Applied removals unlink global procs from name lookup, but direct
-		// references still execute the retained code.
 		let notes: Vec<String> = notes
 			.into_iter()
 			.filter_map(|note| {
-				let unlinked = note.strip_suffix(code::RETAINED).and_then(|note| note.strip_suffix(": a definition"));
+				let unlinked = note
+					.subject
+					.as_ref()
+					.filter(|path| note.id == Id::RemovedProcRetained && unlinked.contains(path));
 				let Some(path) = unlinked.filter(|_| result.applied) else {
-					return Some(note);
+					return Some(note.to_string());
 				};
 				if result.skipped.iter().any(|skipped| skipped == path) {
 					return None;
 				}
 				Some(format!(
 					"{}: removed from source. Calls by name no longer find it, but direct references such as call(/proc/name)() still run the old \
-					 definition until restart",
+					 definition until the world restarts.",
 					path
 				))
 			})
@@ -1384,22 +958,34 @@ impl Adapter {
 		let summary_of_outcome = if result.applied {
 			summary.clone()
 		} else {
-			format!("reload failed ({})", summary)
+			format!("reload failed: {}", summary)
 		};
-		self.journal_reload(
+		self.journal_reload_failures(
 			result.applied,
 			summary_of_outcome,
 			result.errors.clone(),
-			notes.into_iter().chain(result.warnings.iter().cloned()).collect()
+			notes.into_iter().chain(result.warnings.iter().cloned()).collect(),
+			result.failures.clone()
 		);
 
 		let took = self.reload_started.take().map_or(0, |started| started.elapsed().as_millis());
-		if result.applied {
-			self.out.console(format!("Hot reload: {} in {} ms", summary, took));
-			self.reload_state("reloaded", Some(summary.clone()));
-		} else {
+		if !result.applied {
 			self.out.console("Hot reload failed:");
 			self.reload_state("failed", Some(result.errors.first().cloned().unwrap_or_default()));
+		} else if let Some(failed) = result.failures.first() {
+			self.out.console(format!(
+				"Hot reload partially applied: {} in {} ms. {}",
+				summary,
+				took,
+				auxtools_cli::reload::RESTART
+			));
+			self.reload_state("failed", Some(format!("partially applied: {}", failed)));
+		} else {
+			self.out.console(format!("Hot reload: {} in {} ms", summary, took));
+			self.reload_state("reloaded", Some(summary.clone()));
+		}
+		for f in &result.failures {
+			self.out.console(format!("    failed: {}", f));
 		}
 		for e in &result.errors {
 			self.out.console(format!("    {}", e));
@@ -1410,76 +996,93 @@ impl Adapter {
 		result.applied
 	}
 
-	/// Print source-worker reload notes.
+	fn follow_reloaded_breakpoints(&mut self) {
+		self.refused_at.clear();
+		if !self.debugging || self.debuggee.is_none() {
+			return;
+		}
+		let Ok(placed) = self.placed_breakpoints() else {
+			return;
+		};
+		let mut changed = HashSet::new();
+		let mut instructions = vec![];
+		let mut find_again = vec![];
+		for (key, breakpoints) in self.set.lock().unwrap().iter_mut() {
+			let exact = key == INSTRUCTION_BREAKPOINTS;
+			let by_name = key == FUNCTION_BREAKPOINTS;
+			breakpoints.retain_mut(|breakpoint| {
+				if breakpoint.at.is_none() {
+					return true;
+				}
+				let now = placed.iter().find(|placed| placed.id == breakpoint.claim);
+				let renumbered = |now: &aux::PlacedBreakpoint| breakpoint.at.as_ref().is_some_and(|at| at.proc != now.at.proc);
+				if by_name && now.is_some_and(|now| now.unlinked || renumbered(now)) {
+					find_again.push(breakpoint.claim);
+					return false;
+				}
+				if now.is_some_and(|now| breakpoint.at.as_ref() == Some(&now.at) && breakpoint.file == now.file && breakpoint.line == now.line) {
+					return true;
+				}
+				changed.insert(key.clone());
+				if exact {
+					instructions.push((breakpoint.id, now.is_none()));
+				}
+				let Some(now) = now else {
+					return false;
+				};
+				breakpoint.at = Some(now.at.clone());
+				breakpoint.file = now.file.clone();
+				breakpoint.line = now.line;
+				true
+			});
+		}
+		changed.remove(INSTRUCTION_BREAKPOINTS);
+		self.relocated.extend(changed);
+		for claim in find_again {
+			let _ = self.remove_breakpoint(claim);
+		}
+		self.retry_function_breakpoints();
+		for (id, removed) in instructions {
+			if removed {
+				self.removed_by_reload.insert(id);
+			}
+			let Some((_, breakpoint)) = self.instruction_breakpoints.iter().find(|(wanted, _)| *wanted == id) else {
+				continue;
+			};
+			let shown = self.instruction_shown(id, breakpoint);
+			self.out.event(dap::BreakpointEvent {
+				reason: "changed".to_owned(),
+				breakpoint: shown
+			});
+		}
+	}
+
 	fn notes(&self, notes: &[String]) {
 		for why in notes {
 			self.out.console(format!("    note: {}", why));
 		}
 	}
 
-	/// The world has the code it should: give it the breakpoints and let it run
-	fn ready(&mut self) {
-		if !self.initialized {
-			// The client sets its breakpoints, then says it's done
-			self.initialized = true;
-			self.out.event(InitializedEvent);
-			return;
-		}
-		self.configure();
-	}
-
-	/// Gives the world the client's breakpoints and lets it run
-	fn configure(&mut self) {
-		if self.debugging {
-			let _ = self.catch_runtimes();
-			// Those on lines of unsaved text wait for it to be saved
-			let files: Vec<String> = self.breakpoints.keys().filter(|file| !self.deferred.contains(*file)).cloned().collect();
-			// Report breakpoints whose status or position changed after
-			// reconnection.
-			for file in files {
-				let breakpoints = self.apply_breakpoints(&file);
-				self.tell(breakpoints, false);
-			}
-			let breakpoints = self.apply_function_breakpoints();
-			self.tell(breakpoints, false);
-			self.rewatch();
-			let _ = self.apply_instruction_breakpoints();
-		}
-		let _ = self.ack(&AuxRequest::Configured);
-		self.catch_up_on_pause();
-		self.configured = true;
-		self.announce_world();
-		self.say_ready();
-	}
-
-	/// Report readiness once the world is running and source watching has
-	/// started.
-	fn say_ready(&mut self) {
-		if !self.said_ready && self.configured && (self.code.is_none() || self.watching) {
-			self.said_ready = true;
-			self.out.ready();
-		}
-	}
-
-	/// Tells the client if the world was paused before this connected
-	fn catch_up_on_pause(&mut self) {
-		if self.debugging {
-			if let Some(debuggee) = &mut self.debuggee {
-				let _ = debuggee.catch_up_on_pause();
-			}
-		}
-	}
-
-	/// Remap breakpoints after source changes and notify the client.
-	/// Breakpoint lines refer to the source text captured when they were set.
-	fn reapply_breakpoints(&mut self) {
+	fn reapply_breakpoints(&mut self, texts: Option<&code::Texts>) {
 		let files: Vec<String> = self.breakpoints.keys().cloned().collect();
 		for file in files {
-			let now = crate::lines::read(&file);
+			let reloaded = texts.map(|texts| reloaded_text(texts, &file));
+			let now = match reloaded {
+				Some(Some(text)) => text.clone(),
+				Some(None) if self.world_texts.contains_key(&file) => self.world_texts[&file].clone(),
+				_ => crate::lines::read(&file)
+			};
 			let had = self.world_texts.insert(file.clone(), now.clone());
-			// Those on lines of unsaved text are set when it's saved: the
-			// file's text now isn't what their lines are of
 			if self.deferred.contains(&file) {
+				continue;
+			}
+			if self.waiting.contains(&file) && (matches!(reloaded, Some(None)) || self.runs_built(&file)) {
+				continue;
+			}
+			if matches!(reloaded, Some(Some(None))) {
+				let breakpoints = Self::waiting_for_the_world(&self.breakpoints[&file]);
+				self.tell(breakpoints, true);
+				self.waiting.insert(file);
 				continue;
 			}
 			let then = self.breakpoint_texts.get(&file).cloned().flatten();
@@ -1491,15 +1094,11 @@ impl Adapter {
 					}
 				}
 			}
-			// Preserve unchanged files' breakpoints and hit counts unless they
-			// were deferred or lack code that this reload may have added. Other
-			// failures, such as invalid hit conditions, do not require
-			// resetting the file.
 			let wants_code = self.breakpoints[&file].iter().any(|(id, _)| match self.told.get(id) {
 				Some((verified, _, message)) => !*verified && matches!(message.as_deref(), Some(NO_CODE | NO_LINES)),
 				None => true
 			});
-			let changed = then != now || had.as_ref() != Some(&now) || self.waiting.contains(&file);
+			let changed = then != now || had.as_ref() != Some(&now) || self.waiting.contains(&file) || self.relocated.contains(&file);
 			if !changed && !wants_code {
 				continue;
 			}
@@ -1511,7 +1110,6 @@ impl Adapter {
 		}
 		self.retry_function_breakpoints();
 
-		// A paused world's frames may be on other lines now
 		if self.client.supports_invalidated_event && self.debuggee.as_ref().is_some_and(Debuggee::stopped) {
 			self.out.event(dap::InvalidatedEvent {
 				areas: vec!["stacks".to_owned()]
@@ -1519,172 +1117,25 @@ impl Adapter {
 		}
 	}
 
-	fn connection_closed(&mut self, generation: u64, reason: &str) {
-		if self.debuggee.as_ref().is_none_or(|d| d.generation != generation) {
-			return;
-		}
-		if let Some(mut debuggee) = self.debuggee.take() {
-			debuggee.gone();
-		}
-		self.waiting_for_code = false;
-		self.set.lock().unwrap().clear();
-
-		// A world that's ending shuts its debugger down on the way
-		if self.pid.is_some() && !self.ending {
-			// Shutdown ends the session when the process exits. Suppress
-			// reconnect messages while its socket still accepts and immediately
-			// closes connections.
-			if !self.shutting_down && !self.rebooting {
-				self.out.console(format!("Debug server disconnected ({}); waiting to reconnect", reason));
-				self.progress_start(RESTARTING, "Waiting to reconnect".to_owned());
-			}
-			self.connect();
-		}
-	}
-
-	/// Report initialization failure once and stop reconnecting. Launched
-	/// worlds continue until stopped; attached sessions end without stopping
-	/// the world.
-	fn debugger_unavailable(&mut self, generation: u64, reason: &str) {
-		if self.debuggee.as_ref().is_none_or(|d| d.generation != generation) {
-			return;
-		}
-		if let Some(mut debuggee) = self.debuggee.take() {
-			debuggee.gone();
-		}
-		self.unavailable = true;
-		self.waiting_for_code = false;
-		self.set.lock().unwrap().clear();
-		self.progress_end(STARTING);
-		self.progress_end(RESTARTING);
-		let process = self.world_process().unwrap_or_default();
-		self.out
-			.console(format!("Debugger initialization failed for process {}: {}", process, reason));
-		if self.game.is_none() {
-			self.out.console("The world is running without debugging. Detaching from this session.");
-			self.pid = None;
-			self.out.event(TerminatedEvent::default());
-			return;
-		}
-		self.out
-			.console("The world is running without debugging or hot reload. Stop the session to terminate it.");
-		// Allow the client to finish configuration without a debug server.
-		if !self.initialized {
-			self.initialized = true;
-			self.out.event(InitializedEvent);
-		}
-		self.out.unavailable(reason);
-	}
-
-	fn disconnect(&mut self, terminate: Option<bool>) {
-		// Preserve the pause if other debugging clients remain; otherwise
-		// resume.
-		if let Some(debuggee) = &mut self.debuggee {
-			debuggee.leave();
-		}
-		self.debuggee = None;
-		// A launched world depends on this adapter to read its output.
-		if terminate == Some(false) && self.game.is_some() {
-			self.out
-				.console("Stopping the world launched by this session. Attach to an existing world to leave it running on disconnect.");
-		}
-		// A world that was attached to carries on unless asked otherwise
-		if terminate.unwrap_or(false) || self.game.is_some() {
-			if let Some(process) = self.world_process() {
-				self.out.console(format!("Ending the world (process {})", process));
-				self.kill_world();
-			}
-		}
-		// Stop trying to connect
-		self.pid = None;
-		self.generation += 1;
-	}
-
-	/// Process ID of the launched or attached world.
-	fn world_process(&self) -> Option<u32> {
-		self.game.as_ref().map(Game::pid).or(self.pid)
-	}
-
-	/// Terminate the world immediately.
-	fn kill_world(&mut self) {
-		if let Some(game) = &self.game {
-			game.kill();
-		} else if let Some(pid) = self.pid {
-			local::kill(pid);
-		}
-	}
-
-	/// Request shutdown through `world/Del()`, then terminate the process if
-	/// it exceeds the grace period.
-	fn terminate(&mut self) -> Handled {
-		let Some(process) = self.world_process() else {
-			return Ok(Value::Null);
-		};
-		if self.ending {
-			// Stop during restart shutdown cancels the relaunch.
-			if self.relaunching.take().is_some() {
-				self.progress_end(RESTARTING);
-				self.out.console("Restart cancelled: the world is stopping");
-			}
-			return Ok(Value::Null);
-		}
-		self.ending = true;
-		// Do not wait for a response: successful shutdown closes the
-		// connection.
-		let asked = self
-			.debuggee
-			.as_mut()
-			.is_some_and(|debuggee| debuggee.eval_unanswered("world.Del()".to_owned()).is_ok());
-		if asked {
-			self.out.console("Stopping the world");
-			let inputs = self.inputs.clone();
-			let launched = self.game.is_some();
-			std::thread::spawn(move || {
-				let deadline = std::time::Instant::now() + TERMINATE_GRACE;
-				let mut overdue = false;
-				// The launched world's exit is heard about anyway
-				while launched || local::alive(process) {
-					if !overdue && std::time::Instant::now() >= deadline {
-						overdue = true;
-						if inputs.send(Input::TerminateOverdue { process }).is_err() || launched {
-							return;
-						}
-					}
-					std::thread::sleep(CONNECT_INTERVAL);
-				}
-				let _ = inputs.send(Input::ProcessGone);
-			});
-		} else if self.unavailable {
-			self.out
-				.console(format!("Cannot call world.Del() without the debugger; terminating process {}", process));
-			self.kill_world();
-		} else {
-			self.out.console(format!("Debug server disconnected; terminating process {}", process));
-			self.kill_world();
-		}
-		Ok(Value::Null)
-	}
-
 	fn debuggee(&mut self) -> Result<&mut Debuggee, String> {
-		match self.unavailable {
+		match self.world.unavailable {
 			true => Err(UNAVAILABLE.to_owned()),
 			false => self.debuggee.as_mut().ok_or_else(|| "debug server disconnected".to_owned())
 		}
 	}
 
-	/// Reason a breakpoint or watch cannot currently be set.
 	const fn not_connected(&self) -> &'static str {
-		match self.unavailable {
+		match self.world.unavailable {
 			true => UNAVAILABLE,
-			false => "world is not running"
+			false => "not connected to the debug server"
 		}
 	}
 
 	fn request(&mut self, request: &AuxRequest) -> Result<AuxResponse, String> {
-		self.debuggee()?.request(request)
+		let leaving = self.answering.then(|| self.leaving.clone());
+		self.debuggee()?.request(request, leaving.as_deref())
 	}
 
-	/// A request the server answers with `Ack`
 	fn ack(&mut self, request: &AuxRequest) -> Result<(), String> {
 		match self.request(request)? {
 			AuxResponse::Ack => Ok(()),
@@ -1692,40 +1143,29 @@ impl Adapter {
 		}
 	}
 
-	fn configuration_done(&mut self) -> Handled {
-		if self.debugging && self.debuggee.is_some() {
-			// A client that said nothing about runtime errors has the
-			// filter's default, here as in the worlds after a reboot
-			self.catch_runtimes()?;
-			self.ack(&AuxRequest::Configured)?;
-			self.catch_up_on_pause();
-			self.announce_world();
-			return Ok(Value::Null);
-		}
-		self.catch_up_on_pause();
-		Ok(Value::Null)
-	}
-
 	fn set_breakpoints(&mut self, args: SetBreakpointsArguments) -> Handled {
 		let path = args.source.path.ok_or("breakpoint source is missing a path")?;
-		// VS Code sends updated breakpoint lines after saving. They refer
-		// to the current disk contents.
 		let saved_since = args.sourceModified.unwrap_or(false);
 		let reloading = self.code.is_some();
-		for (id, _) in self.breakpoints.get(&path).into_iter().flatten() {
+		let unsaved = !saved_since && reloading && self.unsaved.contains(&path);
+		let text = crate::lines::read(&path);
+		let same_lines = !unsaved && text.is_some() && self.breakpoint_texts.get(&path) == Some(&text);
+		let mut had: Vec<(i64, i64)> = (self.breakpoints.get(&path).into_iter().flatten())
+			.map(|(id, breakpoint)| (*id, breakpoint.line))
+			.collect();
+		for (id, _) in &had {
 			self.told.remove(id);
 		}
 		let mut wanted = vec![];
 		for breakpoint in args.breakpoints.unwrap_or_default() {
-			wanted.push((self.next_breakpoint_id, breakpoint));
-			self.next_breakpoint_id += 1;
+			let id = match had.iter().position(|(_, line)| same_lines && *line == breakpoint.line) {
+				Some(at) => had.remove(at).0,
+				None => self.new_breakpoint_id()
+			};
+			wanted.push((id, breakpoint));
 		}
 
-		// Defer breakpoints in unsaved editor text until the file is saved
-		// and reloaded. Only clients using `auxtoolsUnsaved` report this state.
-		// Other clients' line numbers refer to disk contents. Without hot
-		// reload, set breakpoints against the running code immediately.
-		if !saved_since && reloading && self.unsaved.contains(&path) {
+		if unsaved {
 			let breakpoints = wanted
 				.iter()
 				.map(|(number, breakpoint)| Breakpoint {
@@ -1737,8 +1177,6 @@ impl Adapter {
 				})
 				.collect::<Vec<_>>();
 			self.told(&breakpoints);
-			// Keep existing breakpoints in the running code until reload.
-			// An empty replacement list removes them immediately.
 			if wanted.is_empty() {
 				self.unset(&path);
 			}
@@ -1751,16 +1189,12 @@ impl Adapter {
 
 		if saved_since && !reloading && self.said_changed.insert(path.clone()) {
 			self.out.console(format!(
-				"{} has changed since the world was built: without hot reloading, its breakpoints go by the code the world has, and may be on other \
-				 lines",
+				"{} has changed since the world was built, and hot reload is off. Breakpoints in this file follow the compiled code and may not \
+				 match the current line numbers.",
 				Path::new(&path).file_name().unwrap_or_default().to_string_lossy()
 			));
 		}
 		self.deferred.remove(&path);
-		let text = crate::lines::read(&path);
-		// These lines refer to saved code that has not been reloaded yet.
-		// Defer installation so breakpoints are not assigned to unrelated
-		// statements in the old code.
 		if self.world_is_behind(&path, &text) {
 			let breakpoints = Self::waiting_for_the_world(&wanted);
 			self.told(&breakpoints);
@@ -1773,7 +1207,6 @@ impl Adapter {
 			return json(SetBreakpointsResponse { breakpoints });
 		}
 		self.waiting.remove(&path);
-		// The first time, the world is taken to have what's on disk
 		self.world_texts.entry(path.clone()).or_insert_with(|| text.clone());
 		self.breakpoints.insert(path.clone(), wanted);
 		self.breakpoint_texts.insert(path.clone(), text);
@@ -1782,12 +1215,12 @@ impl Adapter {
 		json(SetBreakpointsResponse { breakpoints })
 	}
 
-	/// Whether the saved file contains changes not yet reloaded.
-	/// For files without a stored baseline, compare the modification time
-	/// with the last source synchronization. Always false without hot reload.
 	fn world_is_behind(&self, path: &str, text: &Option<Vec<String>>) -> bool {
 		if self.code.is_none() || !self.code_read {
 			return false;
+		}
+		if self.runs_built(path) {
+			return true;
 		}
 		match self.world_texts.get(path) {
 			Some(world) => world != text,
@@ -1798,7 +1231,10 @@ impl Adapter {
 		}
 	}
 
-	/// Report breakpoints deferred until reload.
+	fn runs_built(&self, path: &str) -> bool {
+		!self.running_built.is_empty() && reloaded_text(&self.running_built, path).is_some()
+	}
+
 	fn waiting_for_the_world(wanted: &[(i64, SourceBreakpoint)]) -> Vec<Breakpoint> {
 		wanted
 			.iter()
@@ -1812,7 +1248,6 @@ impl Adapter {
 			.collect()
 	}
 
-	/// Record the breakpoint status sent in a response.
 	fn told(&mut self, breakpoints: &[Breakpoint]) {
 		for breakpoint in breakpoints {
 			if let Some(id) = breakpoint.id {
@@ -1821,7 +1256,6 @@ impl Adapter {
 		}
 	}
 
-	/// Report breakpoint status changes, or every status if `all` is set.
 	fn tell(&mut self, breakpoints: Vec<Breakpoint>, all: bool) {
 		for breakpoint in breakpoints {
 			if let Some(id) = breakpoint.id {
@@ -1838,8 +1272,6 @@ impl Adapter {
 		}
 	}
 
-	/// Update a file's unsaved state. On save, pending breakpoint lines refer
-	/// to disk contents. Install them immediately unless the world is behind.
 	fn unsaved_changed(&mut self, args: UnsavedArguments) -> Handled {
 		let path = args.path;
 		if args.unsaved {
@@ -1851,8 +1283,6 @@ impl Adapter {
 			let text = crate::lines::read(&path);
 			let behind = self.world_is_behind(&path, &text);
 			self.breakpoint_texts.insert(path.clone(), text);
-			// If the world doesn't have the change yet, they're set when
-			// it does
 			if behind {
 				self.waiting.insert(path.clone());
 				let breakpoints = Self::waiting_for_the_world(self.breakpoints.get(&path).map_or(&[], Vec::as_slice));
@@ -1865,25 +1295,28 @@ impl Adapter {
 		Ok(Value::Null)
 	}
 
-	/// Resolve the file's debug name, usually relative to the project root.
-	/// The server uses suffix matching as a fallback.
 	fn world_file_name(&self, path: &str) -> String {
 		self.files.lock().unwrap().name(path)
 	}
 
-	/// Sets a file's breakpoints in the world, in place of the ones it had
+	const fn new_breakpoint_id(&mut self) -> i64 {
+		self.next_breakpoint_id += 1;
+		self.next_breakpoint_id - 1
+	}
+
 	fn apply_breakpoints(&mut self, path: &str) -> Vec<Breakpoint> {
-		self.unset(path);
+		self.relocated.remove(path);
+		let mut live = self.set.lock().unwrap().remove(path).unwrap_or_default();
 		let wanted: Vec<(i64, i64, Option<String>, Option<String>, Option<String>)> = self.breakpoints[path]
 			.iter()
 			.map(|(number, b)| (*number, b.line, b.condition.clone(), b.hitCondition.clone(), b.logMessage.clone()))
 			.collect();
+		let world_name = self.world_file_name(path);
 
 		let mut breakpoints = vec![];
 		let mut set = vec![];
 		for (number, line, condition, hit, log) in wanted {
-			// Logpoints print their message without pausing.
-			let log = log.filter(|message| !message.is_empty()).map(|message| aux::LogPart::parse(&message));
+			let log = log.filter(|message| !message.is_empty());
 			let unverified = |message: &str| Breakpoint {
 				id: Some(number),
 				verified: false,
@@ -1907,127 +1340,164 @@ impl Adapter {
 					continue;
 				}
 			};
-
-			// The world knows which of its procs have code on the line
-			let instructions = match self.request(&AuxRequest::Locate {
-				file: self.world_file_name(path),
-				line: line as u32
-			}) {
-				Ok(AuxResponse::Locate { instructions }) if instructions.is_empty() => {
-					breakpoints.push(unverified(if self.world_has_lines() { NO_CODE } else { NO_LINES }));
-					continue;
-				}
-				Ok(AuxResponse::Locate { instructions }) => instructions,
-				Ok(other) => {
-					breakpoints.push(unverified(&unexpected(other)));
-					continue;
-				}
-				Err(e) => {
-					breakpoints.push(unverified(&e));
-					continue;
-				}
-			};
-
+			let trigger = Trigger { condition, hit };
 			let mut result = None;
-			let mut at_start = false;
-			for instruction in instructions {
-				let mut at = None;
-				match self.set_breakpoint(&instruction, condition.clone(), hit, log.clone()) {
-					Ok(Some((set_line, set_at))) => {
-						result.get_or_insert(Ok(set_line));
-						at_start |= set_at.proc.path == GLOBAL_INIT;
-						at = Some(set_at);
+			let mut claims = vec![];
+
+			let moved: Vec<SetBreakpoint> = live
+				.extract_if(.., |b| {
+					b.id == number && b.file.as_ref().is_some_and(|file| !same_file(file, &world_name))
+				})
+				.collect();
+			for kept in moved {
+				match self.keep(kept, &trigger, log.clone()) {
+					Ok(Some(claimed)) => {
+						result.get_or_insert(Ok((claimed.line, claimed.file.clone())));
+						claims.push(claimed);
 					}
 					Ok(None) => {}
 					Err(e) => {
 						result.get_or_insert(Err(e));
 					}
 				}
-				set.push(SetBreakpoint {
-					asked: instruction,
-					at,
-					watch: None,
-					id: number
-				});
 			}
+
+			if result.is_none() {
+				let instructions = match self.locate(&world_name, line as u32) {
+					Ok(instructions) if instructions.is_empty() => {
+						breakpoints.push(unverified(if self.has_lines() { NO_CODE } else { NO_LINES }));
+						continue;
+					}
+					Ok(instructions) => instructions,
+					Err(e) => {
+						breakpoints.push(unverified(&e));
+						continue;
+					}
+				};
+				for instruction in instructions {
+					let kept = (live.iter())
+						.position(|b| b.id == number && b.at.as_ref() == Some(&instruction))
+						.map(|at| live.remove(at));
+					let claimed = match kept.map(|kept| self.keep(kept, &trigger, log.clone())) {
+						Some(Ok(None)) | None => self.claim(number, &instruction, &trigger, log.clone(), false),
+						Some(kept) => kept
+					};
+					match claimed {
+						Ok(Some(claimed)) => {
+							result.get_or_insert(Ok((claimed.line, claimed.file.clone())));
+							claims.push(claimed);
+						}
+						Ok(None) => {}
+						Err(e) => {
+							result.get_or_insert(Err(e));
+						}
+					}
+				}
+			}
+
+			let at_start = claims
+				.iter()
+				.any(|claimed| claimed.at.as_ref().is_some_and(|at| at.proc.path == GLOBAL_INIT));
+			set.extend(claims);
 			breakpoints.push(match result {
-				Some(Ok(set_line)) => Breakpoint {
+				Some(Ok((set_line, file))) => Breakpoint {
 					id: Some(number),
 					verified: true,
 					line: Some(set_line.unwrap_or(line as u32).into()),
-					message: at_start.then(|| "This line initializes globals or static vars only at world startup.".to_owned()),
+					source: file.filter(|file| !same_file(file, &world_name)).map(|file| self.file_source(&file)),
+					message: at_start.then(|| "This line runs only at world startup to initialize global or static variables.".to_owned()),
 					..Default::default()
 				},
 				Some(Err(e)) => unverified(&e),
 				None => unverified("could not set breakpoint")
 			});
 		}
+		self.release(live);
 		self.set.lock().unwrap().insert(path.to_owned(), set);
 		breakpoints
 	}
 
-	/// Resolved line if the breakpoint was verified.
-	fn set_breakpoint(
+	fn claim(
 		&mut self,
+		id: i64,
 		instruction: &InstructionRef,
-		condition: Option<String>,
-		hit: Option<aux::HitCondition>,
-		log: Option<Vec<aux::LogPart>>
-	) -> Result<Option<(Option<u32>, InstructionRef)>, String> {
-		self.breakpoint_set(&AuxRequest::BreakpointSet {
-			instruction: instruction.clone(),
-			condition,
-			hit,
-			log
-		})
+		trigger: &Trigger,
+		log: Option<String>,
+		exact: bool
+	) -> Result<Option<SetBreakpoint>, String> {
+		self.claims += 1;
+		let claim = self.claims;
+		let (at, file, line) = match self.place_breakpoint(claim, instruction, trigger, log.as_deref().map(aux::LogPart::parse), exact)? {
+			Placed::Set { at, file, line } => (at, file, line),
+			Placed::Nowhere => return Ok(None),
+			Placed::Refused(reason) => return Err(reason)
+		};
+		Ok(Some(SetBreakpoint {
+			id,
+			claim,
+			at: Some(at),
+			file,
+			line,
+			trigger: trigger.clone(),
+			log,
+			watch: None
+		}))
 	}
 
-	/// Interpret the breakpoint response; returns the verified line, if any.
-	fn breakpoint_set(&mut self, request: &AuxRequest) -> Result<Option<(Option<u32>, InstructionRef)>, String> {
-		match self.request(request)? {
-			AuxResponse::BreakpointSet {
-				result: aux::BreakpointSetResult::Success { line, at, .. }
-			} => Ok(Some((line, at))),
-			AuxResponse::BreakpointSet {
-				result: aux::BreakpointSetResult::Failed
-			} => Ok(None),
-			AuxResponse::BreakpointSet {
-				result: aux::BreakpointSetResult::Refused { reason }
-			} => Err(reason),
-			other => Err(unexpected(other))
+	fn keep(&mut self, mut kept: SetBreakpoint, trigger: &Trigger, log: Option<String>) -> Result<Option<SetBreakpoint>, String> {
+		if kept.trigger == *trigger && kept.log == log {
+			return Ok(Some(kept));
+		}
+		match self.edit_breakpoint(kept.claim, trigger, log.as_deref().map(aux::LogPart::parse))? {
+			Placed::Set { at, file, line } => {
+				kept.at = Some(at);
+				kept.file = file;
+				kept.line = line;
+				kept.trigger = trigger.clone();
+				kept.log = log;
+				Ok(Some(kept))
+			}
+			Placed::Nowhere => Ok(None),
+			Placed::Refused(reason) => {
+				let _ = self.remove_breakpoint(kept.claim);
+				Err(reason)
+			}
 		}
 	}
 
-	/// Remove breakpoints stored under `key`.
+	fn release(&mut self, breakpoints: Vec<SetBreakpoint>) {
+		for breakpoint in breakpoints {
+			let _ = self.remove_breakpoint(breakpoint.claim);
+		}
+	}
+
 	fn unset(&mut self, key: &str) {
 		let set = self.set.lock().unwrap().remove(key).unwrap_or_default();
-		for breakpoint in set {
-			let instruction = breakpoint.asked;
-			let _ = self.request(&if key == INSTRUCTION_BREAKPOINTS {
-				AuxRequest::InstructionBreakpointUnset { instruction }
-			} else {
-				AuxRequest::BreakpointUnset { instruction }
-			});
-		}
+		self.release(set);
 	}
 
 	fn set_function_breakpoints(&mut self, args: SetFunctionBreakpointsArguments) -> Handled {
-		for id in &self.function_breakpoint_ids {
+		let mut had: Vec<(i64, String)> = (self.function_breakpoint_ids.iter())
+			.zip(&self.function_breakpoints)
+			.map(|(id, b)| (*id, b.name.clone()))
+			.collect();
+		for (id, _) in &had {
 			self.told.remove(id);
 		}
-		// Preserve IDs so the client can identify subsequent updates.
-		self.function_breakpoint_ids = (0..args.breakpoints.len() as i64).map(|i| self.next_breakpoint_id + i).collect();
-		self.next_breakpoint_id += args.breakpoints.len() as i64;
+		self.function_breakpoint_ids = (args.breakpoints.iter())
+			.map(|wanted| match had.iter().position(|(_, name)| *name == wanted.name) {
+				Some(at) => had.remove(at).0,
+				None => self.new_breakpoint_id()
+			})
+			.collect();
 		self.function_breakpoints = args.breakpoints;
 		let breakpoints = self.apply_function_breakpoints();
 		self.told(&breakpoints);
 		json(SetFunctionBreakpointsResponse { breakpoints })
 	}
 
-	/// Set function breakpoints. `/mob/proc/Login#1` selects the second
-	/// definition.
 	fn apply_function_breakpoints(&mut self) -> Vec<Breakpoint> {
-		self.unset(FUNCTION_BREAKPOINTS);
+		let mut live = self.set.lock().unwrap().remove(FUNCTION_BREAKPOINTS).unwrap_or_default();
 		let wanted: Vec<(i64, String, Option<String>, Option<String>)> = self
 			.function_breakpoints
 			.iter()
@@ -2047,57 +1517,56 @@ impl Adapter {
 				});
 				continue;
 			}
-			let (breakpoint, in_world) = self.function_breakpoint(id, &name, condition, hit.as_deref());
+			let (breakpoint, in_world) = self.function_breakpoint(id, &name, condition, hit.as_deref(), &mut live);
 			breakpoints.push(breakpoint);
-			set.push(in_world);
+			set.extend(in_world);
 		}
+		self.release(live);
 		self.set.lock().unwrap().insert(FUNCTION_BREAKPOINTS.to_owned(), set);
 		breakpoints
 	}
 
-	/// Set a function breakpoint and return its client response and runtime
-	/// location.
-	fn function_breakpoint(&mut self, id: i64, name: &str, condition: Option<String>, hit: Option<&str>) -> (Breakpoint, SetBreakpoint) {
+	fn function_breakpoint(
+		&mut self,
+		id: i64,
+		name: &str,
+		condition: Option<String>,
+		hit: Option<&str>,
+		live: &mut Vec<SetBreakpoint>
+	) -> (Breakpoint, Option<SetBreakpoint>) {
 		let instruction = InstructionRef {
 			proc: named_proc(name),
 			offset: 0
 		};
-		let set_as_asked = hit_condition(hit).and_then(|hit| self.set_breakpoint(&instruction, condition, hit, None));
-		let mut at = None;
-		let breakpoint = match set_as_asked {
-			Ok(Some((line, set_at))) => {
-				at = Some(set_at);
-				Breakpoint {
+		let claimed = hit_condition(hit).and_then(|hit| {
+			let trigger = Trigger { condition, hit };
+			let kept = live.iter().position(|b| b.id == id).map(|at| live.remove(at));
+			match kept.map(|kept| self.keep(kept, &trigger, None)) {
+				Some(Ok(None)) | None => self.claim(id, &instruction, &trigger, None, false),
+				Some(kept) => kept
+			}
+		});
+		let unverified = |message: String| Breakpoint {
+			id: Some(id),
+			verified: false,
+			message: Some(message),
+			..Default::default()
+		};
+		match claimed {
+			Ok(Some(claimed)) => {
+				let breakpoint = Breakpoint {
 					id: Some(id),
 					verified: true,
-					line: line.map(i64::from),
+					line: claimed.line.map(i64::from),
 					..Default::default()
-				}
+				};
+				(breakpoint, Some(claimed))
 			}
-			Ok(None) => Breakpoint {
-				id: Some(id),
-				verified: false,
-				message: Some(format!("proc not found: {}", name)),
-				..Default::default()
-			},
-			Err(e) => Breakpoint {
-				id: Some(id),
-				verified: false,
-				message: Some(e),
-				..Default::default()
-			}
-		};
-		let in_world = SetBreakpoint {
-			asked: instruction,
-			at,
-			watch: None,
-			id
-		};
-		(breakpoint, in_world)
+			Ok(None) => (unverified(format!("proc not found: {}", name)), None),
+			Err(e) => (unverified(e), None)
+		}
 	}
 
-	/// Retry unresolved function breakpoints after reload; new procs may now
-	/// exist. Leave resolved breakpoints and their hit counts intact.
 	fn retry_function_breakpoints(&mut self) {
 		if !self.debugging || self.debuggee.is_none() {
 			return;
@@ -2108,73 +1577,187 @@ impl Adapter {
 			self.function_breakpoints
 				.iter()
 				.zip(&self.function_breakpoint_ids)
-				.filter(|(_, id)| in_world.iter().any(|b| b.id == **id && b.at.is_none()))
+				.filter(|(_, id)| !in_world.iter().any(|b| b.id == **id))
 				.map(|(b, id)| (*id, b.name.clone(), b.condition.clone(), b.hitCondition.clone()))
 				.collect()
 		};
 		let mut told = vec![];
 		for (id, name, condition, hit) in unset {
-			let (breakpoint, in_world) = self.function_breakpoint(id, &name, condition, hit.as_deref());
-			// Only report newly resolved breakpoints. A disconnect during the
-			// retry does not change what the client knows about an unresolved
-			// breakpoint.
-			if in_world.at.is_none() {
-				continue;
+			let (breakpoint, in_world) = self.function_breakpoint(id, &name, condition, hit.as_deref(), &mut vec![]);
+			if self.debuggee.as_ref().is_some_and(Debuggee::lost) {
+				break;
 			}
-			let mut set = self.set.lock().unwrap();
-			if let Some(b) = set.get_mut(FUNCTION_BREAKPOINTS).and_then(|set| set.iter_mut().find(|b| b.id == id)) {
-				*b = in_world;
+			if let Some(in_world) = in_world {
+				let mut set = self.set.lock().unwrap();
+				set.entry(FUNCTION_BREAKPOINTS.to_owned()).or_default().push(in_world);
 			}
 			told.push(breakpoint);
 		}
 		self.tell(told, false);
 	}
 
+	fn requested_address(breakpoint: &InstructionBreakpoint) -> Option<u64> {
+		parse_address(&breakpoint.instruction_reference).map(|address| address.wrapping_add_signed(breakpoint.offset.unwrap_or(0)))
+	}
+
+	fn live_address(&self, id: i64, breakpoint: &InstructionBreakpoint) -> Option<u64> {
+		let set = self.set.lock().unwrap();
+		let claimed = set.get(INSTRUCTION_BREAKPOINTS).and_then(|set| set.iter().find(|b| b.id == id));
+		let at = claimed.and_then(|b| b.at.as_ref()).or_else(|| self.refused_at.get(&id))?;
+		Some(Self::requested_address(breakpoint)? & !0xFFFF | u64::from(at.offset))
+	}
+
 	fn set_instruction_breakpoints(&mut self, args: InstructionBreakpointsArguments) -> Handled {
+		type Had = (i64, InstructionBreakpoint, Option<u64>);
+		let had: Vec<Had> = (self.instruction_breakpoints.iter())
+			.map(|(id, breakpoint)| (*id, breakpoint.clone(), self.live_address(*id, breakpoint)))
+			.collect();
+		let asked = |breakpoint: &InstructionBreakpoint, (_, old, _): &Had| match Self::requested_address(breakpoint) {
+			Some(address) => Self::requested_address(old) == Some(address),
+			None => old.instruction_reference == breakpoint.instruction_reference && old.offset == breakpoint.offset
+		};
+		let moved = |breakpoint: &InstructionBreakpoint, (_, _, live): &Had| live.is_some() && *live == Self::requested_address(breakpoint);
+		let pair = |order: [&dyn Fn(&InstructionBreakpoint, &Had) -> bool; 2]| {
+			let mut taken = vec![false; had.len()];
+			let mut pairs: Vec<Option<usize>> = vec![None; args.breakpoints.len()];
+			for same in order {
+				for (breakpoint, pair) in args.breakpoints.iter().zip(&mut pairs) {
+					if pair.is_none() {
+						*pair = (0..had.len()).find(|&i| !taken[i] && same(breakpoint, &had[i]));
+						if let Some(i) = *pair {
+							taken[i] = true;
+						}
+					}
+				}
+			}
+			pairs
+		};
+		let (by_asked, by_moved) = (pair([&asked, &moved]), pair([&moved, &asked]));
+		let count = |pairs: &[Option<usize>]| pairs.iter().flatten().count();
+		let pairs = if count(&by_moved) > count(&by_asked) { by_moved } else { by_asked };
 		let mut wanted = vec![];
-		for breakpoint in args.breakpoints {
-			wanted.push((self.next_breakpoint_id, breakpoint));
-			self.next_breakpoint_id += 1;
+		for (breakpoint, pair) in args.breakpoints.into_iter().zip(pairs) {
+			let id = match pair {
+				Some(i) => had[i].0,
+				None => self.new_breakpoint_id()
+			};
+			wanted.push((id, breakpoint));
 		}
 		self.instruction_breakpoints = wanted;
 		let breakpoints = self.apply_instruction_breakpoints();
 		Ok(serde_json::json!({ "breakpoints": breakpoints }))
 	}
 
-	/// Set instruction breakpoints using disassembly addresses.
-	/// Addresses must point to instruction boundaries: inserting a breakpoint
-	/// inside an instruction would corrupt its operands.
-	fn apply_instruction_breakpoints(&mut self) -> Vec<Value> {
-		self.unset(INSTRUCTION_BREAKPOINTS);
-		let wanted = self.instruction_breakpoints.clone();
+	fn instruction_shown(&self, id: i64, breakpoint: &InstructionBreakpoint) -> InstructionShown {
+		let reference = breakpoint.instruction_reference.clone();
+		if self.removed_by_reload.contains(&id) {
+			return InstructionShown::unverified(id, reference, REMOVED_BY_RELOAD.to_owned());
+		}
+		let line = (self.set.lock().unwrap().get(INSTRUCTION_BREAKPOINTS))
+			.and_then(|set| set.iter().find(|b| b.id == id))
+			.map(|b| b.line);
+		match (line, self.live_address(id, breakpoint)) {
+			(Some(line), Some(address)) => InstructionShown {
+				id,
+				verified: true,
+				message: None,
+				line,
+				instruction_reference: address_text(address)
+			},
+			_ => InstructionShown::unverified(id, reference, "could not set breakpoint".to_owned())
+		}
+	}
 
+	fn apply_instruction_breakpoints(&mut self) -> Vec<InstructionShown> {
+		let wanted = self.instruction_breakpoints.clone();
+		self.removed_by_reload.retain(|id| wanted.iter().any(|(wanted, _)| wanted == id));
+		self.refused_at.retain(|id, _| wanted.iter().any(|(wanted, _)| wanted == id));
+		let mut live = self.set.lock().unwrap().remove(INSTRUCTION_BREAKPOINTS).unwrap_or_default();
 		let mut breakpoints = vec![];
 		let mut set = vec![];
 		let mut code: HashMap<aux::CodeRef, Option<aux::Disassembly>> = HashMap::new();
 		for (id, breakpoint) in wanted {
 			let reference = breakpoint.instruction_reference.clone();
-			let unverified =
-				|message: String| serde_json::json!({ "id": id, "verified": false, "message": message, "instructionReference": reference });
+			let unverified = |message: String| InstructionShown::unverified(id, reference.clone(), message);
 			if !self.debugging || self.debuggee.is_none() {
 				breakpoints.push(unverified("no active debugging connection".to_owned()));
 				continue;
 			}
-			let Some(address) = parse_address(&reference).map(|address| address.wrapping_add_signed(breakpoint.offset.unwrap_or(0))) else {
+			if self.removed_by_reload.contains(&id) {
+				breakpoints.push(unverified(REMOVED_BY_RELOAD.to_owned()));
+				continue;
+			}
+			let Some(address) = Self::requested_address(&breakpoint) else {
 				breakpoints.push(unverified(format!("invalid instruction address: {:?}", reference)));
 				continue;
 			};
+			let kept = live.iter().position(|b| b.id == id).map(|at| live.remove(at));
+			let hit = match hit_condition(breakpoint.hit_condition.as_deref()) {
+				Ok(hit) => hit,
+				Err(e) => {
+					if let Some(kept) = kept {
+						self.refused_at.extend(kept.at.map(|at| (id, at)));
+						let _ = self.remove_breakpoint(kept.claim);
+					}
+					breakpoints.push(unverified(e));
+					continue;
+				}
+			};
+			let trigger = Trigger {
+				condition: breakpoint.condition.clone(),
+				hit
+			};
+			let shown = |claimed: &SetBreakpoint| InstructionShown {
+				id,
+				verified: true,
+				message: None,
+				line: claimed.line,
+				instruction_reference: address_text(address & !0xFFFF | u64::from(claimed.at.as_ref().map_or(0, |at| at.offset)))
+			};
+
+			if let Some(kept) = kept {
+				let at = kept.at.clone();
+				breakpoints.push(match self.keep(kept, &trigger, None) {
+					Ok(Some(claimed)) => {
+						let reply = shown(&claimed);
+						set.push(claimed);
+						reply
+					}
+					Ok(None) => {
+						self.removed_by_reload.insert(id);
+						unverified(REMOVED_BY_RELOAD.to_owned())
+					}
+					Err(e) => {
+						self.refused_at.extend(at.map(|at| (id, at)));
+						unverified(e)
+					}
+				});
+				continue;
+			}
+			if let Some(at) = self.refused_at.get(&id).cloned() {
+				breakpoints.push(match self.claim(id, &at, &trigger, None, true) {
+					Ok(Some(claimed)) => {
+						self.refused_at.remove(&id);
+						let reply = shown(&claimed);
+						set.push(claimed);
+						reply
+					}
+					Ok(None) => unverified("could not set breakpoint".to_owned()),
+					Err(e) => unverified(e)
+				});
+				continue;
+			}
+
 			let (place, offset) = aux::from_address(address);
 			if place.old != 0 {
 				breakpoints.push(unverified("cannot set a breakpoint in pre-reload bytecode".to_owned()));
 				continue;
 			}
-			if !code.contains_key(&place) {
-				let disassembly = match self.request(&AuxRequest::Disassemble { code: place }) {
+			code.entry(place)
+				.or_insert_with(|| match self.request(&AuxRequest::Disassemble { code: place }) {
 					Ok(AuxResponse::Disassemble(Ok(disassembly))) => Some(disassembly),
 					_ => None
-				};
-				code.insert(place, disassembly);
-			}
+				});
 			let Some(disassembly) = &code[&place] else {
 				breakpoints.push(unverified(format!("no proc at address {}", address_text(address))));
 				continue;
@@ -2197,7 +1780,7 @@ impl Adapter {
 				}
 				Some(start) if start != offset => {
 					breakpoints.push(unverified(format!(
-						"{} is in the middle of an instruction of {}, which starts at {}",
+						"{} is inside an instruction in {} (the instruction starts at {})",
 						address_text(address),
 						proc.path,
 						address_text(aux::address(place, start))
@@ -2206,45 +1789,24 @@ impl Adapter {
 				}
 				_ => {}
 			}
-			let hit = match hit_condition(breakpoint.hit_condition.as_deref()) {
-				Ok(hit) => hit,
-				Err(e) => {
-					breakpoints.push(unverified(e));
-					continue;
-				}
-			};
 
 			let instruction = InstructionRef { proc, offset: offset.into() };
-			let mut at = None;
-			breakpoints.push(
-				match self.breakpoint_set(&AuxRequest::InstructionBreakpointSet {
-					instruction: instruction.clone(),
-					condition: breakpoint.condition.clone(),
-					hit,
-					log: None
-				}) {
-					Ok(Some((line, set_at))) => {
-						at = Some(set_at);
-						serde_json::json!({ "id": id, "verified": true, "line": line, "instructionReference": address_text(address) })
-					}
-					Ok(None) => unverified("could not set breakpoint".to_owned()),
-					Err(e) => unverified(e)
+			breakpoints.push(match self.claim(id, &instruction, &trigger, None, true) {
+				Ok(Some(claimed)) => {
+					let reply = shown(&claimed);
+					set.push(claimed);
+					reply
 				}
-			);
-			set.push(SetBreakpoint {
-				asked: instruction,
-				at,
-				watch: None,
-				id
+				Ok(None) => unverified("could not set breakpoint".to_owned()),
+				Err(e) => unverified(e)
 			});
 		}
+		self.release(live);
 		self.set.lock().unwrap().insert(INSTRUCTION_BREAKPOINTS.to_owned(), set);
 		breakpoints
 	}
 
 	fn set_exception_breakpoints(&mut self, args: ExceptionBreakpointsArguments) -> Handled {
-		// A filter that's ticked is in one list or the other: with its
-		// condition, or without one
 		let filter = |id: &str| -> Option<aux::RuntimeFilter> {
 			if let Some(option) = args.filter_options.iter().find(|option| option.filter_id == id) {
 				return Some(aux::RuntimeFilter::parse(option.condition.as_deref().unwrap_or_default()));
@@ -2259,13 +1821,11 @@ impl Adapter {
 		Ok(Value::Null)
 	}
 
-	/// Tells the world which runtime errors to pause on (it doesn't answer)
 	fn catch_runtimes(&mut self) -> Result<(), String> {
 		let (uncaught, caught) = (self.uncaught.clone(), self.caught.clone());
 		self.debuggee()?.send(&AuxRequest::CatchRuntimes { uncaught, caught })
 	}
 
-	/// Details of the current runtime error: message, caught status and stack.
 	fn exception_info(&mut self) -> Handled {
 		let error = self.last_error.lock().unwrap().clone();
 		let frames = match self.request(&AuxRequest::StackFrames {
@@ -2302,7 +1862,6 @@ impl Adapter {
 	fn threads(&mut self) -> Handled {
 		let mut threads = vec![];
 		if self.debuggee.is_some() {
-			// The server already excludes the keepalive stack.
 			let limit = self.sleeping_threads as usize;
 			match self.request(&AuxRequest::Stacks {
 				sleeping: Some(self.sleeping_threads)
@@ -2325,8 +1884,8 @@ impl Adapter {
 					if asleep > listed && !self.said_more_sleep {
 						self.said_more_sleep = true;
 						self.out.console(format!(
-							"{} procs are asleep: the list of threads has the first {} (\"sleepingThreads\" in the launch configuration sets how \
-							 many)",
+							"Sleeping procs: {} (showing {} in the Call Stack view). Set \"sleepingThreads\" in the launch configuration to change \
+							 this limit.",
 							asleep, listed
 						));
 					}
@@ -2335,7 +1894,6 @@ impl Adapter {
 			}
 		}
 
-		// The client only asks to pause a thread it knows of
 		if threads.is_empty() {
 			threads.push(Thread {
 				id: 0,
@@ -2360,22 +1918,17 @@ impl Adapter {
 			let proc = &frame.instruction.proc;
 			let mut dap_frame = StackFrame {
 				id: frame.id.into(),
-				// Frames running pre-reload bytecode refer to the old source
-				// text.
 				name: if frame.old_code {
 					format!("{} (old code)", proc.path)
 				} else {
 					proc.path.clone()
 				},
 				instructionPointerReference: Some(address_text(aux::address(frame.code, frame.instruction.offset as u16))),
-				// Has to be more than 0 for the client to show an exception
 				column: if i == 0 { 1 } else { 0 },
 				..Default::default()
 			};
 
-			// The world says which file the proc is in, but for stddef.dm's
 			match &frame.file {
-				// One of the debug library's own
 				Some(file) if file == HELPER_FILE => dap_frame.presentationHint = Some(StackFramePresentationHint::Subtle),
 				Some(file) => dap_frame.source = Some(self.file_source(file)),
 				None => match self.stddef.as_ref().and_then(|stddef| stddef.line(&proc.path, proc.override_id)) {
@@ -2409,7 +1962,6 @@ impl Adapter {
 			AuxResponse::Scopes { arguments, locals, globals } => (arguments, locals, globals),
 			other => return Err(unexpected(other))
 		};
-		// Load globals lazily; a world may have thousands.
 		let scopes = [
 			("Locals", locals, Some("locals")),
 			("Arguments", arguments, Some("arguments")),
@@ -2430,7 +1982,6 @@ impl Adapter {
 	}
 
 	fn variables(&mut self, args: VariablesArguments) -> Handled {
-		// A client takes a long list a piece at a time
 		let piece = |n: Option<i64>| n.and_then(|n| u32::try_from(n).ok());
 		let vars = match self.request(&AuxRequest::Variables {
 			vars: aux::VariablesRef(args.variablesReference as i32),
@@ -2442,7 +1993,6 @@ impl Adapter {
 		};
 		let hex = args.format.is_some_and(|format| format.hex == Some(true));
 
-		// Variable names must be unique within a container.
 		let mut seen: HashMap<String, u32> = HashMap::new();
 		let variables = vars
 			.into_iter()
@@ -2465,8 +2015,6 @@ impl Adapter {
 	}
 
 	fn pause(&mut self) -> Handled {
-		// Without debugging, the client receives no stop events and cannot
-		// resume.
 		if !self.debugging {
 			return Err("debugging is disabled".to_owned());
 		}
@@ -2482,19 +2030,25 @@ impl Adapter {
 	}
 
 	fn evaluate(&mut self, args: EvaluateArguments) -> Handled {
-		// Hover evaluation must not change the world.
 		if args.context.as_deref() == Some("hover") {
 			if let Some(why) = hover_refuses(&args.expression) {
 				return Err(why.to_owned());
 			}
 		}
 		let hex = args.format.is_some_and(|format| format.hex == Some(true));
-		match self.request(&AuxRequest::Eval {
-			frame_id: args.frameId.map(|id| id as u32),
-			command: args.expression,
-			// Only world.Del() and world.Reboot() use the ending context.
-			context: args.context.filter(|context| context != ENDING_CONTEXT)
-		})? {
+		let frame_id = args.frameId.map(|id| id as u32);
+		let request = match args.context.as_deref() {
+			Some("hover") => AuxRequest::Read {
+				frame_id,
+				expression: args.expression
+			},
+			_ => AuxRequest::Eval {
+				frame_id,
+				command: args.expression,
+				ending: false
+			}
+		};
+		match self.request(&request)? {
 			AuxResponse::Eval(Ok(result)) => json(EvaluateResponse {
 				result: shown(result.value, hex),
 				type_: result.kind,
@@ -2502,18 +2056,20 @@ impl Adapter {
 				indexedVariables: result.entries.map(|entries| entries as usize),
 				..Default::default()
 			}),
-			// The client shows it where the value would be
-			AuxResponse::Eval(Err(why)) => Err(why),
+			AuxResponse::Eval(Err(why)) => Err(why.message),
 			other => Err(unexpected(other))
 		}
 	}
 
-	/// Complete the expression at the cursor.
 	fn completions(&mut self, args: CompletionsArguments) -> Handled {
-		// The column counts UTF-16 units, from 1
-		let before = args.column.max(1) as usize - 1;
-		let cursor = args
+		let line = args
 			.text
+			.split('\n')
+			.nth(args.line.map_or(0, |line| line.max(1) as usize - 1))
+			.unwrap_or_default();
+		let text = line.strip_suffix('\r').unwrap_or(line);
+		let before = args.column.max(1) as usize - 1;
+		let cursor = text
 			.char_indices()
 			.scan(0, |units, (at, c)| {
 				let here = *units;
@@ -2521,17 +2077,16 @@ impl Adapter {
 				Some((at, here))
 			})
 			.find(|(_, units)| *units >= before)
-			.map_or(args.text.len(), |(at, _)| at);
-		let Some(place) = completion_place(&args.text[..cursor]) else {
+			.map_or(text.len(), |(at, _)| at);
+		let Some(place) = completion_place(&text[..cursor]) else {
 			return Ok(serde_json::json!({ "targets": [] }));
 		};
-		let prefix = &args.text[place.start..cursor];
-		let (start, length) = (args.text[..place.start].encode_utf16().count() + 1, prefix.encode_utf16().count());
+		let prefix = &text[place.start..cursor];
+		let (start, length) = (text[..place.start].encode_utf16().count() + 1, prefix.encode_utf16().count());
 		let target = |label: &str, kind: &str| serde_json::json!({ "label": label, "type": kind, "start": start, "length": length });
 
-		// The debug server's own commands
 		if place.command {
-			let targets: Vec<Value> = ["dis", "disassemble", "guest_override", "help", "mem_profiler"]
+			let targets: Vec<Value> = ["dis", "disassemble", "help"]
 				.into_iter()
 				.filter(|command| command.starts_with(prefix))
 				.map(|command| target(command, "keyword"))
@@ -2545,7 +2100,7 @@ impl Adapter {
 			prefix: prefix.to_owned()
 		})? {
 			AuxResponse::Complete(names) => {
-				let member = place.base.is_some();
+				let member = place.base.is_some_and(|base| base != "global");
 				let targets: Vec<Value> = names
 					.iter()
 					.map(|name| {
@@ -2564,7 +2119,6 @@ impl Adapter {
 		}
 	}
 
-	/// Assign an evaluated expression to a variable.
 	fn set_variable(&mut self, args: SetVariableArguments) -> Handled {
 		let hex = args.format.is_some_and(|format| format.hex == Some(true));
 		match self.request(&AuxRequest::SetVariable {
@@ -2583,13 +2137,12 @@ impl Adapter {
 		}
 	}
 
-	/// Assign to an expression using DM's assignment operator.
 	fn set_expression(&mut self, args: SetExpressionArguments) -> Handled {
 		let hex = args.format.is_some_and(|format| format.hex == Some(true));
 		match self.request(&AuxRequest::Eval {
 			frame_id: args.frame_id.map(|id| id as u32),
 			command: format!("{} = ({})", args.expression, args.value),
-			context: None
+			ending: false
 		})? {
 			AuxResponse::Eval(Ok(result)) => Ok(serde_json::json!({
 				"value": shown(result.value, hex),
@@ -2597,29 +2150,24 @@ impl Adapter {
 				"variablesReference": result.variables.map_or(0, |vars| vars.0),
 				"indexedVariables": result.entries
 			})),
-			AuxResponse::Eval(Err(why)) => Err(why),
+			AuxResponse::Eval(Err(why)) => Err(why.message),
 			other => Err(unexpected(other))
 		}
 	}
 
-	/// Return exactly the requested disassembly window.
-	/// Mark entries outside the bytecode as invalid instructions.
 	fn disassemble(&mut self, args: DisassembleArguments) -> Handled {
-		let count = usize::try_from(args.instructionCount).map_err(|_| "the instruction count is negative".to_owned())?;
+		let count = usize::try_from(args.instructionCount).map_err(|_| "instruction count cannot be negative".to_owned())?;
 		let reference = parse_address(&args.memoryReference).ok_or_else(|| format!("invalid instruction address: {:?}", args.memoryReference))?;
-		// An address counts words, as the code does
 		let reference = reference.wrapping_add_signed(args.offset.unwrap_or(0));
 		let (code, offset) = aux::from_address(reference);
 		let disassembly = match self.request(&AuxRequest::Disassemble { code })? {
 			AuxResponse::Disassemble(Ok(disassembly)) => Some(disassembly),
-			// Past the start or the end of some code, there's none
 			AuxResponse::Disassemble(Err(_)) => None,
 			other => return Err(unexpected(other))
 		};
 
 		let empty = vec![];
 		let listed = disassembly.as_ref().map_or(&empty, |disassembly| &disassembly.instructions);
-		// Old bytecode refers to source text the client no longer has.
 		let file = disassembly
 			.as_ref()
 			.filter(|_| code.old == 0)
@@ -2663,7 +2211,6 @@ impl Adapter {
 				})
 				.collect();
 
-		// Marked for clients that grey out what isn't code
 		let mut instructions = json(instructions)?;
 		for instruction in instructions.as_array_mut().into_iter().flatten() {
 			if instruction["instructionBytes"].is_null() {
@@ -2673,7 +2220,6 @@ impl Adapter {
 		Ok(serde_json::json!({ "instructions": instructions }))
 	}
 
-	/// Build the client's source descriptor from a debug source name.
 	fn file_source(&self, file: &str) -> Source {
 		source_at(&self.files.lock().unwrap().path(file))
 	}
@@ -2689,8 +2235,6 @@ impl Adapter {
 		}
 	}
 
-	/// Return executable lines in the requested range.
-	/// Unavailable without an active debugging connection or for stddef.dm.
 	fn breakpoint_locations(&mut self, args: BreakpointLocationsArguments) -> Handled {
 		let path = match args.source.path {
 			Some(path) if self.debugging && self.debuggee.is_some() => path,
@@ -2711,20 +2255,6 @@ impl Adapter {
 		}
 	}
 
-	/// Whether the world has source files in its debug info, beyond the
-	/// launcher helpers.
-	fn world_has_lines(&mut self) -> bool {
-		match self.request(&AuxRequest::Files) {
-			Ok(AuxResponse::Files { files }) => files.iter().any(|file| file != HELPER_FILE),
-			// Keep the usual diagnostic if the request fails; missing debug
-			// info is unconfirmed.
-			_ => true
-		}
-	}
-
-	/// List sorted source paths from the world's debug info, appending
-	/// stddef.dm if available. Files without procs are absent. Unavailable
-	/// without an active debugging connection.
 	fn loaded_sources(&mut self) -> Handled {
 		if !self.debugging || self.debuggee.is_none() {
 			return Ok(serde_json::json!({ "sources": [] }));
@@ -2735,7 +2265,6 @@ impl Adapter {
 		};
 		let mut paths: Vec<PathBuf> = files
 			.into_iter()
-			// The debug library's own procs aren't in a file of the world's
 			.filter(|file| file != HELPER_FILE)
 			.map(|file| self.files.lock().unwrap().path(&file))
 			.collect();
@@ -2753,34 +2282,44 @@ impl Adapter {
 	}
 }
 
-/// The file and line in BYOND's report of a runtime error:
-/// `  source file: code/game/mob.dm,42`
 fn runtime_place(line: &str) -> Option<(&str, i64)> {
 	let (file, number) = line.trim().strip_prefix("source file: ")?.rsplit_once(',')?;
 	Some((file, number.trim().parse().ok()?))
 }
 
-/// Completion prefix at the end of the input.
 #[derive(Debug, PartialEq, Eq)]
 struct CompletionPlace<'a> {
-	/// Where the name starts
 	start: usize,
-	/// Receiver expression, e.g. `a.b[2]` in `a.b[2].na`.
 	base: Option<&'a str>,
-	/// It's one of the debug server's commands, after a `#`
 	command: bool
 }
 
-/// Find the completion prefix and receiver at the end of `text`.
-/// Returns `None` inside strings or when resolving the receiver requires a
-/// call.
 fn completion_place(text: &str) -> Option<CompletionPlace<'_>> {
 	let name_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
-	if text.chars().filter(|&c| c == '"').count() % 2 == 1 {
+	let mut opened = vec![];
+	let mut opens = HashMap::new();
+	let mut quoted = false;
+	let mut chars = text.char_indices();
+	while let Some((at, c)) = chars.next() {
+		match c {
+			'\\' if quoted => {
+				chars.next();
+			}
+			'"' => quoted = !quoted,
+			_ if quoted => {}
+			'[' | '(' => opened.push(at),
+			']' | ')' => {
+				if let Some(open) = opened.pop() {
+					opens.insert(at, open);
+				}
+			}
+			_ => {}
+		}
+	}
+	if quoted {
 		return None;
 	}
 	let start = text.trim_end_matches(name_char).len();
-	// A number isn't a name
 	if text[start..].starts_with(|c: char| c.is_ascii_digit()) {
 		return None;
 	}
@@ -2792,40 +2331,37 @@ fn completion_place(text: &str) -> Option<CompletionPlace<'_>> {
 		});
 	}
 
-	// What's before it, back through `.`, `?.`, `:` and `?:`, names and
-	// indexes
 	let mut at = start;
 	let mut base_end = None;
 	loop {
 		let before = &text[..at];
+		if before
+			.strip_suffix("::")
+			.is_some_and(|head| !head.ends_with(|c: char| name_char(c) || matches!(c, ']' | ')' | '"')))
+		{
+			if base_end.is_none() {
+				return Some(CompletionPlace {
+					start,
+					base: Some("global"),
+					command: false
+				});
+			}
+			at -= 2;
+			break;
+		}
 		let Some(joined) = ["?.", "?:", ".", ":"].into_iter().find(|by| before.ends_with(by)) else {
 			break;
 		};
 		let member_end = at - joined.len();
 		base_end.get_or_insert(member_end);
 		let mut member = member_end;
-		// Indexes: `[...]`, with nothing called inside
 		while text[..member].ends_with(']') {
-			let mut depth = 0;
-			let mut open = None;
-			for (i, c) in text[..member].char_indices().rev() {
-				match c {
-					']' => depth += 1,
-					'[' => {
-						depth -= 1;
-						if depth == 0 {
-							open = Some(i);
-							break;
-						}
-					}
-					'(' | ')' => return None,
-					_ => {}
-				}
+			member = opens.get(&(member - 1)).copied().filter(|&open| text[open..].starts_with('['))?;
+			if text[..member].ends_with('?') {
+				member -= 1;
 			}
-			member = open?;
 		}
 		let name = text[..member].trim_end_matches(name_char).len();
-		// Something else: a call's result, a parenthesis
 		if name == member {
 			return None;
 		}
@@ -2838,70 +2374,10 @@ fn completion_place(text: &str) -> Option<CompletionPlace<'_>> {
 	})
 }
 
-/// Explain why hover evaluation is unsafe. Reject proc bodies, which can
-/// loop indefinitely even without calls or assignments, and expressions
-/// that may have side effects.
 fn hover_refuses(code: &str) -> Option<&'static str> {
-	if dmasm::compiler::is_body(code) {
-		return Some("hover requires a single expression");
-	}
-	changes_things(code).then_some("hover expression may have side effects")
+	dmasm::compiler::is_body(code).then_some("hover requires a single expression")
 }
 
-/// Whether the expression may call, assign, allocate, delete or perform I/O.
-/// Ignore string contents except embedded expressions.
-fn changes_things(expression: &str) -> bool {
-	let mut quoted = false;
-	let mut chars = expression.chars().peekable();
-	let mut last = ' ';
-	// The name being read, outside texts
-	let mut word = String::new();
-	while let Some(c) = chars.next() {
-		if !quoted && (c.is_ascii_alphanumeric() || c == '_') {
-			word.push(c);
-		} else {
-			// `new /datum/thing` with no parentheses, and `del x`
-			if matches!(word.as_str(), "new" | "del") {
-				return true;
-			}
-			word.clear();
-		}
-		if quoted {
-			match c {
-				'\\' => {
-					chars.next();
-				}
-				'"' => quoted = false,
-				// An embedded expression may have side effects.
-				'[' => return true,
-				_ => {}
-			}
-			continue;
-		}
-		let next = chars.peek().copied().unwrap_or(' ');
-		match c {
-			'"' => quoted = true,
-			'(' => return true,
-			'+' | '-' if next == c => return true,
-			'<' | '>' if next == c => return true,
-			// `=` on its own, or after an operator that makes an assignment
-			// of it (`+=`, `||=`), but not `==`, `!=`, `<=` or `>=`
-			'=' if next != '=' && !matches!(last, '=' | '!' | '<' | '>') => return true,
-			'=' if next != '=' && matches!(last, '<' | '>') => {
-				// `<<=` and `>>=` assign, `<=` and `>=` compare
-				let shifts = expression.contains("<<=") || expression.contains(">>=");
-				if shifts {
-					return true;
-				}
-			}
-			_ => {}
-		}
-		last = c;
-	}
-	matches!(word.as_str(), "new" | "del")
-}
-
-/// Format a value for the client, using hex for integers if requested.
 fn shown(value: String, hex: bool) -> String {
 	if !hex {
 		return value;
@@ -2913,7 +2389,6 @@ fn shown(value: String, hex: bool) -> String {
 	}
 }
 
-/// Parse the client's optional breakpoint hit condition.
 fn hit_condition(text: Option<&str>) -> Result<Option<aux::HitCondition>, String> {
 	match text.map(str::trim).filter(|text| !text.is_empty()) {
 		Some(text) => aux::HitCondition::parse(text).map(Some),
@@ -2921,12 +2396,14 @@ fn hit_condition(text: Option<&str>) -> Result<Option<aux::HitCondition>, String
 	}
 }
 
-/// Format an instruction reference as hexadecimal.
+fn same_file(one: &str, other: &str) -> bool {
+	one.replace('\\', "/").eq_ignore_ascii_case(&other.replace('\\', "/"))
+}
+
 fn address_text(address: u64) -> String {
 	format!("0x{:016X}", address)
 }
 
-/// Parse an instruction reference as hexadecimal (`0x`) or decimal.
 fn parse_address(text: &str) -> Option<u64> {
 	let text = text.trim();
 	match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
@@ -2935,9 +2412,6 @@ fn parse_address(text: &str) -> Option<u64> {
 	}
 }
 
-/// Map a disassembly window to instruction indexes or placeholder addresses.
-/// The window begins `shift` instructions from `offset` within `reference`.
-/// Outside the code, assign consecutive word addresses to preserve ordering.
 fn instruction_window(
 	reference: u64,
 	code: aux::CodeRef,
@@ -2947,13 +2421,11 @@ fn instruction_window(
 	count: usize
 ) -> Vec<Result<usize, u64>> {
 	let Some(last) = instructions.last() else {
-		// No code here: each place is a word on from the last
 		return (0..count as i64).map(|k| Err(reference.wrapping_add_signed(shift + k))).collect();
 	};
 	let start = aux::address(code, 0);
 	let length = i64::from(last.offset) + last.words.len() as i64;
 	let listed = instructions.len() as i64;
-	// The instruction the offset is in, or how far past the end it is
 	let at = if i64::from(offset) >= length {
 		listed + i64::from(offset) - length
 	} else {
@@ -2973,7 +2445,6 @@ fn instruction_window(
 		.collect()
 }
 
-/// Parse a function breakpoint path and optional zero-based `#N` override.
 fn named_proc(name: &str) -> ProcRef {
 	let (path, override_id) = match name.split_once('#') {
 		Some((path, id)) => (path.trim().to_owned(), id.trim().parse().unwrap_or(0)),
@@ -2982,7 +2453,6 @@ fn named_proc(name: &str) -> ProcRef {
 	ProcRef { path, override_id }
 }
 
-/// A file as the client is shown it
 fn source_at(path: &Path) -> Source {
 	Source {
 		name: path.file_name().map(|name| name.to_string_lossy().into_owned()),
@@ -2991,7 +2461,6 @@ fn source_at(path: &Path) -> Source {
 	}
 }
 
-/// Format a thread label with its proc, location and sleeping status.
 fn thread_name(stack: &aux::Stack) -> String {
 	let mut name = stack.name.clone();
 	if let (Some(file), Some(line)) = (&stack.file, stack.line) {
@@ -3005,37 +2474,73 @@ fn thread_name(stack: &aux::Stack) -> String {
 }
 
 fn unexpected(response: AuxResponse) -> String {
-	format!("unexpected debug server response: {:?}", response)
+	Adapter::unexpected(&response)
 }
 
-/// Default arguments passed after the `.dmb` unless overridden.
-pub fn default_args(server: Server) -> Vec<String> {
-	match server {
-		Server::DreamDaemonGui if cfg!(windows) => vec!["-trusted".to_owned(), "-close".to_owned()],
-		_ => vec!["-trusted".to_owned()]
+fn texts(diagnostics: &[Diagnostic]) -> Vec<String> {
+	diagnostics.iter().map(ToString::to_string).collect()
+}
+
+impl Asks for Adapter {
+	type Error = String;
+
+	fn ask(&mut self, request: &AuxRequest) -> Result<AuxResponse, String> {
+		self.request(request)
+	}
+
+	fn unexpected(response: &AuxResponse) -> String {
+		format!("unexpected debug server response: {:?}", response)
 	}
 }
 
-/// The debug library, next to the launcher
-fn default_library() -> Result<PathBuf, String> {
-	let name = if cfg!(windows) { "debug_server.dll" } else { "libdebug_server.so" };
-	let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-	let library = exe.parent().map(|dir| dir.join(name)).unwrap_or_else(|| Path::new(name).to_owned());
-	if !library.is_file() {
-		return Err(format!("debug library not found at {} (debugLibrary)", library.display()));
+fn reloaded_text<'a>(texts: &'a code::Texts, file: &str) -> Option<&'a Option<Vec<String>>> {
+	if let Some(text) = texts.get(Path::new(file)) {
+		return Some(text);
 	}
-	Ok(library)
+	let file = std::fs::canonicalize(file).ok()?;
+	texts
+		.iter()
+		.find(|(path, _)| std::fs::canonicalize(path).is_ok_and(|path| path == file))
+		.map(|(_, text)| text)
 }
 
 #[cfg(test)]
 mod tests {
 	use std::path::Path;
 
-	use auxtools_cli::server_types::{HitCondition, LogPart, RuntimeFilter};
+	use auxtools_protocol::{HitCondition, LogPart, RuntimeFilter};
 
-	use super::{changes_things, completion_place, hover_refuses, instruction_window, named_proc, parse_address, runtime_place, shown};
+	use super::{completion_place, hover_refuses, instruction_window, named_proc, parse_address, reloaded_text, runtime_place, shown};
 
-	// VS Code may omit arguments when every property is undefined.
+	#[test]
+	fn a_reloaded_file_is_found_by_another_spelling_of_its_path() {
+		let dir = std::env::temp_dir().join(format!("auxtools-reloaded-{}", std::process::id()));
+		std::fs::create_dir_all(dir.join("code")).unwrap();
+		std::fs::write(dir.join("code/a.dm"), "").unwrap();
+		std::fs::write(dir.join("code/b.dm"), "").unwrap();
+		let text = Some(vec!["/proc/a()".to_owned()]);
+		let texts = crate::code::Texts::from([(dir.join("code/a.dm"), text.clone())]);
+		let spelled = |path: &Path| path.to_string_lossy().into_owned();
+		assert_eq!(reloaded_text(&texts, &spelled(&dir.join("code/a.dm"))), Some(&text));
+		assert_eq!(reloaded_text(&texts, &spelled(&dir.join("code/../code/a.dm"))), Some(&text));
+		assert_eq!(reloaded_text(&texts, &spelled(&dir.join("code/b.dm"))), None);
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn a_disconnect_is_known_as_it_is_read() {
+		let asks = super::asks_to_disconnect;
+		assert!(asks(
+			r#"{"seq":9,"type":"request","command":"disconnect","arguments":{"terminateDebuggee":true}}"#
+		));
+		assert!(asks(r#"{"command":"disconnect"}"#));
+		assert!(!asks(
+			r#"{"seq":4,"type":"request","command":"evaluate","arguments":{"expression":""disconnect""}}"#
+		));
+		assert!(!asks(r#"{"seq":5,"type":"request","command":"terminate"}"#));
+		assert!(!asks("disconnect"));
+	}
+
 	#[test]
 	fn missing_arguments_are_empty() {
 		assert!(super::arguments::<super::join::JoinArguments>(None).is_ok());
@@ -3072,6 +2577,13 @@ mod tests {
 		assert_eq!(place("a?.b:c?:d"), Some(("d", Some("a?.b:c"), false)));
 		assert_eq!(place("items[2].na"), Some(("na", Some("items[2]"), false)));
 		assert_eq!(place("f(x) + items[\"k\"][i + 1].na"), Some(("na", Some("items[\"k\"][i + 1]"), false)));
+		assert_eq!(place("items?[1].na"), Some(("na", Some("items?[1]"), false)));
+		assert_eq!(place("::registry[k].na"), Some(("na", Some("::registry[k]"), false)));
+		assert_eq!(place("::reg"), Some(("reg", Some("global"), false)));
+		assert_eq!(place("x + ::count."), Some(("", Some("::count"), false)));
+		assert_eq!(place("items[\"slot (left)\"].na"), Some(("na", Some("items[\"slot (left)\"]"), false)));
+		assert_eq!(place("items[\"\\\"]\"].na"), Some(("na", Some("items[\"\\\"]\"]"), false)));
+		assert_eq!(place("items[f()].na"), Some(("na", Some("items[f()]"), false)));
 		assert_eq!(place("#"), Some(("", None, true)));
 		assert_eq!(place("#di"), Some(("di", None, true)));
 		assert_eq!(place(" #mem"), Some(("mem", None, true)));
@@ -3082,7 +2594,8 @@ mod tests {
 		for text in [
 			"get_mob().na",
 			"(a).b",
-			"items[f()].na",
+			"items(1].na",
+			"\"a \\\" b.",
 			"\"text",
 			"\"a\" + \"b.",
 			"12",
@@ -3096,64 +2609,12 @@ mod tests {
 	}
 
 	#[test]
-	fn a_hover_reads_and_does_nothing_else() {
-		for reads in [
-			"x",
-			"src.health",
-			"a?.b:c",
-			"x == 1",
-			"x != y && x <= 2 || y >= 3",
-			"L[2]",
-			"L[\"a = b\"]",
-			"\"text with (parens) and = signs++\"",
-			"x - -y",
-			"x + +y",
-			"a < b",
-			"/datum/thing",
-			"newest",
-			"src.renew",
-			"x.del_count",
-			"model",
-			"\"new del << >>\"",
-			"x < -y",
-			"a > b"
-		] {
-			assert!(!changes_things(reads), "{}", reads);
-		}
-		for changes in [
-			"f()",
-			"src.bump(1)",
-			"x = 1",
-			"x += 1",
-			"x ||= y",
-			"x <<= 1",
-			"x++",
-			"--x",
-			"L[f()]",
-			"\"[f()]\"",
-			"new /datum/thing()",
-			"new /datum/thing",
-			"new/datum/thing",
-			"x = new",
-			"del x",
-			"del(x)",
-			"world << \"x\"",
-			"src << x",
-			"x >> y",
-			"L[new /datum/thing]"
-		] {
-			assert!(changes_things(changes), "{}", changes);
-		}
-	}
-
-	#[test]
 	fn a_hover_runs_no_body() {
-		// Bodies without calls or assignments must still be rejected.
 		for body in ["again:\ngoto again", "var/x\nx", "return n", "n; n", "x\ny"] {
 			assert_eq!(hover_refuses(body), Some("hover requires a single expression"), "{:?}", body);
 		}
-		for (code, why) in [("x", None), ("src.n;", None), ("x = 1", Some("hover expression may have side effects"))] {
-			assert_eq!(hover_refuses(code), why, "{:?}", code);
+		for code in ["x", "src.n;", "x = 1"] {
+			assert_eq!(hover_refuses(code), None, "{:?}", code);
 		}
 	}
 
@@ -3203,7 +2664,6 @@ mod tests {
 		assert_eq!(LogPart::parse("{{x}}"), [text("{x}")]);
 		assert_eq!(LogPart::parse("{{\"a\": {a}}}"), [text("{\"a\": "), expr("a"), text("}")]);
 		assert_eq!(LogPart::parse("{list(1) ~= list(1)}}}"), [expr("list(1) ~= list(1)"), text("}")]);
-		// Braces inside expressions are not interpolation escapes.
 		assert_eq!(LogPart::parse("{a {{b}} c}"), [expr("a {{b}} c")]);
 	}
 
@@ -3273,7 +2733,6 @@ mod tests {
 		assert!(filter.takes("list index out of bounds"));
 		assert!(!filter.takes("Could not find LibDreamLuau.so"));
 		assert!(!filter.takes("rust_g: bad call"));
-		// Require a match in one set and no matches in the other.
 		let filter = RuntimeFilter::parse("list, !bounds");
 		assert!(filter.takes("cannot read from list"));
 		assert!(!filter.takes("list index out of bounds"));
@@ -3302,11 +2761,10 @@ mod tests {
 		assert_eq!((proc.path.as_str(), proc.override_id), ("/mob/Login", 0));
 	}
 
-	/// Code of three instructions: two words, one, three
-	fn three() -> Vec<auxtools_cli::server_types::BytecodeInstruction> {
+	fn three() -> Vec<auxtools_protocol::BytecodeInstruction> {
 		[(0, 2), (2, 1), (3, 3)]
 			.into_iter()
-			.map(|(offset, length)| auxtools_cli::server_types::BytecodeInstruction {
+			.map(|(offset, length)| auxtools_protocol::BytecodeInstruction {
 				offset,
 				words: vec![0; length],
 				text: "x".to_owned(),
@@ -3317,7 +2775,7 @@ mod tests {
 
 	#[test]
 	fn an_address_is_the_proc_its_code_and_the_offset() {
-		use auxtools_cli::server_types::{address, from_address, CodeRef};
+		use auxtools_protocol::{address, from_address, CodeRef};
 		let code = CodeRef { proc: 0x2a, old: 3 };
 		assert_eq!(address(code, 0x10), 0x0000_002a_0003_0010);
 		assert_eq!(from_address(0x0000_002a_0003_0010), (code, 0x10));
@@ -3328,22 +2786,18 @@ mod tests {
 
 	#[test]
 	fn a_window_has_as_many_places_as_asked_for_in_order() {
-		use auxtools_cli::server_types::{address, CodeRef};
+		use auxtools_protocol::{address, CodeRef};
 		let code = CodeRef { proc: 7, old: 0 };
 		let start = address(code, 0);
 		let listed = three();
-		// From the second instruction, two back and five on
 		let window = instruction_window(start + 2, code, 2, &listed, -3, 6);
 		assert_eq!(window, [Err(start - 2), Err(start - 1), Ok(0), Ok(1), Ok(2), Err(start + 6)]);
-		// From the middle of the first, which is the first
 		assert_eq!(instruction_window(start + 1, code, 1, &listed, 0, 2), [Ok(0), Ok(1)]);
-		// From past the end
 		assert_eq!(instruction_window(start + 7, code, 7, &listed, -2, 3), [
 			Ok(2),
 			Err(start + 6),
 			Err(start + 7)
 		]);
-		// Where there's no code
 		assert_eq!(instruction_window(100, code, 100, &[], -1, 3), [Err(99), Err(100), Err(101)]);
 	}
 }

@@ -1,10 +1,7 @@
-//! Check diagnostics, JSON output and exit codes.
-
-use std::{path::PathBuf, process::Command};
+use std::path::Path;
 
 use serde_json::{json, Value};
-
-use crate::client::launcher_path;
+use test_support::{cli, temp::TempDir};
 
 const CODE: &str = "\
 #ifdef LOOPS
@@ -21,33 +18,27 @@ const CODE: &str = "\
 \treturn &5
 ";
 
-/// Create a project containing only the test `.dme`.
-fn project() -> PathBuf {
-	let dir = std::env::temp_dir().join(format!("launcher_test_check-{}", std::process::id()));
-	let _ = std::fs::remove_dir_all(&dir);
-	std::fs::create_dir_all(&dir).unwrap();
+fn project() -> TempDir {
+	let dir = TempDir::new("launcher_test_check");
 	std::fs::write(dir.join("world.dme"), CODE).unwrap();
 	dir
 }
 
-/// Run check and return its exit code, stdout and stderr.
-fn check(dir: &PathBuf, args: &[&str]) -> (i32, String, String) {
-	let ran = Command::new(launcher_path()).arg("check").args(args).current_dir(dir).output().unwrap();
-	let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
-	(ran.status.code().unwrap_or(-1), text(&ran.stdout), text(&ran.stderr))
+fn check(dir: &Path, args: &[&str]) -> (i32, String, String) {
+	let ran = cli::ran(cli::auxtools(["check"]).args(args).current_dir(dir), None);
+	(ran.code, ran.out, ran.err)
 }
 
 pub fn checks() {
 	let dir = project();
 
-	// 516.1689 fixes the discarded operator~= result.
 	let (code, out, err) = check(&dir, &["--byond-version", "516.1689"]);
 	assert_eq!(
 		(code, out.as_str(), err.as_str()),
 		(
 			0,
-			"nothing found in 1 proc for BYOND 516.1689; 1 proc not checked\n",
-			"not checked: world.dme: /refused: line 12: expected l-value\n"
+			"no issues found in 1 proc for BYOND 516.1689, 1 proc not checked\n",
+			"not checked: world.dme: /refused: line 12: expected an assignable expression\n"
 		)
 	);
 
@@ -63,13 +54,14 @@ pub fn checks() {
 	assert!(lines[1].starts_with("world.dme:9: /datum/num/operator~=: `operator~=`: "), "{}", out);
 	assert_eq!(
 		err,
-		"not checked: world.dme: /refused: line 12: expected l-value\nerror: 2 issues found in 2 procs for BYOND 516.1688; 1 proc not checked.\n"
+		"not checked: world.dme: /refused: line 12: expected an assignable expression\nerror: 2 issues found in 2 procs for BYOND 516.1688, 1 proc \
+		 not checked\n"
 	);
 	println!("ok: check filters known bugs by build");
 
 	let (code, out, err) = check(&dir, &["-DLOOPS", "--byond-version", "516.1689", "--json"]);
 	assert_eq!(code, 5, "{}", err);
-	assert_eq!(err, "error: 1 issue found in 2 procs for BYOND 516.1689; 1 proc not checked.\n");
+	assert_eq!(err, "error: 1 issue found in 2 procs for BYOND 516.1689, 1 proc not checked\n");
 	let found: Value = serde_json::from_str(&out).unwrap_or_else(|_| panic!("unexpected check --json output: {}", out));
 	assert_eq!(
 		(&found["byond"], &found["procs"], &found["parse_errors"]),
@@ -77,7 +69,7 @@ pub fn checks() {
 	);
 	assert_eq!(
 		found["not_checked"],
-		json!([{ "file": "world.dme", "proc": "/refused", "override": 0, "error": "line 12: expected l-value" }])
+		json!([{ "file": "world.dme", "proc": "/refused", "override": 0, "error": "line 12: expected an assignable expression" }])
 	);
 	let places = found["found"].as_array().unwrap();
 	assert_eq!(places.len(), 1, "{}", out);
@@ -85,6 +77,7 @@ pub fn checks() {
 		(&places[0]["file"], &places[0]["line"], &places[0]["proc"], &places[0]["override"]),
 		(&json!("world.dme"), &json!(5), &json!("/caught"), &json!(0))
 	);
+	assert_eq!(places[0]["id"], "ByondListLoopsAcrossTry", "{}", out);
 	assert!(
 		places[0]["text"].as_str().unwrap().contains("nested list loops separated by `try`"),
 		"{}",
@@ -92,10 +85,9 @@ pub fn checks() {
 	);
 	println!("ok: check --json");
 
-	// Absolute path spelling may differ from the supplied path.
 	let (code, out, err) = check(&dir, &["other.dme"]);
 	assert_eq!((code, out.as_str()), (1, ""), "{}", err);
-	assert!(err.starts_with("error: ") && err.ends_with("other.dme does not exist.\n"), "{}", err);
+	assert!(err.starts_with("error: ") && err.ends_with("other.dme does not exist\n"), "{}", err);
 	for (args, said) in [
 		(
 			&["--strict"][..],
@@ -107,7 +99,7 @@ pub fn checks() {
 		),
 		(
 			&["--pid", "1"],
-			"error: --pid cannot be used with 'check': it does not select an existing world.\n"
+			"error: --pid cannot be used with 'check': it does not select an existing world\n"
 		)
 	] {
 		let (code, out, err) = check(&dir, args);
@@ -117,8 +109,7 @@ pub fn checks() {
 	let (code, _, err) = check(&dir, &[]);
 	assert_eq!(
 		(code, err.as_str()),
-		(1, "error: more than one .dme in the current directory: specify DME.\n")
+		(1, "error: multiple .dme files found in the current directory. Specify DME.\n")
 	);
 	println!("ok: check errors");
-	let _ = std::fs::remove_dir_all(&dir);
 }

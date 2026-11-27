@@ -1,11 +1,7 @@
-//! Data breakpoints: the world pauses when what's at a place changes
-
 use serde_json::{json, Value};
 
-use crate::{client::named, ok, world::World};
+use crate::{ok, world::World};
 
-/// Asks what watching a variable (`name` inside `container`) or an
-/// expression in the paused frame would watch
 fn info(world: &mut World, container: Option<&Value>, name: &str) -> Value {
 	let frame = world.frame_id();
 	match container {
@@ -14,7 +10,6 @@ fn info(world: &mut World, container: Option<&Value>, name: &str) -> Value {
 	}
 }
 
-/// Sets the client's data breakpoints, each `(dataId, condition, hit count)`
 fn watch(world: &mut World, wanted: &[(&Value, &str, &str)]) -> Vec<Value> {
 	let breakpoints: Vec<Value> = wanted
 		.iter()
@@ -33,14 +28,12 @@ fn watch(world: &mut World, wanted: &[(&Value, &str, &str)]) -> Vec<Value> {
 	set["breakpoints"].as_array().unwrap().clone()
 }
 
-/// Lets the world carry on from each stop until the scenario is over, and
-/// returns what each stop said: why, the proc, its description, the ids
 fn stops(world: &mut World, scenario: &str) -> Vec<(String, String, String, Vec<u64>)> {
 	let mut seen = vec![];
 	let over = format!("dap: finished {}\n", scenario);
 	let finished = world.count(&over);
 	world.resume();
-	let deadline = std::time::Instant::now() + crate::client::TIMEOUT;
+	let deadline = std::time::Instant::now() + test_support::dap::TIMEOUT;
 	loop {
 		if let Some(event) = world.launcher.event_within("stopped", std::time::Duration::from_millis(20)) {
 			let frame = world.top_frame();
@@ -62,8 +55,6 @@ fn stops(world: &mut World, scenario: &str) -> Vec<(String, String, String, Vec<
 	}
 }
 
-/// What the launcher says of a breakpoint whose state changed: its id,
-/// whether it's set, and why not
 fn changed(world: &mut World) -> (u64, bool, String) {
 	let event = world.event("breakpoint");
 	assert_eq!(event["body"]["reason"], "changed", "{}", event);
@@ -80,7 +71,6 @@ fn id(breakpoint: &Value) -> u64 {
 	breakpoint["id"].as_u64().expect("a breakpoint with no id")
 }
 
-/// What a pointer is shown as, and what it opens to
 fn pointers(world: &mut World) {
 	world.run_to("values", "/values", "values_stop");
 	let pointer = world.variable("Locals", "pointer");
@@ -95,10 +85,8 @@ fn pointers(world: &mut World) {
 	assert_eq!(world.eval("*pointer + 1"), "43");
 	ok("pointer expansion and evaluation");
 
-	// A pointer to an object's var names it; one to a var of the
-	// expression's own code names nothing once that has run
 	assert_eq!(world.eval("&named.n"), "&A (/datum/thing).n");
-	assert_eq!(world.eval("&whole"), "a pointer to a var that's gone");
+	assert_eq!(world.eval("&whole"), "pointer (target no longer exists)");
 	world.resume_through("values");
 	ok("pointer lifetime after evaluation");
 }
@@ -141,10 +129,10 @@ pub fn run() {
 	}
 	ok("supported watch targets");
 
-	let constants = world.variables(&globals).into_iter().find(|v| v["name"] == "(BYOND's)").unwrap()["variablesReference"].clone();
+	let constants = world.variables(&globals).into_iter().find(|v| v["name"] == "(BYOND built-ins)").unwrap()["variablesReference"].clone();
 	for (container, name, why) in [
-		(None, "src", "select a variable of this value to watch"),
-		(Some(&constants), "NORTH", "BYOND's constants don't change"),
+		(None, "src", "select a variable of this value to set a data breakpoint"),
+		(Some(&constants), "NORTH", "BYOND built-in constants do not change"),
 		(None, "steps + 1", ""),
 		(None, "nothing_of_the_kind", "")
 	] {
@@ -160,8 +148,6 @@ pub fn run() {
 	let ids: Vec<u64> = set.iter().map(id).collect();
 	let (steps, number, list, pair, name, n) = (ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]);
 
-	// Each stop is on the instruction after the change: the next line,
-	// in the proc that made it
 	let seen = stops(&mut world, "watch");
 	let stop = |proc: &str, marker: &str, what: &str, id: u64| {
 		(
@@ -177,7 +163,6 @@ pub fn run() {
 		stop("/sc_watch", "watch_pair", "watched_list[2] changed: \"b\" → \"B\"", list),
 		stop("/sc_watch", "watch_object", "watched_pairs[\"two\"] changed: 2 → 22", pair),
 		stop("/datum/thing/rename", "rename_after", "kept.name changed: \"kept\" → \"renamed\"", name),
-		// (kept.n = kept.n changes nothing)
 		stop("/sc_watch", "watch_sleep", "steps changed: 1 → 11", steps),
 		stop("/change_number", "change_number_after", "watched_number changed: 3 → 6", number),
 		stop("/sc_watch", "watch_del", "steps changed: 11 → 111", steps)
@@ -190,23 +175,21 @@ pub fn run() {
 		"the console didn't say what changed"
 	);
 
-	// The object was deleted, and the proc returned
 	let mut over = vec![changed(&mut world), changed(&mut world), changed(&mut world)];
 	over.sort();
 	let mut expected = vec![
-		(steps, false, "watched proc returned".to_owned()),
-		(name, false, "watch target no longer exists".to_owned()),
-		(n, false, "watch target no longer exists".to_owned()),
+		(steps, false, "target proc returned".to_owned()),
+		(name, false, "target no longer exists".to_owned()),
+		(n, false, "target no longer exists".to_owned()),
 	];
 	expected.sort();
 	assert_eq!(over, expected);
 	assert!(
-		world.output.contains("No longer watching steps: watched proc returned"),
+		world.output.contains("Data breakpoint ended for steps: target proc returned"),
 		"the console didn't say a watch was over"
 	);
 	ok("watch expiration notifications");
 
-	// What's still watched stays as it is when another is added
 	assert_eq!(world.eval_global("watched_number = 1"), "1");
 	assert!(!world.has_event("stopped"), "a value the debugger set paused the world");
 	world.run_to("watch", "/sc_watch", "watch_start");
@@ -219,11 +202,9 @@ pub fn run() {
 		stop("/sc_watch", "watch_sleep", "steps changed: 1 → 11", steps),
 		stop("/change_number", "change_number_after", "watched_number changed: 3 → 6", number)
 	]);
-	assert_eq!(changed(&mut world), (steps, false, "watched proc returned".to_owned()));
+	assert_eq!(changed(&mut world), (steps, false, "target proc returned".to_owned()));
 	ok("debugger writes, retained watches and hit counts");
 
-	// An expression in no frame can be asked about while the world runs.
-	// `value` and `old` in a condition are what's there now and what was.
 	world.eval_global("watched_number = 1");
 	let anywhere = world.request("dataBreakpointInfo", json!({ "name": "watched_number" }));
 	assert_eq!(anywhere["description"], "watched_number");
@@ -239,18 +220,15 @@ pub fn run() {
 	world.resume_through("watch");
 	ok("global watch condition bindings");
 
-	// A condition that fails with an error isn't a change to pause for, and
-	// the console says so once: watched_number goes to 3, then 6
 	world.eval_global("watched_number = 1");
 	watch(&mut world, &[(&anywhere["dataId"], "value.len > 0", "")]);
 	world.run_through("watch");
-	let said = "The condition (value.len > 0) of the watch on watched_number failed; skipping affected changes (reported once): runtime error: \
-	            Cannot read 3.len";
+	let said = "Data breakpoint on watched_number: condition `value.len > 0` failed: runtime error: Cannot read 3.len. Changes where the condition \
+	            fails are skipped. This message is shown once.";
 	assert_eq!(world.count(said), 1, "expected exactly one diagnostic matching {:?}", said);
-	assert_eq!(world.count("(reported once)"), 1, "diagnostic was reported more than once");
+	assert_eq!(world.count("This message is shown once."), 1, "diagnostic was reported more than once");
 	ok("watch condition errors reported once");
 
-	// Stepping over the call that makes the change
 	world.eval_global("watched_number = 1");
 	watch(&mut world, &[(&anywhere["dataId"], "", "")]);
 	world.run_to("watch", "/sc_watch", "watch_call");
@@ -261,20 +239,62 @@ pub fn run() {
 	world.run_through("watch");
 	ok("watch interrupts step and can be removed");
 
-	// What was asked about at one pause is something of that pause
 	world.run_to("watch", "/sc_watch", "watch_start");
 	let of_this_pause = info(&mut world, None, "steps");
 	world.resume_through("watch");
 	world.run_to("watch", "/sc_watch", "watch_start");
 	let set = watch(&mut world, &[(&of_this_pause["dataId"], "", "")]);
 	assert_eq!(set[0]["verified"], false);
-	assert_eq!(set[0]["message"], "watch target expired; select it again");
+	assert_eq!(
+		set[0]["message"],
+		"This data breakpoint target has expired. Set it again using Break on Value Change."
+	);
 	watch(&mut world, &[]);
 	world.resume_through("watch");
 	ok("pause-local watch target expiration");
 
-	// Thirty sleeps, with spawned copies of the proc's frame (which have
-	// the var too, each its own) and other procs coming and going
+	world.run_to("watch", "/sc_watch", "watch_start");
+	let frame = world.frame_id();
+	let locals = world.scope(&frame, "Locals");
+	let local = info(&mut world, Some(&locals), "steps");
+	let steps = id(&watch(&mut world, &[(&local["dataId"], "", "")])[0]);
+	world.resume();
+	let stop_now = world.stop();
+	assert_eq!((stop_now.reason.as_str(), &stop_now.hit), ("data breakpoint", &vec![steps]));
+	let set = watch(&mut world, &[(&local["dataId"], "value > 50", "")]);
+	assert_eq!(id(&set[0]), steps);
+	assert_eq!(stops(&mut world, "watch"), [stop(
+		"/sc_watch",
+		"watch_del",
+		"steps changed: 11 → 111",
+		steps
+	)]);
+	assert_eq!(changed(&mut world), (steps, false, "target proc returned".to_owned()));
+	ok("local watch condition edited at its stop");
+
+	world.eval_global("watched_number = 1");
+	let number = id(&watch(&mut world, &[(&anywhere["dataId"], "", "")])[0]);
+	let refused = watch(&mut world, &[(&anywhere["dataId"], "", "every other")]);
+	assert_eq!(
+		(&refused[0]["id"], &refused[0]["verified"]),
+		(&json!(number), &json!(false)),
+		"{}",
+		refused[0]
+	);
+	assert!(
+		refused[0]["message"].as_str().is_some_and(|why| why.starts_with("invalid hit count")),
+		"{}",
+		refused[0]
+	);
+	let restored = watch(&mut world, &[(&anywhere["dataId"], "", "")]);
+	assert_eq!((id(&restored[0]), &restored[0]["message"]), (number, &Value::Null), "{}", restored[0]);
+	world.run("watch");
+	let stop_now = world.stop();
+	assert_eq!((stop_now.reason.as_str(), &stop_now.hit), ("data breakpoint", &vec![number]));
+	watch(&mut world, &[]);
+	world.resume_through("watch");
+	ok("refused watch edit keeps the watch as it was");
+
 	world.run_to("watch_long", "/sc_watch_long", "watch_long_start");
 	let patient = info(&mut world, None, "patient");
 	let set = watch(&mut world, &[(&patient["dataId"], "", "")]);
@@ -284,11 +304,9 @@ pub fn run() {
 		"patient changed: null → 1",
 		"patient changed: 1 → 2"
 	]);
-	assert_eq!(changed(&mut world), (patient, false, "watched proc returned".to_owned()));
+	assert_eq!(changed(&mut world), (patient, false, "target proc returned".to_owned()));
 	ok("frame watches exclude spawned copies");
 
-	// The next world: a global is watched in it too, but what was something
-	// of a pause in the old one isn't found again
 	world.run_to("watch", "/sc_watch", "watch_start");
 	let frame = world.frame_id();
 	let globals = world.scope(&frame, "Globals");
@@ -300,9 +318,13 @@ pub fn run() {
 	world.wait_count("dap: world/New", 2);
 	assert_eq!(
 		changed(&mut world),
-		(shown, false, "watch expired after reboot; select it again".to_owned())
+		(
+			shown,
+			false,
+			"This data breakpoint ended when the world rebooted or restarted. Set it again using Break on Value Change.".to_owned()
+		)
 	);
-	world.wait_output("The world restarted");
+	world.wait_output("Reconnected to the world");
 	world.run("watch");
 	let stop_now = world.stop();
 	assert_eq!((stop_now.reason.as_str(), &stop_now.hit), ("data breakpoint", &vec![number]));

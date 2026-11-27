@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Read or set the version shared by the workspace and VS Code extension.
 
-    ci/set-version.py            print the current version
-    ci/set-version.py VERSION    set the version, e.g. 3.0.0 or 3.0.1-dev
+    ci/set-version.py            Print the current version
+    ci/set-version.py VERSION    Set the version (e.g., 3.0.0 or 3.0.1-dev)
 
-Update Cargo.toml, inherited crate versions in Cargo.lock and the extension
-manifest.
+Updates Cargo.toml, inherited crate versions in Cargo.lock, and
+editors/vscode/package.json.
 """
 
 import json
@@ -57,14 +57,12 @@ def set_version(version):
 	body = replace_once(VERSION_LINE, rf"\g<1>{version}\g<3>", section.group(1), "the workspace version")
 	CARGO_TOML.write_text(manifest[: section.start(1)] + body + manifest[section.end(1) :])
 
-	# Workspace packages have no source field in Cargo.lock.
 	lock = CARGO_LOCK.read_text()
 	for name in workspace_crates(manifest):
 		entry = re.compile(rf'(\[\[package\]\]\nname = "{re.escape(name)}"\nversion = ")[^"]+(")(?!\nsource)')
 		lock = replace_once(entry, rf"\g<1>{version}\g<2>", lock, f"{name} in Cargo.lock")
 	CARGO_LOCK.write_text(lock)
 
-	# Preserve package.json's formatting.
 	package = PACKAGE_JSON.read_text()
 	package = replace_once(re.compile(r'^(\t"version": ")[^"]+(")', re.M), rf"\g<1>{version}\g<2>", package, "the version in package.json")
 	if json.loads(package)["version"] != version:

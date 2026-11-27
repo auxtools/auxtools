@@ -1,9 +1,9 @@
-//! Handle profiling requests and format measurements for clients.
-
 use auxtools::*;
 
-use super::Server;
-use crate::{profiler, server_types::*, unnamed};
+use super::{Codes, Server};
+use auxtools_protocol::*;
+
+use crate::{profiler, unnamed};
 
 impl Server {
 	pub(super) fn profile(&mut self, request: ProfileRequest) -> Result<ProfileReply, String> {
@@ -11,13 +11,13 @@ impl Server {
 			ProfileRequest::Start { procs } => {
 				let only: Vec<u32> = procs
 					.iter()
-					.map(|proc| Self::proc_info(proc).map(|info| info.code.proc))
+					.map(|proc| Codes::proc_info(proc).map(|info| info.code.proc))
 					.collect::<Result<_, _>>()?;
 				if profiler::running() {
-					return Err("another profile is running".to_owned());
+					return Err("another profile is already running".to_owned());
 				}
 				profiler::start((!only.is_empty()).then_some(only));
-				self.profiling = self.current;
+				self.sessions.profiling = self.sessions.requester();
 				Ok(ProfileReply::Started)
 			}
 			ProfileRequest::Stop => {
@@ -34,21 +34,20 @@ impl Server {
 				let proc = Proc::from_id(raw_types::procs::ProcId(code.proc)).ok_or_else(|| format!("the world has no proc {:#x}", code.proc))?;
 				let bytecode = match code.old {
 					0 => unsafe { proc.bytecode_mut_ptr() }.0 as usize,
-					old => (self.old_codes.borrow().get(old as usize - 1).copied()).ok_or_else(|| format!("{} has no old code {}", proc.path, old))?
+					old => self.codes.old_code(&proc.path, old)?
 				};
 				if !profiler::exists() {
 					return Err(NO_PROFILE.to_owned());
 				}
-				profiler::instructions(bytecode)
+				profiler::instructions(proc.id.0, bytecode)
 					.map(ProfileReply::Code)
-					.ok_or_else(|| format!("{} wasn't profiled", proc.path))
+					.ok_or_else(|| format!("{} was not profiled", proc.path))
 			}
 		}
 	}
 
-	/// Refuse requests for a profile another client started.
 	fn own_profile(&self) -> Result<(), String> {
-		if profiler::exists() && self.profiling != self.current {
+		if profiler::exists() && self.sessions.profiling != self.sessions.requester() {
 			return Err("the profile belongs to another client".to_owned());
 		}
 		Ok(())
@@ -62,7 +61,7 @@ impl Server {
 			.filter_map(|(proc, bytecode, total)| {
 				let proc = Proc::from_id(raw_types::procs::ProcId(proc))?;
 				let current = unsafe { proc.bytecode_mut_ptr() }.0 as usize;
-				let old = if bytecode == current { 0 } else { self.old_code_number(bytecode) };
+				let old = if bytecode == current { 0 } else { self.codes.old_code_number(bytecode) };
 				let (file, line) = start_of(bytecode, &proc);
 				Some(ProfiledCode {
 					proc: unnamed::proc_ref(&proc),
@@ -84,8 +83,6 @@ impl Server {
 
 const NO_PROFILE: &str = "no profile has been started";
 
-/// Read the initial DbgFile and DbgLine directly to avoid disassembling
-/// thousands of procs. Breakpoints on these instructions hide their locations.
 fn start_of(bytecode: usize, proc: &Proc) -> (Option<String>, Option<u32>) {
 	let (dbg_file, dbg_line) = (dmasm::Opcode::DbgFile.word(), dmasm::Opcode::DbgLine.word());
 	let (current, len) = unsafe { proc.bytecode_mut_ptr() };

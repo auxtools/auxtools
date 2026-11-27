@@ -1,10 +1,3 @@
-//! Launch a world through `adapter::serve` using no-debug requests.
-//! The adapter handles BYOND discovery, reloads, reconnection and shutdown.
-//! Other clients can attach and debug independently.
-//!
-//! `--detach` starts the launcher in the background, redirects output to a log
-//! and returns when the world is ready.
-
 use std::{
 	fs::{File, OpenOptions},
 	io::{self, BufRead, BufReader, Read, Write},
@@ -18,45 +11,38 @@ use std::{
 };
 
 use auxtools_cli::byond::Server;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{args, Failure, Result, TIMED_OUT};
 use crate::{
-	adapter::{self, Input},
+	adapter::{self, Ask, CommandLine, Input},
+	coverage::Report,
 	dap::{Note, Output}
 };
 
-/// Exit code for a launched world that failed or was killed.
 pub const WORLD_FAILED: i32 = 4;
-/// How long `--detach` waits for the world to be up
-const COMING_UP: Duration = Duration::from_secs(120);
-/// Readiness protocol for the detached launcher: `ready PID`, `unavailable PID
-/// WHY` (it runs without the debugger) or `failed WHY` on stdout; all other
-/// output goes to the log.
+pub const COMING_UP: Duration = Duration::from_secs(120);
 const DETACHED: &str = "--detached";
 
-/// What `launch` was asked for
 struct Options {
 	dmb: PathBuf,
 	dme: Option<PathBuf>,
-	/// As given, which `Server` reads
 	server: Option<String>,
 	port: Option<u16>,
 	hot_reload: bool,
 	defines: Vec<String>,
 	byond: Option<PathBuf>,
-	/// What follows `--`, in place of the program's default arguments
 	args: Option<Vec<String>>,
-	log: Option<PathBuf>
+	log: Option<PathBuf>,
+	lcov: Option<PathBuf>,
+	cobertura: Option<PathBuf>
 }
 
-/// Launch a world. If `replaces_args` is set, arguments after `--`
-/// replace all default server arguments.
 pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
 	let dmb = absolute(&args.dmb)?;
 	if !dmb.is_file() {
 		return Err(format!(
-			"{} does not exist. Compile the world first: the launcher does not compile the DMB.",
+			"{} does not exist. The launcher does not build the .dmb, so compile it first.",
 			dmb.display()
 		)
 		.into());
@@ -65,14 +51,14 @@ pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
 	let program = match &args.server {
 		Some(name) => serde_json::from_value::<Server>(json!(name)).map_err(|_| {
 			format!(
-				"invalid value '{}' for --server: expected dreamdaemon, dreamdaemon-gui, or dreamseeker.",
+				"invalid value '{}' for --server: expected dreamdaemon, dreamdaemon-gui, or dreamseeker",
 				name
 			)
 		})?,
 		None => Server::default_for_platform()
 	};
 	if args.port.is_some() && program == Server::DreamSeeker && cfg!(windows) {
-		return Err("--port cannot be used with DreamSeeker. Use --server dreamdaemon.".into());
+		return Err("--port cannot be used with DreamSeeker. Use --server dreamdaemon (or dreamdaemon-gui).".into());
 	}
 	let options = Options {
 		dmb,
@@ -83,7 +69,9 @@ pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
 		defines: args.defines.clone(),
 		byond: args.byond.as_deref().map(absolute).transpose()?,
 		args: replaces_args.then(|| args.args.clone()),
-		log: args.log.as_deref().map(absolute).transpose()?
+		log: args.log.as_deref().map(absolute).transpose()?,
+		lcov: args.lcov.as_deref().map(absolute).transpose()?,
+		cobertura: args.cobertura.as_deref().map(absolute).transpose()?
 	};
 
 	if args.detached {
@@ -96,10 +84,9 @@ pub fn launch(args: &args::Launch, replaces_args: bool) -> Result<()> {
 }
 
 fn absolute(path: &Path) -> Result<PathBuf> {
-	std::path::absolute(path).map_err(|e| format!("invalid path {}: {}.", path.display(), e).into())
+	std::path::absolute(path).map_err(|e| format!("invalid path {}: {}", path.display(), e).into())
 }
 
-/// Where what's printed goes
 enum Printer {
 	Terminal,
 	File(Mutex<File>)
@@ -107,8 +94,6 @@ enum Printer {
 
 impl Printer {
 	fn print(&self, category: &str, text: &str) {
-		// Ignore write failures; a closed terminal also triggers world
-		// shutdown.
 		match self {
 			Self::Terminal if category == "stderr" => {
 				let _ = io::stderr().write_all(text.as_bytes());
@@ -129,41 +114,24 @@ impl Printer {
 	}
 }
 
-/// What became of the world, as the adapter tells it
 #[derive(Default)]
 struct Outcome {
 	pid: Option<u32>,
-	/// Why it couldn't be launched
 	failed: Option<String>,
 	exit_code: Option<i64>,
-	ready: bool
+	ready: bool,
+	coverage: Option<Report>
 }
 
-/// A request, as a client would send it
-fn request(seq: i64, command: &str, arguments: Value) -> Input {
-	Input::Message(
-		json!({
-			"seq": seq,
-			"type": "request",
-			"command": command,
-			"arguments": arguments
-		})
-		.to_string()
-	)
-}
-
-/// Run until the world exits. A detached child reports readiness on stdout.
 fn run(options: &Options, detached: bool) -> Result<()> {
 	let printer = Arc::new(match &options.log {
-		// The background launcher's log was made for it, and has what went
-		// wrong on its way already
 		Some(log) => {
 			let file = if detached {
 				OpenOptions::new().append(true).create(true).open(log)
 			} else {
 				File::create(log)
 			};
-			Printer::File(Mutex::new(file.map_err(|e| format!("cannot write {}: {}.", log.display(), e))?))
+			Printer::File(Mutex::new(file.map_err(|e| format!("cannot write {}: {}", log.display(), e))?))
 		}
 		None => Printer::Terminal
 	});
@@ -188,14 +156,14 @@ fn run(options: &Options, detached: bool) -> Result<()> {
 				}
 				outcome.ready = true;
 			}
-			Note::Failed { command, message } if command == "launch" => {
+			Note::Coverage(recorded) => outcome.coverage.get_or_insert_default().add(recorded),
+			Note::LaunchFailed(message) => {
 				if detached {
 					say_to_starter(&format!("failed {}", message));
 				}
 				outcome.failed = Some(message);
 				let _ = quit.send(Input::Quit);
 			}
-			Note::Failed { message, .. } => print.print("stderr", &format!("{}\n", message)),
 			Note::Exited(code) => {
 				outcome.exit_code = Some(code);
 				let _ = quit.send(Input::Quit);
@@ -203,69 +171,69 @@ fn run(options: &Options, detached: bool) -> Result<()> {
 		}
 	});
 
-	let server = options.server.as_deref().map_or(Server::default_for_platform(), |name| {
-		serde_json::from_value(json!(name)).unwrap_or(Server::default_for_platform())
-	});
-	// Arguments after `--` replace the host's defaults.
-	let args = options.args.clone().unwrap_or_else(|| adapter::default_args(server));
-	let mut launch = json!({
-		"noDebug": true,
-		"dmb": options.dmb,
-		"defines": options.defines,
-		"hotReload": options.hot_reload,
-		"args": args
-	});
-	for (name, value) in [("dme", options.dme.as_ref()), ("byondPath", options.byond.as_ref())] {
-		if let Some(value) = value {
-			launch[name] = json!(value);
-		}
-	}
-	if let Some(server) = &options.server {
-		launch["server"] = json!(server);
-	}
-	if let Some(port) = options.port {
-		launch["port"] = json!(port);
-	}
-	let _ = inputs.send(request(1, "initialize", json!({ "clientID": "auxtools launch" })));
-	let _ = inputs.send(request(2, "launch", launch));
-	let _ = inputs.send(request(3, "configurationDone", json!({})));
+	let server = options
+		.server
+		.as_deref()
+		.map(|name| serde_json::from_value(json!(name)).unwrap_or(Server::default_for_platform()));
+	let args = options
+		.args
+		.clone()
+		.unwrap_or_else(|| adapter::default_args(server.unwrap_or(Server::default_for_platform())));
+	let _ = inputs.send(Input::Asked(Ask::Launch(CommandLine {
+		dmb: options.dmb.clone(),
+		dme: options.dme.clone(),
+		server,
+		port: options.port,
+		hot_reload: options.hot_reload,
+		defines: options.defines.clone(),
+		byond: options.byond.clone(),
+		args,
+		coverage: options.lcov.is_some() || options.cobertura.is_some()
+	})));
 
 	interrupts::listen(inputs.clone(), printer.clone());
-	adapter::serve(out, inputs, &receiver);
+	adapter::serve(out, inputs, &receiver, Default::default());
 	interrupts::done();
 
 	let outcome = outcome.lock().unwrap();
 	if let Some(why) = &outcome.failed {
 		return Err(why.clone().into());
 	}
+	let covered = report_coverage(options, outcome.coverage.as_ref(), &printer);
 	match outcome.exit_code {
-		Some(0) => Ok(()),
-		Some(code) if code >= 0 => Err(Failure(WORLD_FAILED, format!("the world exited with code {}.", code))),
-		// Killed, or ended by a second interrupt
-		_ => Err(Failure(WORLD_FAILED, "the world was terminated.".to_owned()))
+		Some(0) => covered,
+		Some(code) if code >= 0 => Err(Failure(WORLD_FAILED, format!("the world exited with code {}", code))),
+		_ => Err(Failure(WORLD_FAILED, "the world was terminated".to_owned()))
 	}
 }
 
-/// Report readiness to the parent `launch --detach` process.
-/// This is the child launcher's only stdout output.
+fn report_coverage(options: &Options, recorded: Option<&Report>, printer: &Printer) -> Result<()> {
+	if options.lcov.is_none() && options.cobertura.is_none() {
+		return Ok(());
+	}
+	let report = recorded.ok_or("no coverage report written: world exited without reporting coverage")?;
+	report.write(options.lcov.as_deref(), options.cobertura.as_deref())?;
+	printer.line(&format!("Coverage: {}", report.summary()));
+	Ok(())
+}
+
 fn say_to_starter(line: &str) {
 	let mut stdout = io::stdout().lock();
 	let _ = writeln!(stdout, "{}", line);
 	let _ = stdout.flush();
 }
 
-/// Default detached launcher log path, beside the `.dmb`.
+pub const LOG_EXTENSION: &str = "auxtools.log";
+
 fn default_log(dmb: &Path) -> PathBuf {
-	dmb.with_extension("auxtools.log")
+	dmb.with_extension(LOG_EXTENSION)
 }
 
-/// Starts this launcher again in the background, without `--detach`, and
-/// returns once the world it starts is up
 fn detach(options: &Options, as_json: bool) -> Result<()> {
 	let log = options.log.clone().unwrap_or_else(|| default_log(&options.dmb));
 	let stderr = File::create(&log)
 		.and_then(|_| OpenOptions::new().append(true).open(&log))
-		.map_err(|e| format!("cannot write {}: {}.", log.display(), e))?;
+		.map_err(|e| format!("cannot write {}: {}", log.display(), e))?;
 
 	let mut args: Vec<std::ffi::OsString> = vec!["launch".into(), options.dmb.clone().into()];
 	let mut flag = |name: &str, value: Option<std::ffi::OsString>| {
@@ -279,6 +247,8 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 	flag("--port", options.port.map(|port| port.to_string().into()));
 	flag("--byond", options.byond.clone().map(Into::into));
 	flag("--log", Some(log.clone().into()));
+	flag("--lcov", options.lcov.clone().map(Into::into));
+	flag("--cobertura", options.cobertura.clone().map(Into::into));
 	for define in &options.defines {
 		flag("-D", Some(define.into()));
 	}
@@ -291,32 +261,29 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 		args.extend(theirs.iter().map(Into::into));
 	}
 
-	let program = std::env::current_exe().map_err(|e| format!("cannot find the auxtools program: {}.", e))?;
+	let program = std::env::current_exe().map_err(|e| format!("cannot locate auxtools executable: {}", e))?;
 	let mut command = Command::new(program);
 	command.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(stderr);
-	let mut launcher = background::spawn(&mut command).map_err(|e| format!("cannot start the launcher in the background: {}.", e))?;
+	let mut launcher = background::spawn(&mut command).map_err(|e| format!("cannot start background launcher: {}", e))?;
 	let launcher_pid = launcher.id();
 
-	// The first line reports readiness; EOF indicates launcher exit.
 	let mut stdout = launcher.stdout.take().expect("piped");
 	let (sender, said) = mpsc::channel();
 	std::thread::spawn(move || {
 		let mut line = String::new();
 		let read = BufReader::new(&mut stdout).read_line(&mut line);
 		let _ = sender.send(read.ok().filter(|n| *n > 0).map(|_| line.trim_end().to_owned()));
-		// Drain the pipe so the child cannot block on a full buffer.
 		let _ = io::copy(&mut stdout, &mut io::sink());
 	});
 	let line = match said.recv_timeout(COMING_UP) {
 		Ok(line) => line,
 		Err(_) => {
-			// It ends the world as it goes
 			let _ = launcher.kill();
 			let _ = launcher.wait();
 			return Err(Failure(
 				TIMED_OUT,
 				format!(
-					"timed out after {} seconds waiting for the world to start; it was terminated. See the launcher log: {}",
+					"timed out after {} seconds waiting for the world to start, so the world was stopped. See the launcher log at {}.",
 					COMING_UP.as_secs(),
 					log.display()
 				)
@@ -337,7 +304,7 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 			);
 		} else {
 			match unavailable {
-				Some(why) => say!("pid {}: running without debugging: {}. Use 'auxtools stop' to terminate it.", pid, why),
+				Some(why) => say!("pid {}: running without debugging: {}. Use 'auxtools stop' to stop it.", pid, why),
 				None => say!("pid {}: started", pid)
 			}
 			say!("launcher: pid {}", launcher_pid);
@@ -350,7 +317,7 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 	match line.as_deref().and_then(|line| line.strip_prefix("failed ")) {
 		Some(why) => Err(why.to_owned().into()),
 		None => Err(format!(
-			"the world did not start: its launcher exited{} first. The end of the launcher log ({}):\n{}",
+			"the world failed to start: the launcher exited{}. Last lines of {}:\n{}",
 			status.map(|code| format!(" with code {}", code)).unwrap_or_default(),
 			log.display(),
 			last_lines(&log, 20)
@@ -359,7 +326,6 @@ fn detach(options: &Options, as_json: bool) -> Result<()> {
 	}
 }
 
-/// The last `n` lines of a file
 fn last_lines(path: &Path, n: usize) -> String {
 	let mut text = String::new();
 	let _ = File::open(path).and_then(|mut file| file.read_to_string(&mut text));
@@ -367,17 +333,13 @@ fn last_lines(path: &Path, n: usize) -> String {
 	lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
-/// Starting a process that outlives this one and the terminal it was started
-/// from
 mod background {
 	use std::process::{Child, Command};
 
-	/// In a session of its own, with no terminal
 	#[cfg(unix)]
 	pub fn spawn(command: &mut Command) -> std::io::Result<Child> {
 		use std::os::unix::process::CommandExt;
 
-		// SAFETY: setsid is async-signal-safe
 		unsafe {
 			command.pre_exec(|| {
 				libc::setsid();
@@ -387,9 +349,6 @@ mod background {
 		command.spawn()
 	}
 
-	/// Create a hidden console for the world, a separate process group and,
-	/// if permitted, a separate job. The group and job isolate the detached
-	/// launcher from termination with its parent.
 	#[cfg(windows)]
 	pub fn spawn(command: &mut Command) -> std::io::Result<Child> {
 		use std::os::windows::{io::AsRawHandle, process::CommandExt};
@@ -399,8 +358,6 @@ mod background {
 			winbase::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, HANDLE_FLAG_INHERIT}
 		};
 
-		// Prevent the child from inheriting these handles: keeping the parent's
-		// stdout pipe open would stop its readers from reaching EOF.
 		for handle in [
 			std::io::stdin().as_raw_handle(),
 			std::io::stdout().as_raw_handle(),
@@ -421,13 +378,10 @@ mod background {
 	}
 }
 
-/// Handle termination signals: request graceful shutdown on the first,
-/// then terminate immediately on the second.
 mod interrupts {
 	use super::*;
 
 	static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
-	/// The launcher is done, and can be let go
 	static DONE: AtomicBool = AtomicBool::new(false);
 
 	pub fn listen(inputs: mpsc::Sender<Input>, printer: Arc<Printer>) {
@@ -441,14 +395,14 @@ mod interrupts {
 					continue;
 				}
 				let asked = if seen == 0 {
-					printer.line("Interrupted: requesting graceful shutdown (interrupt again to force exit)");
-					request(4, "terminate", json!({}))
+					printer.line("Interrupted: requesting graceful shutdown. Interrupt again to terminate the world.");
+					Ask::Stop
 				} else {
 					printer.line("Interrupted again: terminating the world");
-					request(5, "disconnect", json!({ "terminateDebuggee": true }))
+					Ask::Kill
 				};
 				seen = now;
-				if inputs.send(asked).is_err() {
+				if inputs.send(Input::Asked(asked)).is_err() {
 					return;
 				}
 			}
@@ -468,20 +422,14 @@ mod interrupts {
 			for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
 				libc::signal(signal, interrupted as extern "C" fn(libc::c_int) as libc::sighandler_t);
 			}
-			// A reader that went away isn't a reason to leave the world
-			// running without its launcher
 			libc::signal(libc::SIGPIPE, libc::SIG_IGN);
 		}
 	}
 
 	#[cfg(windows)]
 	fn catch() {
-		/// Ctrl-C, Ctrl-Break, the console closing, logging off, shutting down
 		unsafe extern "system" fn interrupted(event: u32) -> i32 {
 			INTERRUPTS.fetch_add(1, Ordering::SeqCst);
-			// Console shutdown terminates the launcher after this handler
-			// returns or its deadline expires. Allow the world that time to
-			// shut down.
 			const CTRL_CLOSE_EVENT: u32 = 2;
 			if event >= CTRL_CLOSE_EVENT {
 				for _ in 0..100 {

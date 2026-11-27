@@ -1,33 +1,12 @@
-//! Debugs a small world through the launcher, in the Debug Adapter Protocol,
-//! and checks what a client sees of each thing the debugger does: breakpoints,
-//! stepping, pausing, stack frames, variables, expressions, runtime errors,
-//! several sessions at once, reboots, and all of it while the code is hot
-//! reloaded.
-//!
-//! Build the launcher and the debug library first:
-//! `cargo build -p auxtools-cli -p debug_server -p dap_test`, then run this
-//! from the repository's root with `BYOND_PATH` set. Arguments name the groups
-//! to run (see `GROUPS`); none runs them all. `LAUNCHER_TEST_SERVER` and
-//! `LAUNCHER_TEST_ARGS` are `launcher_test`'s.
-
-#[allow(dead_code)]
-mod client;
 mod groups;
-#[allow(dead_code)]
-#[path = "../../test_runner/src/paths.rs"]
-mod paths;
 mod world;
 
-use std::{
-	process::Command,
-	sync::atomic::{AtomicUsize, Ordering}
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use paths::ByondCommand;
+use test_support::paths;
 
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
 
-/// One thing checked
 pub fn ok(what: &str) {
 	CHECKS.fetch_add(1, Ordering::Relaxed);
 	println!("ok: {}", what);
@@ -59,6 +38,12 @@ const GROUPS: &[(&str, fn())] = &[
 
 fn main() {
 	let wanted: Vec<String> = std::env::args().skip(1).collect();
+	if wanted == ["--list"] {
+		for (group, _) in GROUPS {
+			println!("{}", group);
+		}
+		return;
+	}
 	for name in &wanted {
 		assert!(
 			GROUPS.iter().any(|(group, _)| group == name),
@@ -68,14 +53,10 @@ fn main() {
 		);
 	}
 
-	// Left behind by a run that failed
+	std::env::set_var("AUXTOOLS_WATCH_INTERVAL", "50");
+
 	let _ = std::fs::remove_file(world::host_file("fail_early"));
-	let res = Command::new(paths::find_dm())
-		.with_byond_paths()
-		.arg(world::host_file("dap_test_host.dme"))
-		.status()
-		.unwrap();
-	assert!(res.success(), "dreammaker build failed");
+	paths::compile(&world::host_file("dap_test_host.dme"));
 
 	for (name, run) in GROUPS {
 		if wanted.is_empty() || wanted.iter().any(|w| w == name) {

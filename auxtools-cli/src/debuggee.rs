@@ -1,21 +1,22 @@
-//! Connect the adapter to the world's debug server.
-//! A reader thread receives responses and forwards asynchronous events to the
-//! adapter loop. Stop events are delivered after the current request's
-//! response: VS Code treats a step response as a transition to running.
-
 use std::{
 	collections::HashMap,
+	io,
+	ops::ControlFlow,
 	sync::{
 		atomic::{AtomicBool, AtomicU32, Ordering},
 		mpsc, Arc, Mutex
 	},
-	time::Duration
+	time::{Duration, Instant}
 };
 
 use auxtools_cli::{
-	local::{self, Shared, Stream},
-	server_types::{BreakpointReason, DataChange, InstructionRef, Request, Response, Stop, ENDING_CONTEXT, WORLD_SHUTTING_DOWN}
+	client::{
+		ops::{Ending, Trigger},
+		Client, Heard, Listener, Lost
+	},
+	local::{self, Stream}
 };
+use auxtools_protocol::{BreakpointReason, DataChange, InstructionRef, Request, Response, Stop};
 use dap_types::{ContinuedEvent, StoppedEvent as Reasons};
 
 use crate::{
@@ -23,15 +24,12 @@ use crate::{
 	dap::{self, Output}
 };
 
-/// The runtime error the world last stopped on
 #[derive(Default, Clone)]
 pub struct LastError {
 	pub message: String,
-	/// Whether it's inside a `try`
 	pub caught: bool
 }
 
-/// What a runtime error is called, by whether a `try` will catch it
 pub const fn error_kind(caught: bool) -> &'static str {
 	if caught {
 		"caught runtime error"
@@ -40,20 +38,18 @@ pub const fn error_kind(caught: bool) -> &'static str {
 	}
 }
 
-/// A breakpoint installed in the debug server.
 #[derive(Clone)]
 pub struct SetBreakpoint {
-	/// Key used to remove the breakpoint.
-	pub asked: InstructionRef,
-	/// Resolved breakpoint location, if verified.
+	pub id: i64,
+	pub claim: u32,
 	pub at: Option<InstructionRef>,
-	/// Server watch ID for a data breakpoint; location fields above are unused.
-	pub watch: Option<u32>,
-	/// Client-visible breakpoint ID.
-	pub id: i64
+	pub file: Option<String>,
+	pub line: Option<u32>,
+	pub trigger: Trigger,
+	pub log: Option<String>,
+	pub watch: Option<u32>
 }
 
-/// Format watched value changes, one per line.
 fn changes_text(changes: &[DataChange]) -> String {
 	changes
 		.iter()
@@ -62,11 +58,8 @@ fn changes_text(changes: &[DataChange]) -> String {
 		.join("\n")
 }
 
-/// Where the key for instruction breakpoints' records is
 pub const INSTRUCTION_BREAKPOINTS: &str = "<instructions>";
 
-/// The breakpoints set in the world now, by file (or `FUNCTION_BREAKPOINTS`,
-/// or `INSTRUCTION_BREAKPOINTS`)
 pub type SetBreakpoints = Arc<Mutex<HashMap<String, Vec<SetBreakpoint>>>>;
 
 fn announce_stop(out: &Output, last_error: &Mutex<LastError>, set: &SetBreakpoints, stop: Stop) {
@@ -79,9 +72,11 @@ fn announce_stop(out: &Output, last_error: &Mutex<LastError>, set: &SetBreakpoin
 		BreakpointReason::Breakpoint => {
 			let mut by_instruction = true;
 			for (key, breakpoints) in set.lock().unwrap().iter() {
-				for breakpoint in breakpoints.iter().filter(|breakpoint| breakpoint.at.as_ref() == Some(&stop.at)) {
+				let exact = key == INSTRUCTION_BREAKPOINTS;
+				let paused = |breakpoint: &&SetBreakpoint| breakpoint.at.is_some() && stop.paused_by.contains(&breakpoint.claim);
+				for breakpoint in breakpoints.iter().filter(paused) {
 					hit.push(breakpoint.id);
-					by_instruction &= key == INSTRUCTION_BREAKPOINTS;
+					by_instruction &= exact;
 				}
 			}
 			hit.sort_unstable();
@@ -110,7 +105,6 @@ fn announce_stop(out: &Output, last_error: &Mutex<LastError>, set: &SetBreakpoin
 				.map(|breakpoint| breakpoint.id)
 				.collect();
 			hit.sort_unstable();
-			// The stop itself has room for a line; the console has it all
 			out.console(changes_text(&changes));
 			description = changes
 				.first()
@@ -128,44 +122,122 @@ fn announce_stop(out: &Output, last_error: &Mutex<LastError>, set: &SetBreakpoin
 	});
 }
 
-/// How long a request can go unanswered. The server answers between DM
-/// instructions, and the world runs at least one a tick.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long to wait for the server's goodbye. It answers between DM
-/// instructions, so a world that's busy takes a moment.
 const GOODBYE_TIMEOUT: Duration = Duration::from_secs(2);
 
+const LEAVING_TIMEOUT: Duration = Duration::from_secs(2);
+
+const LEAVING_LOOK: Duration = Duration::from_millis(50);
+
+struct ToAdapter {
+	generation: u64,
+	debugging: bool,
+	out: Arc<Output>,
+	inputs: mpsc::Sender<Input>,
+	ended: Option<&'static str>
+}
+
+impl ToAdapter {
+	fn input(&mut self, number: u64, event: Response) -> ControlFlow<(), Option<Input>> {
+		let generation = self.generation;
+		ControlFlow::Continue(Some(match event {
+			Response::Disconnect => {
+				self.ended = Some("the debug server disconnected");
+				return ControlFlow::Break(());
+			}
+
+			Response::Unavailable { reason } => {
+				let _ = self.inputs.send(Input::Unavailable { generation, reason });
+				self.ended = Some("debugger initialization failed");
+				return ControlFlow::Break(());
+			}
+
+			Response::ShuttingDown => Input::ShuttingDown { generation },
+
+			Response::Notification { message } | Response::ConditionFailed { message } => {
+				self.out.console(message);
+				return ControlFlow::Continue(None);
+			}
+
+			Response::BreakpointHit { .. } | Response::Resumed if !self.debugging => return ControlFlow::Continue(None),
+
+			Response::BreakpointHit(stop) => Input::Stopped { generation, stop, number },
+
+			Response::Log { message, file, line, .. } => Input::Logged { message, file, line },
+
+			Response::WatchEnded { id, reason } => Input::WatchEnded { generation, id, reason },
+
+			Response::CodeChanged if self.debugging => Input::CodeChanged { generation },
+
+			Response::Journaled(entry) => {
+				if let Some(text) = crate::adapter::reload_by_another(&entry) {
+					self.out.console(text);
+				}
+				return ControlFlow::Continue(None);
+			}
+
+			Response::Resumed => Input::Resumed { generation },
+
+			Response::CoverageEnded(recorded) => {
+				self.out.coverage(recorded);
+				return ControlFlow::Continue(None);
+			}
+
+			Response::StepEnded => return ControlFlow::Continue(None),
+
+			_ => return ControlFlow::Continue(None)
+		}))
+	}
+}
+
+impl Listener for ToAdapter {
+	fn event(&mut self, number: u64, event: Response) -> ControlFlow<()> {
+		if let Some(input) = self.input(number, event)? {
+			if self.inputs.send(input).is_err() {
+				self.ended = Some("adapter event receiver closed");
+				return ControlFlow::Break(());
+			}
+		}
+		ControlFlow::Continue(())
+	}
+
+	fn closed(self: Box<Self>, error: Option<io::Error>) {
+		let reason = match (self.ended, error) {
+			(Some(reason), _) => reason.to_owned(),
+			(None, Some(error)) => format!("the connection closed: {}", error),
+			(None, None) => "response receiver closed".to_owned()
+		};
+		let _ = self.inputs.send(Input::ConnectionClosed {
+			generation: self.generation,
+			reason
+		});
+	}
+}
+
+fn lost(lost: Lost) -> String {
+	match lost {
+		Lost::Unsent(e) => format!("could not reach the world: {}", e),
+		Lost::Closed => "the world disconnected".to_owned(),
+		Lost::Incompatible(theirs) => local::incompatible(theirs).to_string()
+	}
+}
+
 pub struct Debuggee {
-	writer: Shared,
-	/// Responses paired with the number of stops read before them.
-	responses: mpsc::Receiver<(Response, u64)>,
-	/// Whether the world is paused
+	client: Client,
 	stopped: Arc<AtomicBool>,
 	out: Arc<Output>,
 	last_error: Arc<Mutex<LastError>>,
 	set: SetBreakpoints,
-	/// The stack the world last stopped in
 	thread: Arc<AtomicU32>,
-	/// An existing pause was reported on connection. Suppress duplicate
-	/// stop notifications until execution resumes.
 	caught_up: bool,
-	/// How many times the world has stopped
 	stops: u32,
-	/// Stops read before the last continue or step acknowledgement.
-	/// Suppress those stops if they reach the adapter event loop after
-	/// resuming.
 	resumed_after: u64,
-	/// Outstanding fire-and-forget evaluations whose responses must be
-	/// discarded.
-	unanswered: Arc<AtomicU32>,
-	/// Connection generation used to reject stale events.
+	lost: bool,
 	pub generation: u64
 }
 
 impl Debuggee {
-	/// Start the reader thread. Report disconnects through `inputs`.
-	/// Suppress stop events when `debugging` is false.
 	pub fn new(
 		stream: Stream,
 		generation: u64,
@@ -175,140 +247,28 @@ impl Debuggee {
 		last_error: Arc<Mutex<LastError>>,
 		set: SetBreakpoints
 	) -> Result<Self, String> {
-		let writer = Shared::new(stream);
-		let mut reader = writer.clone();
-		let debuggee_out = out.clone();
-		let (responses_sender, responses) = mpsc::channel();
-		let unanswered = Arc::new(AtomicU32::new(0));
-		let reader_unanswered = unanswered.clone();
-		// Number stops as they arrive; the adapter may process queued requests
-		// first.
-		let mut stops_read = 0;
-
-		std::thread::Builder::new()
-			.name("debuggee reader".to_owned())
-			.spawn(move || {
-				let reason = loop {
-					let response = match local::receive(&mut reader) {
-						Ok(response) => response,
-						Err(e) => break format!("the connection closed: {}", e)
-					};
-
-					match response {
-						Response::Disconnect => break "the debug server disconnected".to_owned(),
-
-						// Initialization failed permanently; reconnecting
-						// cannot help.
-						Response::Unavailable { reason } => {
-							let _ = inputs.send(Input::Unavailable { generation, reason });
-							break "debugger initialization failed".to_owned();
-						}
-
-						// A shutdown notification suppresses reconnect messages
-						// after disconnection.
-						Response::Notification { message } if message == WORLD_SHUTTING_DOWN => {
-							if inputs.send(Input::ShuttingDown { generation }).is_err() {
-								break "adapter event receiver closed".to_owned();
-							}
-						}
-
-						Response::Notification { message } => out.console(message),
-
-						// A breakpoint's condition failed: said once, and the
-						// world doesn't stop for it
-						Response::ConditionFailed { message } => out.console(message),
-
-						Response::BreakpointHit { .. } | Response::Resumed if !debugging => {}
-
-						Response::BreakpointHit(stop) => {
-							stops_read += 1;
-							if inputs
-								.send(Input::Stopped {
-									generation,
-									stop,
-									number: stops_read
-								})
-								.is_err()
-							{
-								break "adapter event receiver closed".to_owned();
-							}
-						}
-
-						// A breakpoint with a message
-						Response::Log { message, file, line, .. } => {
-							if inputs.send(Input::Logged { message, file, line }).is_err() {
-								break "adapter event receiver closed".to_owned();
-							}
-						}
-
-						// What a data breakpoint watched is gone
-						Response::WatchEnded { id, reason } => {
-							if inputs.send(Input::WatchEnded { generation, id, reason }).is_err() {
-								break "adapter event receiver closed".to_owned();
-							}
-						}
-
-						// Another client reloaded its code
-						Response::CodeChanged => {
-							if debugging && inputs.send(Input::CodeChanged { generation }).is_err() {
-								break "adapter event receiver closed".to_owned();
-							}
-						}
-
-						// A hot reload another client reported, for a launcher
-						// attached to a world it didn't start
-						Response::Journaled(entry) => {
-							if let Some(text) = crate::adapter::reload_by_another(&entry) {
-								out.console(text);
-							}
-						}
-
-						// The step exhausted its stack without pausing; the
-						// client already shows execution as running.
-						Response::StepEnded => {}
-
-						// Another client let it carry on
-						Response::Resumed => {
-							if inputs.send(Input::Resumed { generation }).is_err() {
-								break "adapter event receiver closed".to_owned();
-							}
-						}
-
-						// Discard the oldest fire-and-forget evaluation
-						// response. The server responds in request order.
-						Response::Eval(_)
-							if reader_unanswered
-								.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-								.is_ok() => {}
-
-						response => {
-							if responses_sender.send((response, stops_read)).is_err() {
-								break "response receiver closed".to_owned();
-							}
-						}
-					}
-				};
-				let _ = inputs.send(Input::ConnectionClosed { generation, reason });
-			})
-			.map_err(|e| e.to_string())?;
-
+		let listener = ToAdapter {
+			generation,
+			debugging,
+			out: out.clone(),
+			inputs,
+			ended: None
+		};
 		Ok(Self {
-			writer,
-			responses,
+			client: Client::listened_to(stream, listener).map_err(|e| e.to_string())?,
 			stopped: Arc::new(AtomicBool::new(false)),
-			out: debuggee_out,
+			out,
 			last_error,
 			set,
 			thread: Arc::new(AtomicU32::new(0)),
 			caught_up: false,
 			stops: 0,
 			resumed_after: 0,
-			unanswered,
+			lost: false,
 			generation
 		})
 	}
 
-	/// Report the numbered stop unless this client has already resumed past it.
 	pub fn stopped_at(&mut self, stop: Stop, number: u64) {
 		if self.caught_up || number <= self.resumed_after {
 			return;
@@ -319,14 +279,12 @@ impl Debuggee {
 		announce_stop(&self.out, &self.last_error, &self.set, stop);
 	}
 
-	/// Another client let the world carry on (`Input::Resumed`)
 	pub fn resumed(&mut self) {
 		self.caught_up = false;
 		self.stopped.store(false, Ordering::Relaxed);
 		self.continued();
 	}
 
-	/// Clear client pause state after disconnection.
 	pub fn gone(&mut self) {
 		if self.stopped.swap(false, Ordering::Relaxed) {
 			self.continued();
@@ -340,9 +298,8 @@ impl Debuggee {
 		});
 	}
 
-	/// Report a pause that predates this connection.
 	pub fn catch_up_on_pause(&mut self) -> Result<(), String> {
-		let Response::Status { paused: Some(stop) } = self.request(&Request::Status)? else {
+		let Response::Status { paused: Some(stop) } = self.request(&Request::Status, None)? else {
 			return Ok(());
 		};
 		if !self.stopped.swap(true, Ordering::Relaxed) {
@@ -354,72 +311,73 @@ impl Debuggee {
 		Ok(())
 	}
 
-	/// Pause generation. Frame and variable references expire at the next stop.
-	pub fn stop_number(&self) -> u32 {
+	pub const fn stop_number(&self) -> u32 {
 		self.stops
 	}
 
-	/// Whether the world is paused
 	pub fn stopped(&self) -> bool {
 		self.stopped.load(Ordering::Relaxed)
 	}
 
-	/// Disconnect and briefly wait for the server to remove this client's
-	/// breakpoints before a subsequent session starts.
+	pub const fn lost(&self) -> bool {
+		self.lost
+	}
+
+	fn lose(&mut self, why: Lost) -> String {
+		self.lost = true;
+		lost(why)
+	}
+
 	pub fn leave(&mut self) {
-		if self.send(&Request::Disconnect).is_err() {
-			return;
-		}
-		let deadline = std::time::Instant::now() + GOODBYE_TIMEOUT;
-		// The reader stops when the server hangs up
-		while let Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) = self.responses.recv_timeout(Duration::from_millis(50)) {
-			if std::time::Instant::now() >= deadline {
-				return;
-			}
+		if self.client.leave().is_ok() {
+			self.client.closed_by(Instant::now() + GOODBYE_TIMEOUT);
 		}
 	}
 
-	/// Sends a request that isn't answered
 	pub fn send(&mut self, request: &Request) -> Result<(), String> {
-		local::send(&mut self.writer, request).map_err(|e| format!("couldn't reach the world: {}", e))
+		self.client.tell(request, None).map(|_| ()).map_err(|why| self.lose(why))
 	}
 
-	/// Send world.Del() or world.Reboot(), resuming paused worlds as needed.
-	/// Discard the response when it arrives.
-	pub fn eval_unanswered(&mut self, command: String) -> Result<(), String> {
-		self.unanswered.fetch_add(1, Ordering::Relaxed);
-		let sent = self.send(&Request::Eval {
-			frame_id: None,
-			command,
-			context: Some(ENDING_CONTEXT.to_owned())
-		});
-		if sent.is_err() {
-			self.unanswered.fetch_sub(1, Ordering::Relaxed);
-		}
-		sent
+	pub fn end(&mut self, ending: Ending) -> Result<(), String> {
+		self.send(&ending.request())
 	}
 
-	/// Sends a request and waits for its response
-	pub fn request(&mut self, request: &Request) -> Result<Response, String> {
-		// Anything still waiting belonged to a request that timed out
-		while self.responses.try_recv().is_ok() {}
-
+	pub fn request(&mut self, request: &Request, leaving: Option<&AtomicBool>) -> Result<Response, String> {
 		let resumes = matches!(request, Request::Continue { .. });
 		if resumes {
 			self.caught_up = false;
 			self.stopped.store(false, Ordering::Relaxed);
 		}
-		self.send(request)?;
-		match self.responses.recv_timeout(RESPONSE_TIMEOUT) {
-			Ok((response, stops)) => {
-				// Discard a queued stop superseded by the acknowledged resume.
-				if resumes && matches!(response, Response::Ack) {
-					self.resumed_after = stops;
+		let sent = Instant::now();
+		let deadline = sent + RESPONSE_TIMEOUT;
+		let Some(id) = self.client.ask(request, Some(deadline)).map_err(|why| self.lose(why))? else {
+			return Err("debug server response timed out".to_owned());
+		};
+		loop {
+			let left = leaving.is_some_and(|leaving| leaving.load(Ordering::Relaxed));
+			let until = match leaving {
+				Some(_) if left => deadline.min(sent + LEAVING_TIMEOUT),
+				Some(_) => deadline.min(Instant::now() + LEAVING_LOOK),
+				None => deadline
+			};
+			match self.client.hear(Some(until)).map_err(|why| self.lose(why))? {
+				Some(Heard::Answer { to, response, after }) if to == id => {
+					if resumes && matches!(response, Response::Ack) {
+						self.resumed_after = after;
+					}
+					return Ok(response);
 				}
-				Ok(response)
+				Some(_) => {}
+				None if !left && Instant::now() < deadline => {}
+				None => {
+					self.client.give_up(id);
+					return Err(if Instant::now() < deadline {
+						"stopped waiting for the debug server: the client asked to disconnect".to_owned()
+					} else {
+						"debug server response timed out".to_owned()
+					});
+				}
 			}
-			Err(mpsc::RecvTimeoutError::Timeout) => Err("debug server response timed out".to_owned()),
-			Err(mpsc::RecvTimeoutError::Disconnected) => Err("the world disconnected".to_owned())
 		}
 	}
 }
@@ -427,32 +385,26 @@ impl Debuggee {
 #[cfg(test)]
 mod tests {
 	use std::{
-		io::{Read, Write},
-		sync::{mpsc, Arc}
+		sync::{
+			atomic::{AtomicBool, Ordering},
+			mpsc, Arc
+		},
+		time::{Duration, Instant}
 	};
 
-	use auxtools_cli::{
-		local::Stream,
-		server_types::{Request, Response}
-	};
+	use auxtools_cli::{client::ops::Ending, local::Stream};
+	use auxtools_protocol::{ClientMessage, EvalError, Request, Response, ServerMessage};
 	use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
 
-	use super::Debuggee;
+	use super::{Debuggee, LEAVING_TIMEOUT, RESPONSE_TIMEOUT};
 	use crate::dap::Output;
 
-	fn read_request(stream: &mut Stream) -> Request {
-		let mut len = [0u8; 4];
-		stream.read_exact(&mut len).unwrap();
-		let mut data = vec![0; u32::from_le_bytes(len) as usize];
-		stream.read_exact(&mut data).unwrap();
-		bincode::deserialize(&data).unwrap()
+	fn read_request(stream: &mut Stream) -> ClientMessage {
+		auxtools_protocol::read(stream).unwrap()
 	}
 
-	fn write_response(stream: &mut Stream, response: &Response) {
-		let data = bincode::serialize(response).unwrap();
-		stream.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
-		stream.write_all(&data).unwrap();
-		stream.flush().unwrap();
+	fn answer(stream: &mut Stream, to: &ClientMessage, response: &Response) {
+		auxtools_protocol::write(stream, &ServerMessage::answer(to.id, response)).unwrap();
 	}
 
 	#[test]
@@ -467,17 +419,81 @@ mod tests {
 
 		let (inputs, _heard) = mpsc::channel();
 		let mut debuggee = Debuggee::new(client, 1, true, Arc::new(Output::new()), inputs, Default::default(), Default::default()).unwrap();
-		debuggee.eval_unanswered("world.Del()".to_owned()).unwrap();
-		// The world answers the evaluation once the next request is in
+		debuggee.end(Ending::Stop).unwrap();
 		let answering = std::thread::spawn(move || {
-			assert!(matches!(read_request(&mut world), Request::Eval { .. }));
-			assert!(matches!(read_request(&mut world), Request::Pause));
-			write_response(&mut world, &Response::Eval(Err("world/Del() slept".to_owned())));
-			write_response(&mut world, &Response::Ack);
+			let eval = read_request(&mut world);
+			assert!(matches!(eval.request, Request::Eval { .. }));
+			let pause = read_request(&mut world);
+			assert!(matches!(pause.request, Request::Pause));
+			assert_ne!(eval.id, pause.id);
+			let slept = EvalError {
+				message: "world/Del() slept".to_owned(),
+				still_running: true
+			};
+			answer(&mut world, &eval, &Response::Eval(Err(slept)));
+			answer(&mut world, &pause, &Response::Ack);
+			let status = read_request(&mut world);
+			assert!(matches!(status.request, Request::Status));
+			answer(&mut world, &eval, &Response::Ack);
+			auxtools_protocol::write(&mut world, &ServerMessage::event(&Response::Ack)).unwrap();
+			answer(&mut world, &status, &Response::Status { paused: None });
 			world
 		});
-		let answer = debuggee.request(&Request::Pause).unwrap();
+		let answer = debuggee.request(&Request::Pause, None).unwrap();
 		assert!(matches!(answer, Response::Ack), "{:?}", answer);
+		let answer = debuggee.request(&Request::Status, None).unwrap();
+		assert!(matches!(answer, Response::Status { paused: None }), "{:?}", answer);
+		answering.join().unwrap();
+	}
+
+	#[test]
+	fn a_request_is_not_waited_out_once_the_client_asks_to_disconnect() {
+		let name = format!("auxtools-cli-test-leaving-{}", std::process::id());
+		let listener = ListenerOptions::new()
+			.name(name.clone().to_ns_name::<GenericNamespaced>().unwrap())
+			.create_sync()
+			.unwrap();
+		let client = Stream::connect(name.to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
+		let mut world = listener.accept().unwrap();
+
+		let (inputs, _heard) = mpsc::channel();
+		let mut debuggee = Debuggee::new(client, 1, true, Arc::new(Output::new()), inputs, Default::default(), Default::default()).unwrap();
+		let leaving = Arc::new(AtomicBool::new(false));
+		let asked = {
+			let leaving = leaving.clone();
+			std::thread::spawn(move || {
+				let eval = read_request(&mut world);
+				assert!(matches!(eval.request, Request::Eval { .. }));
+				std::thread::sleep(Duration::from_millis(200));
+				leaving.store(true, Ordering::Relaxed);
+				(world, eval)
+			})
+		};
+		let started = Instant::now();
+		let stuck = Request::Eval {
+			frame_id: None,
+			command: "forever()".to_owned(),
+			ending: false
+		};
+		let error = debuggee.request(&stuck, Some(&leaving)).unwrap_err();
+		assert_eq!(error, "stopped waiting for the debug server: the client asked to disconnect");
+		let waited = started.elapsed();
+		assert!(waited >= LEAVING_TIMEOUT && waited < LEAVING_TIMEOUT * 3, "{:?}", waited);
+
+		let (mut world, eval) = asked.join().unwrap();
+		let answering = std::thread::spawn(move || {
+			let status = read_request(&mut world);
+			let done = EvalError {
+				message: "done".to_owned(),
+				still_running: false
+			};
+			answer(&mut world, &eval, &Response::Eval(Err(done)));
+			answer(&mut world, &status, &Response::Status { paused: None });
+			world
+		});
+		let answer = debuggee.request(&Request::Status, Some(&leaving)).unwrap();
+		assert!(matches!(answer, Response::Status { paused: None }), "{:?}", answer);
+		assert!(started.elapsed() < RESPONSE_TIMEOUT);
 		answering.join().unwrap();
 	}
 }

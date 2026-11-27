@@ -1,9 +1,38 @@
-//! For when BYOND is not enough. Probably often.
+//! Native Rust library for hooking DM procs and inspecting or modifying a
+//! running BYOND world.
+//!
+//! Supports 32-bit x86 Linux and Windows on BYOND 515 (build 1637 and later)
+//! and BYOND 516 (build 1648 and later). Builds newer than 1689 are still
+//! attempted.
+//!
+//! # Lifecycle
+//!
+//! The crate exports `auxtools_init`, `auxtools_shutdown`, and
+//! `auxtools_full_shutdown` for DM to invoke with `call_ext`. Each returns
+//! `SUCCESS` or `FAILED (reason)`. If `auxtools_init` fails, subsequent calls
+//! return the same failure without retrying. Libraries injected before a world
+//! loads use [`init_on_world_load`] instead.
+//!
+//! # Thread affinity and lifetimes
+//!
+//! Access BYOND data only on BYOND's thread while a world is live, between
+//! initialization and shutdown. [`Value`], [`Proc`], [`List`], and
+//! [`StringRef`] are neither `Send` nor `Sync`, but most functions do not check
+//! thread affinity or initialization state and will read null pointers before
+//! the first initialization.
+//!
+//! A [`Value`] holds a BYOND reference until it is dropped and is not released
+//! automatically at shutdown. Do not keep a [`Value`] past the hook that
+//! created it or across shutdown. Store a [`WeakValue`] instead, which is
+//! `Copy`, `Send`, and `Sync`.
+//!
+//! # Panics
+//!
+//! Proc hooks, `byond_ffi_fn!` bodies, initialization and shutdown callbacks,
+//! runtime handlers, and [`at_proc_calls`] callbacks run inside [`guard`] so
+//! panics do not unwind into BYOND. The handler installed with
+//! `instruction_hook::set_handler` is not guarded.
 
-//#[cfg(not(target_pointer_width = "32"))]
-// compile_error!("Auxtools must be compiled for a 32-bit target");
-
-// public so `byond_ffi_fn!` can reach it from another crate
 #[doc(hidden)]
 pub mod appearance_tables;
 pub mod byond_ffi;
@@ -16,6 +45,7 @@ mod list;
 pub mod pointer;
 mod proc;
 pub mod raw_types;
+pub mod registry;
 mod runtime;
 pub mod runtime_tables;
 mod string;
@@ -26,44 +56,47 @@ mod value_from;
 pub mod version;
 mod weak_value;
 
-use std::sync::{
-	atomic::{AtomicBool, AtomicU32, Ordering},
-	Mutex, OnceLock
+use std::{
+	any::Any,
+	sync::{
+		atomic::{AtomicBool, AtomicU32, Ordering},
+		Mutex, OnceLock
+	}
 };
 
 pub use auxtools_impl::{full_shutdown, hook, init, pin_dll, runtime_handler, shutdown};
-/// For crates that need to find something else in BYOND's binary.
 pub use byond_scan;
-pub use bytecode_manager::{bytecode_at, bytecode_changes, remember_bytecode};
-/// Used by the [pin_dll] macro to set dll pinning
+pub use bytecode_manager::{bytecode_at, bytecode_changes, copy_code, own_code, remember_bytecode};
 pub use ctor;
 pub use hooks::{CompileTimeHook, HookFailure, ProcHook, RuntimeErrorHook};
 use init::{get_init_level, set_init_level, InitLevel};
 pub use init::{FullInitFunc, FullShutdownFunc, PartialInitFunc, PartialShutdownFunc};
-/// Used by the [hook](attr.hook.html) macro to aggregate all compile-time hooks
 pub use inventory;
 pub use list::List;
 pub use proc::Proc;
 pub use raw_types::variables::VariableNameIdTable;
+pub use registry::{byond_build, find_recipe};
 pub use runtime::{DMResult, Runtime};
 pub use string::{text_of, StringRef};
 pub use string_intern::InternedString;
-pub use symbols::{byond_build, find_recipe, find_recipe_of};
 pub use value::Value;
 pub use weak_value::WeakValue;
 
-// We need winapi to call GetModuleHandleExW which lets us prevent our DLL from
-// unloading.
 #[cfg(windows)]
 extern crate winapi;
 
+/// Controls whether the library pins itself in memory on Windows.
+///
+/// Defaults to `true` unless `pin_dll!(false)` clears it at library load time.
+/// The value is read during the first initialization, when pinning takes
+/// permanent effect, and again during `auxtools_full_shutdown`, which calls
+/// `FreeLibrary` when this flag is `false`. Has no effect on Linux.
+///
+/// Configure this flag with `pin_dll!` rather than storing to it directly.
 pub static PIN_DLL: AtomicBool = AtomicBool::new(true);
 
-/// wrapper for [`byond_scan::MODULE_NAME`](byond_scan::MODULE_NAME)
 pub const BYONDCORE: &str = byond_scan::MODULE_NAME;
 
-// This strange section of code retrieves our DLL using the init function's
-// address. This increments the DLL reference count, which prevents unloading.
 #[cfg(windows)]
 fn pin_dll() -> Result<(), ()> {
 	unsafe {
@@ -84,12 +117,25 @@ fn pin_dll() -> Result<(), ()> {
 	Ok(())
 }
 #[cfg(unix)]
-fn pin_dll() -> Result<(), ()> {
+const fn pin_dll() -> Result<(), ()> {
 	Ok(())
 }
 
-// The first failed init. Trying again would run setup on top of what the
-// failed attempt left behind, so every later call hands this back instead.
+/// Runs `work` and catches any unwinding panic.
+///
+/// Returns `Ok` with the return value of `work`, or `Err` with the panic
+/// payload if `work` unwinds. A panic that unwinds across an `extern "C"`
+/// boundary into BYOND aborts the world process.
+pub fn guard<R>(work: impl FnOnce() -> R) -> Result<R, Box<dyn Any + Send>> {
+	std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+}
+
+pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+	let message = payload.downcast_ref::<&str>().copied();
+	let message = message.or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+	message.unwrap_or("no message").to_owned()
+}
+
 static INIT_FAILURE: OnceLock<String> = OnceLock::new();
 
 byond_ffi_fn! { auxtools_init(_input) {
@@ -100,7 +146,6 @@ byond_ffi_fn! { auxtools_init(_input) {
 	match try_init() {
 		Ok(()) => Some("SUCCESS".to_owned()),
 		Err(e) => {
-			// a hook must not fire in a library that only got half set up
 			hooks::clear_hooks();
 			proc::clear_procs();
 			Some(INIT_FAILURE.get_or_init(|| format!("FAILED ({})", e)).clone())
@@ -112,9 +157,11 @@ fn try_init() -> Result<(), String> {
 	try_init_with(None)
 }
 
-/// Run `prepare` after loading the proc table and before installing
-/// compile-time hooks, so it can add required procs.
 fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), String> {
+	guard(|| init_with(prepare)).unwrap_or_else(|panic| Err(format!("panicked: {}", panic_message(&*panic))))
+}
+
+fn init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), String> {
 	if get_init_level() == InitLevel::None {
 		return Ok(());
 	}
@@ -130,7 +177,6 @@ fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), Stri
 	if get_init_level() == InitLevel::Partial {
 		did_partial = true;
 
-		// This is a heap ptr so fetch it on partial loads
 		symbols::resolve_partial()?;
 
 		proc::populate_procs();
@@ -142,12 +188,11 @@ fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), Stri
 		}
 
 		for cthook in inventory::iter::<hooks::CompileTimeHook> {
-			hooks::hook(cthook.proc_path, cthook.hook).map_err(|e| format!("Could not hook proc {}: {:?}", cthook.proc_path, e))?;
+			hooks::hook(cthook.proc_path, cthook.hook).map_err(|e| format!("could not hook proc {}: {:?}", cthook.proc_path, e))?;
 		}
 		set_init_level(InitLevel::None);
 	}
 
-	// Run user-defined initializers
 	if did_full || FULL_INIT_FUNCS_PENDING.swap(false, Ordering::Relaxed) {
 		init::run_full_init()?;
 	}
@@ -159,43 +204,60 @@ fn try_init_with(prepare: Option<fn() -> Result<(), String>>) -> Result<(), Stri
 	Ok(())
 }
 
-/// Initialize version, symbols and detours without a loaded world.
 fn init_full() -> Result<(), String> {
 	version::init()?;
 	symbols::resolve_full()?;
-	pin_dll().map_err(|()| "Could not pin the library in memory.".to_owned())?;
-	hooks::init().map_err(|_| "Couldn't initialize proc hooking".to_owned())?;
+	pin_dll().map_err(|()| "could not pin the library in memory".to_owned())?;
+	hooks::init().map_err(|_| "could not initialize proc hooking".to_owned())?;
 	instruction_hook::init()?;
 
 	set_init_level(InitLevel::Partial);
 	Ok(())
 }
 
-/// Called on BYOND's thread by [`init_on_world_load`] each time a world loads
+/// Lifecycle callbacks passed to [`init_on_world_load`].
+///
+/// All three callbacks are function pointers invoked on BYOND's thread during
+/// the proc call that completes initialization, and they run again for each
+/// subsequent world armed with [`init_on_next_world_load`]:
+///
+/// - `prepare` runs once the proc lookup table and `byond_string!` strings are
+///   ready, before `#[hook("...")]` hooks are installed and before `#[init]`
+///   functions run. Returning `Err` or panicking fails initialization.
+/// - `ready` runs after initialization succeeds. [`starting_call`] returns
+///   `Some` only while `ready` is executing. Panics are caught and ignored.
+/// - `failed` receives the error message if initialization fails, after hooks
+///   and the proc lookup table have been cleared. Panics are caught and
+///   ignored.
 pub struct WorldLoad {
-	/// Run before compile-time hooks, after the proc table is available.
-	/// May add procs required by those hooks.
 	pub prepare: fn() -> Result<(), String>,
-	/// Runs once auxtools is initialised
 	pub ready: fn(),
-	/// Runs instead of `ready` when initialising failed
 	pub failed: fn(&str)
 }
 
 static WORLD_LOAD: OnceLock<&'static WorldLoad> = OnceLock::new();
-// Set while a world is yet to load. Read on every DM proc call.
 pub(crate) static WORLD_LOAD_PENDING: AtomicBool = AtomicBool::new(false);
-// The init funcs run after the partial init, as they would with auxtools_init
 static FULL_INIT_FUNCS_PENDING: AtomicBool = AtomicBool::new(false);
-// Marker proc and table entry identifying the exiting world.
-// Absent after the next world loads.
 static ENDING_WORLD: Mutex<Option<(raw_types::procs::ProcId, runtime_tables::ProcEntryWords)>> = Mutex::new(None);
 
-/// Initialize a library loaded before the world. Set up symbols and detours
-/// now; finish on BYOND's thread at the first proc call, around `on_load`.
-/// This runs before global initializers and other world code.
+/// Initializes the library before a world loads, for libraries injected into
+/// BYOND rather than initialized through `auxtools_init`.
 ///
-/// Use [`init_on_next_world_load`] to repeat initialization after reboot.
+/// Reads the BYOND build, resolves BYOND's internal functions, and installs
+/// detours immediately on the calling thread. The remaining initialization
+/// completes on BYOND's thread at the first proc call, before global
+/// initialization (ignoring calls BYOND makes while loading the world). If the
+/// deferred phase fails, `WorldLoad::failed` is called and no further attempts
+/// are made.
+///
+/// Detour handles are stored in thread-local storage on the calling thread, so
+/// `auxtools_full_shutdown` will fail unless it runs on that same thread.
+///
+/// # Errors
+///
+/// Returns an error if `init_on_world_load` has already been called (even if
+/// the first call failed), if the BYOND build is unsupported, or if a required
+/// BYOND function cannot be found.
 pub fn init_on_world_load(on_load: &'static WorldLoad) -> Result<(), String> {
 	if WORLD_LOAD.set(on_load).is_err() {
 		return Err("already waiting for the world to load".to_owned());
@@ -211,12 +273,20 @@ pub fn init_on_world_load(on_load: &'static WorldLoad) -> Result<(), String> {
 	Ok(())
 }
 
-/// Shut down and reinitialize on the next world's first proc call.
-/// Call after [`init_on_world_load`] when rebooting.
+/// Shuts down the library for the current world and arms re-initialization for
+/// the next world load.
 ///
-/// The exiting world may still call procs. If supplied, `added` identifies
-/// a proc added after load: defer initialization while its entry remains.
-/// Without that marker, initialization runs on the next proc call.
+/// Intended for worlds that reboot in place. Runs the same shutdown sequence as
+/// `auxtools_shutdown` (`#[shutdown]` callbacks, hook removal, and clearing the
+/// proc lookup and [`at_proc_calls`] queue), then waits for a subsequent proc
+/// call to run [`WorldLoad`] initialization again. Has no effect unless the
+/// library is fully initialized through [`init_on_world_load`].
+///
+/// When `added` is `None`, re-initialization triggers on the very next proc
+/// call, which may still belong to the ending world. When `added` is `Some`,
+/// pass a proc that was added after the world loaded so initialization waits
+/// until that proc's entry is absent or changed at its ID in BYOND's proc
+/// table.
 pub fn init_on_next_world_load(added: Option<&Proc>) {
 	if WORLD_LOAD.get().is_none() || get_init_level() != InitLevel::None {
 		return;
@@ -226,8 +296,14 @@ pub fn init_on_next_world_load(added: Option<&Proc>) {
 	WORLD_LOAD_PENDING.store(true, Ordering::Relaxed);
 }
 
-/// Shut down permanently after [`init_on_world_load`].
-/// The exiting world may still execute code; do not reinitialize.
+/// Shuts down the library when a world started via [`init_on_world_load`] is
+/// ending permanently.
+///
+/// Runs the same shutdown sequence as `auxtools_shutdown` (`#[shutdown]`
+/// callbacks, hook removal, and clearing the proc lookup and [`at_proc_calls`]
+/// queue) without arming re-initialization. The library remains shut down
+/// unless DM explicitly calls `auxtools_init`. Has no effect unless the library
+/// is fully initialized through [`init_on_world_load`].
 pub fn shut_down_with_world() {
 	if WORLD_LOAD.get().is_none() || get_init_level() != InitLevel::None {
 		return;
@@ -235,59 +311,71 @@ pub fn shut_down_with_world() {
 	shutdown_partial();
 }
 
-// Calls counted by `on_proc_call` and the detour's direct path.
 pub(crate) static PROC_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Wrapping proc-call count for activity detection. Readable from any thread.
+/// Returns a wrapping counter of proc calls, readable from any thread.
+///
+/// The counter is never reset, including across shutdowns, and serves as a
+/// liveness indicator rather than an exact tally. On Linux before build 1664, a
+/// call that goes through BYOND's call function is counted a second time when
+/// its first instruction executes.
 pub fn proc_calls() -> u32 {
 	PROC_CALLS.load(Ordering::Relaxed)
 }
 
-// Work waiting for a later proc call (see `at_proc_calls`), and whether there
-// is any. Read on every DM proc call.
 static PROC_CALL_WORK: Mutex<Vec<fn() -> bool>> = Mutex::new(Vec::new());
 pub(crate) static PROC_CALL_WORK_PENDING: AtomicBool = AtomicBool::new(false);
 
-/// Run `work` at proc entry on BYOND's thread until it returns true.
-/// Use for initialization that must wait for later load stages.
-/// Pending work is cleared on shutdown.
+/// Queues `work` to run on BYOND's thread before each proc call until it
+/// returns `true`.
+///
+/// May be called from any thread. A panic inside `work` is caught and treated
+/// as returning `true`. Callbacks may invoke DM procs and enqueue additional
+/// callbacks.
+///
+/// Every shutdown path clears the queue. Queued work can run before a pending
+/// world-load initialization completes.
 pub fn at_proc_calls(work: fn() -> bool) {
 	PROC_CALL_WORK.lock().unwrap().push(work);
 	PROC_CALL_WORK_PENDING.store(true, Ordering::Relaxed);
 }
 
-/// Proc of the world's startup call while `WorldLoad::ready` runs.
 static STARTING: Mutex<Option<raw_types::procs::ProcId>> = Mutex::new(None);
 
-/// Proc of the pending startup call during [`WorldLoad::ready`], before
-/// its code runs. Code replaced by `ready` runs in that call. It can be
-/// an internal proc absent from the world's proc table.
+/// Returns the ID of the proc whose call completed world-load initialization.
+///
+/// Returns `Some` only while `WorldLoad::ready` is executing, and `None` at all
+/// other times (including inside proc hooks). `Proc::from_id` may return `None`
+/// for the returned ID if the proc is absent from the proc table.
 pub fn starting_call() -> Option<raw_types::procs::ProcId> {
 	*STARTING.lock().unwrap()
 }
 
-/// Proc whose replacement code the startup call should run
-/// (see [`start_runs_new_code`]).
 static START_RUNS_NEW: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// Run code replaced by `ready` in the pending startup call, whose frame
-/// already exists (see [`hooks::calls_bypass_detour`]). Replacement code
-/// must not need more locals than the frame already has.
+/// Directs the call that triggered world-load initialization to run `proc`'s
+/// current bytecode instead of the bytecode it started with.
+///
+/// Call this from `WorldLoad::ready` (or `WorldLoad::prepare`) after replacing
+/// the bytecode of the proc reported by [`starting_call`]. This is only needed
+/// on builds where calls bypass the call detour (Linux before build 1664, see
+/// `hooks::calls_bypass_detour`), where the frame already exists at its first
+/// instruction. On other builds the call has not started yet and runs the
+/// current bytecode automatically.
+///
+/// Because the existing frame keeps its allocated local slots, the replacement
+/// bytecode must not require more locals than the original frame has. Has no
+/// effect if called outside world-load initialization or with a different proc
+/// ID.
 pub fn start_runs_new_code(proc: raw_types::procs::ProcId) {
 	START_RUNS_NEW.store(proc.0, Ordering::Relaxed);
 }
 
-/// Entry point for every DM proc call, with its proc and `src` tag.
-/// The first eligible call completes `init_on_world_load`. Return true
-/// when the call should run its proc's replacement code
-/// (see [`start_runs_new_code`]).
 pub(crate) fn on_proc_call(proc: raw_types::procs::ProcId, src: raw_types::values::ValueTag) -> bool {
-	// Only BYOND's thread writes it
 	PROC_CALLS.store(PROC_CALLS.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
 	if PROC_CALL_WORK_PENDING.load(Ordering::Relaxed) {
-		// Taken out first: the work can make proc calls of its own
 		let work = std::mem::take(&mut *PROC_CALL_WORK.lock().unwrap());
-		let waiting: Vec<_> = work.into_iter().filter(|work| !work()).collect();
+		let waiting: Vec<_> = work.into_iter().filter(|&work| !guard(work).unwrap_or(true)).collect();
 		let mut queue = PROC_CALL_WORK.lock().unwrap();
 		queue.extend(waiting);
 		PROC_CALL_WORK_PENDING.store(!queue.is_empty(), Ordering::Relaxed);
@@ -296,14 +384,9 @@ pub(crate) fn on_proc_call(proc: raw_types::procs::ProcId, src: raw_types::value
 	if !WORLD_LOAD_PENDING.load(Ordering::Relaxed) {
 		return false;
 	}
-	// During loading, BYOND holds type entries while running init procs on
-	// InitVarRecorders. Wait until these calls finish before changing types.
-	// The next call still precedes global initialization, map atom creation
-	// and world/New.
 	if src == raw_types::values::ValueTag::InitVarRecorder {
 		return false;
 	}
-	// Still the world that's ending, if it has what only that one was given
 	{
 		let mut ending = ENDING_WORLD.lock().unwrap();
 		if let Some((id, entry)) = *ending {
@@ -322,13 +405,13 @@ pub(crate) fn on_proc_call(proc: raw_types::procs::ProcId, src: raw_types::value
 	match try_init_with(Some(on_load.prepare)) {
 		Ok(()) => {
 			*STARTING.lock().unwrap() = Some(proc);
-			(on_load.ready)();
+			let _ = guard(on_load.ready);
 			*STARTING.lock().unwrap() = None;
 		}
 		Err(e) => {
 			hooks::clear_hooks();
 			proc::clear_procs();
-			(on_load.failed)(&e);
+			let _ = guard(|| (on_load.failed)(&e));
 		}
 	}
 	START_RUNS_NEW.swap(u32::MAX, Ordering::Relaxed) == proc.0
@@ -389,22 +472,11 @@ byond_ffi_fn! { auxtools_full_shutdown(_input) {
 			);
 
 			if get_handle_res == 0 {
-				return Some("FAILED (Could not unpin the library from memory.)".to_owned())
+				return Some("FAILED (could not unpin the library from memory)".to_owned())
 			}
 
 			FreeLibrary(module);
 		}
 	};
 	Some("SUCCESS".to_owned())
-} }
-
-byond_ffi_fn! { auxtools_check_signatures(_input) {
-	if let Err(e) = version::init() {
-		return Some(format!("FAILED ({})", e));
-	}
-	match symbols::unresolved() {
-		Err(e) => Some(format!("FAILED ({})", e)),
-		Ok(missing) if missing.is_empty() => Some("SUCCESS".to_owned()),
-		Ok(missing) => Some(format!("MISSING: {}", missing.join(", ")))
-	}
 } }

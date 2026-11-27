@@ -1,24 +1,21 @@
-//! The world rebooting, and ending, under the debugger
+use serde_json::{json, Value};
+use test_support::{cli, process};
 
-use serde_json::json;
+use crate::{ok, world::World};
 
-use crate::{client, ok, world::World};
-
-/// Waits for the world after a reboot to be running
 fn rebooted(world: &mut World, worlds: usize) {
 	world.wait_count("dap: world/New", worlds);
-	world.wait_count("The world restarted", worlds - 1);
+	world.wait_count("Reconnected to the world", worlds - 1);
 }
 
-/// Resolve a pending function breakpoint when reload adds its proc or after
-/// reboot, whichever happens first, then verify that it hits.
 fn told_after_reboot() {
 	let dir = super::reloading::copy_of_the_world("reboots");
-	let mut world = World::launch_in(dir.clone(), json!({ "hotReload": true }));
+	let mut world = World::launch_in(dir.to_path_buf(), json!({ "hotReload": true }));
 	world.catch_runtimes(false);
 	world.configure();
 	world.wait_output("Hot reload active");
-	let set = world.function_breakpoints(&["/proc/sc_added"]).remove(0);
+	let mut set = world.function_breakpoints(&["/proc/sc_added", "/proc/sc_never"]);
+	let (set, never) = (set.remove(0), set.remove(0));
 	assert_eq!(set["verified"], false, "{}", set);
 	super::reloading::edit(
 		&mut world,
@@ -29,6 +26,18 @@ fn told_after_reboot() {
 
 	world.run("reboot");
 	rebooted(&mut world, 2);
+	world.has_event("breakpoint");
+	let told_of_never: Vec<Value> = (world.events.iter())
+		.filter(|event| event["event"] == "breakpoint" && event["body"]["breakpoint"]["id"] == never["id"])
+		.map(|event| event["body"]["breakpoint"].clone())
+		.collect();
+	assert!(
+		told_of_never.iter().all(|told| told["message"] == never["message"]),
+		"a breakpoint on a missing proc was told {:?}, not only {}",
+		told_of_never,
+		never["message"]
+	);
+	world.events.retain(|event| event["body"]["breakpoint"]["id"] != never["id"]);
 	let told = world.event("breakpoint")["body"]["breakpoint"].clone();
 	let line = world.marks.line("added_1");
 	assert_eq!(
@@ -43,12 +52,11 @@ fn told_after_reboot() {
 	world.resume_through("added");
 	ok("breakpoint verification after reboot");
 	world.end();
-	let _ = std::fs::remove_dir_all(&dir);
 }
 
 pub fn run() {
 	let mut a = World::start();
-	let pid = client::listed_world("dap_test_host.dmb");
+	let pid = cli::listed_world("dap_test_host.dmb");
 	let mut b = World::attach(pid);
 	b.catch_runtimes(false);
 
@@ -56,11 +64,9 @@ pub fn run() {
 	a.function_breakpoints(&["/proc/sc_middle"]);
 	b.break_on(&["middle_3"]);
 
-	// The scenario calls world.Reboot(): the world is loaded again in the
-	// same process, and each launcher connects to it again
 	a.run("reboot");
 	rebooted(&mut a, 2);
-	b.wait_output("The world restarted");
+	b.wait_output("Reconnected to the world");
 	a.catch_runtimes(true);
 	a.run("middle");
 	for (proc, mark) in [
@@ -86,7 +92,6 @@ pub fn run() {
 	a.catch_runtimes(false);
 	ok("restore runtime error filters");
 
-	// An expression reboots the world it's paused in
 	a.function_breakpoints(&[]);
 	b.break_on(&[]);
 	a.run("middle");
@@ -98,7 +103,6 @@ pub fn run() {
 	a.event("continued");
 	b.event("continued");
 	rebooted(&mut a, 3);
-	// The paused frame resumes in the old world after debugger shutdown.
 	assert_eq!(a.count("bad instruction"), 0, "a breakpoint was left in the old world's code");
 	a.run("middle");
 	a.stop_on("breakpoint", "/leaf", "leaf_1");
@@ -118,9 +122,8 @@ pub fn run() {
 	a.resume_through("middle");
 	ok("consecutive reboots");
 
-	// The process is killed
 	b.drop_events("continued");
-	client::kill_process(pid);
+	process::kill_process(pid);
 	a.event("terminated");
 	a.event("exited");
 	b.event("terminated");
@@ -129,15 +132,14 @@ pub fn run() {
 	b.end();
 
 	let mut a = World::start();
-	let pid = client::listed_world("dap_test_host.dmb");
+	let pid = cli::listed_world("dap_test_host.dmb");
 	let mut b = World::attach(pid);
 	a.run("quit");
 	a.event("terminated");
 	b.event("terminated");
-	// Both sessions should exit without reconnecting after shutdown.
 	for world in [&a, &b] {
 		assert!(
-			!world.output.contains("waiting to reconnect"),
+			!world.output.contains("Waiting to reconnect"),
 			"a session took the world's end for a lost connection:\n{}",
 			world.output
 		);

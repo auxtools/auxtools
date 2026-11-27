@@ -1,63 +1,40 @@
-//! Help pages assembled from prose and clap option definitions.
-//! Each page includes usage, options, behavior, output, exit codes and examples
-//! where applicable.
-
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 
-use super::{args::Unparsed, Failure, Result};
+use super::{
+	args::{self, Scope, Unparsed},
+	Failure, Result
+};
 
-/// A command's page
 pub struct Page {
-	/// The command, and its subcommand if it's one's: `["wait", "pause"]`
 	pub path: &'static [&'static str],
-	/// What it does, in the list of commands
 	pub brief: &'static str,
-	/// What it does, in a sentence
 	pub summary: &'static str,
-	/// Each form of its usage, a line each
 	pub usage: &'static str,
-	/// The `Arguments` section's lines, if it has arguments
 	pub arguments: &'static str,
-	/// The sections after the options, as they're printed
 	pub sections: &'static str
 }
 
-/// The commands in the order and the groups the first page lists them in
-const GROUPS: &[(&str, &[&str])] = &[
-	("World management", &["launch", "list", "status", "stop", "reboot", "reconnect", "log"]),
-	("Inspection", &["stack", "vars", "eval", "proc", "disassemble"]),
-	("Execution", &[
-		"pause",
-		"continue",
-		"step-over",
-		"step-in",
-		"step-out",
-		"wait",
-		"trace",
-		"profile"
-	]),
-	("Source code", &["check"]),
-	("Integration", &["dap", "help", "version"])
-];
-
 const STEP_SECTIONS: &str = "Behavior:
-  Requires a paused world. Resume execution and wait for a pause or confirmed
-  step completion. Report the resulting state and retain any resulting pause.
-  A step can complete with the world running if no frame remains to pause in.
-  An expired deadline stops waiting and returns exit code 2; it does not imply
-  step completion or automatically pause or resume the world.
+  Requires a paused world. Resumes execution and waits until the world pauses
+  again or the step completes. If the step pauses the world, it stays paused
+  after this command exits. If the last frame returns, execution continues.
+
+  On timeout, this command stops waiting and exits with code 2 without
+  pausing or resuming the world. A timeout does not mean the step completed.
 
 Output:
-  Execution state and pause details, using the shared execution fields from
-  status: pid, paused, reason, message, caught, changes, stack, and instruction.
-  On timeout, include the last observed state when available; do not infer
-  execution state from the absence of a pause event.
+  Reports the execution fields of status: pid, paused, reason, message,
+  caught, changes, stack, and instruction (populated only when stepping by
+  instruction).
+
+  On timeout, prints the last state the world reported if it answers within
+  2 seconds. An absent pause does not guarantee the world is running.
 
 Exit codes:
-  0  Execution paused or the step completed.
-  1  Step request failed.
-  2  Step deadline expired, or the world did not respond in time.
-  3  World exited or rebooted before the operation completed.";
+  0  The world paused, or the step completed.
+  1  The step failed.
+  2  The step timed out, or the world did not respond in time.
+  3  The world exited or rebooted before the step completed.";
 
 pub const PAGES: &[Page] = &[
 	Page {
@@ -65,45 +42,59 @@ pub const PAGES: &[Page] = &[
 		brief: "Start a world with debugging and hot reload enabled",
 		summary: "Start a compiled world with the debug library loaded.",
 		usage: "auxtools launch DMB [OPTIONS] [-- ARGS...]",
-		arguments: "DMB   Path to a compiled BYOND world.
-ARGS  Arguments passed to the BYOND program. Replace the
-      default -trusted and, for Windows DreamDaemon, -close.",
+		arguments: "DMB   Path to a compiled .dmb world.
+ARGS  Arguments for the BYOND host program, replacing the defaults
+      (-trusted, plus -close for dreamdaemon-gui on Windows).",
 		sections: "Behavior:
-  Foreground mode streams launcher and world output until the world exits.
-  Interrupt once to request graceful shutdown; interrupt again to force exit.
-  The launcher does not compile the DMB or pause execution. Other CLI commands
-  and editors can attach to the world. Use reboot to load a rebuilt DMB.
-  If the debug library cannot start in the world (an unsupported BYOND
-  build), the launcher says why and the world runs without it until stopped.
+  In the foreground, prints launcher and world output until the world exits.
+  Press Ctrl+C once for a graceful shutdown, or twice to terminate the
+  process.
+
+  The launcher neither builds the .dmb nor pauses execution, and other
+  auxtools commands or editors can attach while it runs. Use 'auxtools reboot'
+  to load a rebuilt .dmb.
+
+  If the debug library cannot start (for example, on an unsupported BYOND
+  build), the launcher reports the reason and the world continues running
+  without debugging until you stop it.
+
+  With --lcov or --cobertura, records line coverage from the world's first
+  line until it exits, combining reboots into one report written on exit.
+  The world must be compiled with debug information (#define DEBUG). If the
+  world crashes or is terminated instead of shutting down, no report is
+  written, and the launcher exits with code 1 if the world's exit code was 0.
 
 Output:
-  Detached mode reports the world's process ID, the launcher's process ID, and
-  the launcher's log file. JSON contains pid, launcher, log, and unavailable:
-  why the debug library could not start, or null.
+  In detached mode, prints the world PID, the launcher PID, and the launcher
+  log file. JSON contains pid, launcher, log, and unavailable (the reason the
+  debug library could not start, or null).
 
 Exit codes:
-  0  Startup completed in detached mode, or the foreground world exited with 0.
+  0  Detached world started, or foreground world exited with code 0.
   1  Launch failed.
-  2  Detached startup did not complete within 120 seconds; the world was ended.
+  2  Detached startup did not complete within 120 seconds, so the world was
+     stopped.
   4  Foreground world exited with a nonzero code or was terminated."
 	},
 	Page {
 		path: &["list"],
-		brief: "List worlds with the debug library loaded",
+		brief: "List local worlds with the debug library loaded",
 		summary: "List local worlds with the debug library loaded.",
 		usage: "auxtools list [--json]",
 		arguments: "",
 		sections: "Output:
-  Text displays a table of worlds. JSON returns an array of world records.
-  Both include process IDs, program and world information, protocol versions,
-  protocol compatibility, and responsiveness. An empty JSON array means no
-  worlds were found. Worlds with compatible=false require a matching CLI version.
-  A world record contains pid, program, dmb, args, cwd, protocol, compatible,
-  responsive, and unavailable. responsive is false if the world did not answer
-  within 5 seconds; its dmb, args, and cwd are then unknown. Incompatible
-  worlds are not queried and have responsive=null. unavailable says why the
-  debug library could not start in the world, which can then only be stopped,
-  and is null otherwise."
+  Text output prints a table of worlds, followed by any startup error lines.
+  JSON output is an array of world records containing pid, program, dmb, args,
+  cwd, protocol, compatible, responsive, and unavailable (empty if none are
+  found).
+
+  compatible is false when a world uses a different debug protocol. Attach
+  using an auxtools CLI with the same protocol. Incompatible worlds are not
+  queried, so their responsive field is null.
+
+  responsive is false when a world does not answer within 5 seconds, leaving
+  dmb, args, and cwd unknown. unavailable holds the reason the debug library
+  could not start, or null. Such worlds can only be stopped."
 	},
 	Page {
 		path: &["status"],
@@ -112,56 +103,68 @@ Exit codes:
 		usage: "auxtools [--pid PID] status [--json]",
 		arguments: "",
 		sections: "Output:
-  Text and JSON include execution state, pause details when available, uptime,
-  world.time, and the latest hot reload result.
+  Shows the execution state, pause details (including up to 20 stack frames)
+  when paused, uptime, world.time, load count, and the latest hot reload
+  result.
+
   JSON contains pid, paused, reason, message, caught, changes, stack,
-  instruction, uptime_ms, world_time, loads, and last_reload.
-  uptime_ms measures time since the latest world load; world_time is in
-  deciseconds. loads counts the worlds this process has loaded: 1, plus one
-  for each reboot. last_reload is a reload journal entry, or null if none exists.
-  reason is \"breakpoint\", \"step\", \"pause\", \"runtime\", or \"change\" when paused.
-  Runtime pauses populate message and caught; watch pauses populate changes
-  with name, old, and new. Instruction steps include offset and text.
-  Inapplicable scalar fields are null; changes and stack are empty arrays
-  when unavailable. A running world has paused=false and no pause details."
+  instruction, uptime_ms, world_time, loads, and last_reload. uptime_ms is the
+  time since the latest world load, world_time is in deciseconds, loads counts
+  world loads in this process (1 initially, plus 1 per reboot), and
+  last_reload is a reload journal entry or null.
+
+  When paused, reason is \"breakpoint\", \"step\", \"pause\", \"runtime\", or
+  \"change\". A runtime error sets message and caught. A data breakpoint sets
+  changes (entries with name, old, and new). instruction is always null here
+  (it is set only by step-over --instruction and step-in --instruction).
+  Inapplicable fields are null, or empty arrays for changes and stack. A
+  running world reports paused=false with no pause details."
 	},
 	Page {
 		path: &["stop"],
-		brief: "Request shutdown and wait for the process to exit",
+		brief: "Request graceful shutdown and wait for exit",
 		summary: "Request graceful shutdown and wait for the world process to exit.",
 		usage: "auxtools [--pid PID] stop [--timeout SECONDS] [--kill [--kill-timeout SECONDS]] [--json]",
 		arguments: "",
 		sections: "Behavior:
-  Calls world.Del(). A world started by launch also shuts down its launcher.
-  If world.Del() returns without ending the world, the debugger still shuts
-  down. In launched worlds, a runtime error in world.Del() instead leaves
-  the debugger available, and stop reports the failure.
-  Include --kill in the initial request for a forced fallback.
-  With --kill, forced termination starts when the graceful deadline passes,
-  or at once when world.Del() fails. A world the debug library could not
-  start in cannot call world.Del(), and is terminated at once.
-  Success depends on the process exiting within the additional kill timeout.
+  Calls world.Del(), which also shuts down the launcher if the world was
+  started by launch. If world.Del() returns without ending the world, the
+  debug server still shuts down. In a launched world, an uncaught runtime
+  error in world.Del() leaves the debug server running and stop reports the
+  failure.
+
+  Pass --kill to terminate the process if --timeout expires or world.Del()
+  fails with a runtime error. You can also retry with --kill as long as the
+  debug server remains reachable.
+
+  If the debug library could not start, world.Del() cannot run, so stop
+  terminates the process immediately even without --kill. After termination,
+  the process must exit within --kill-timeout (5 seconds by default).
 
 Output:
-  JSON contains pid, stopped, and killed. killed is true when the process was
-  terminated.
+  JSON contains pid, stopped, and killed (true when the process was forcibly
+  terminated).
 
 Exit codes:
-  0  Process exited.
+  0  World process exited.
   1  Shutdown or forced termination failed.
-  2  Graceful shutdown timed out without --kill, or forced termination timed out."
+  2  Graceful shutdown timed out without --kill, or forced termination timed
+     out."
 	},
 	Page {
 		path: &["reboot"],
-		brief: "Reboot a world and wait for debugger readiness",
-		summary: "Reboot the world and wait for it to start running.",
+		brief: "Reboot a world and wait for it to start running",
+		summary: "Reboot the world and wait for it to start running again.",
 		usage: "auxtools [--pid PID] reboot [--timeout SECONDS] [--json]",
 		arguments: "",
 		sections: "Behavior:
-  Calls world.Reboot() to reload the DMB. Existing debugger connections close.
-  Worlds launched with hot reload wait for reloads to be restored before
-  running any code. This command returns when the new world starts running.
-  This command initiates a reboot; wait reboot only observes one.
+  Calls world.Reboot() to reload the .dmb, closing existing debug connections.
+  In a world started by launch with hot reload, the launcher restores active
+  reloads at startup. Reloads that need a resource absent from the build wait
+  until world/New along with any later queued reloads.
+
+  Returns once the new world starts running. To wait for a reboot without
+  triggering one, use wait reboot.
 
 Output:
   JSON contains pid and rebooted.
@@ -174,69 +177,75 @@ Exit codes:
 	},
 	Page {
 		path: &["reconnect"],
-		brief: "Reconnect clients to load a changed skin or client script",
+		brief: "Reconnect clients to load a changed skin or script",
 		summary: "Reconnect clients to load the current skin and client script.",
 		usage: "auxtools [--pid PID] reconnect [--timeout SECONDS] [--json]",
 		arguments: "",
 		sections: "Behavior:
-  Hot reload gives a changed .dmf skin or client script to clients when they
-  log in; connected clients keep what they have. This command asks each one
-  to reconnect, as DreamSeeker's .reconnect does. The world sees each client log
-  out and in again. A world DreamSeeker hosts is rebooted instead, since its
-  own window can't reconnect without restarting the world; the command then
-  returns when the new world starts running.
+  Hot reload sends an updated .dmf skin or client script only when clients log
+  in, so already-connected clients keep the previous version. This command
+  asks each connected client to reconnect (equivalent to DreamSeeker's
+  .reconnect), causing each client to log out and back in.
+
+  When DreamSeeker hosts the world, its window cannot reconnect without
+  restarting the world, so this command reboots the world instead and waits
+  for it to start running.
 
 Output:
-  JSON contains pid and either reconnected, the number of clients asked, or
-  rebooted.
+  JSON contains pid and either reconnected (the number of clients asked to
+  reconnect) or rebooted (when DreamSeeker hosts the world).
 
 Exit codes:
-  0  Clients asked to reconnect, or the world rebooted and started running.
+  0  Clients were asked to reconnect, or the world rebooted and started.
   1  Request failed.
-  2  Reboot timed out.
-  3  World process exited instead of rebooting."
+  2  Reboot timed out, or the world did not respond in time.
+  3  World process exited or connection ended."
 	},
 	Page {
 		path: &["log"],
-		brief: "Read or follow world events",
+		brief: "Read or follow world journal events",
 		summary: "Read or follow the world's event journal.",
 		usage: "auxtools [--pid PID] log [OPTIONS]",
 		arguments: "",
 		sections: "Behavior:
-  With no category options, include all categories. Multiple categories are
-  combined. Entries are ordered oldest first; sequence numbers survive reboots.
-  The journal retains only the most recent few thousand entries.
-  --follow reconnects across reboots and ends when the world exits.
-  Runtime logging does not require pausing the world.
-  Captured output is available from DreamDaemon (dd.exe on Windows);
-  DreamSeeker and windowed DreamDaemon do not expose it to the launcher.
+  Shows all categories by default, or only the categories selected by flags.
+  Entries appear oldest first, with entry numbers continuing across reboots.
+  The journal retains only the latest 4,000 entries.
+
+  --follow reconnects automatically across reboots and exits with code 0 when
+  the world exits. Runtime errors are recorded without pausing execution.
+
+  World output is captured only for worlds started by the launcher using
+  dreamdaemon (dd.exe on Windows), because dreamseeker and dreamdaemon-gui do
+  not pass their output to the launcher.
 
 Output:
-  JSON entries contain number, time (Unix milliseconds), world_time
-  (deciseconds), kind, and event-specific fields.
-  kind is \"runtime\", \"reload\", \"output\", \"world\", or \"spawned\".
+  Each JSON Lines entry contains number, time (Unix milliseconds), world_time
+  (deciseconds), kind, and kind-specific fields. kind is \"runtime\",
+  \"reload\", \"output\", \"world\", or \"spawned\".
 
 Exit codes:
-  0  Entries were printed; with --follow, the world exited.
+  0  Entries were printed, or with --follow, the world exited.
   1  Command failed.
-  2  The world did not respond in time."
+  2  World did not respond in time."
 	},
 	Page {
 		path: &["stack"],
-		brief: "Show stack frames",
-		summary: "Show stack frames, starting with the innermost frame.",
+		brief: "Show paused stack frames",
+		summary: "Show stack frames for a paused world, innermost first.",
 		usage: "auxtools [--pid PID] stack [--all] [--json]",
 		arguments: "",
 		sections: "Behavior:
   Requires a paused world.
 
 Output:
-  JSON is an array of frames: proc, file, line, offset, and old_code.
-  With --all, JSON is an array of stacks: id, name, sleeping, and frames."
+  JSON is an array of frames, each with proc, file, line, offset, and
+  old_code. With --all, JSON is an array of stacks, each with id, name,
+  sleeping, and frames."
 	},
 	Page {
 		path: &["vars"],
-		brief: "Show frame arguments, local variables, and optional globals",
+		brief: "Show frame arguments, locals, and optional globals",
 		summary: "Show arguments and local variables for a paused stack frame.",
 		usage: "auxtools [--pid PID] vars [--frame N] [--globals] [--json [--depth N]]",
 		arguments: "",
@@ -244,111 +253,120 @@ Output:
   Requires a paused world.
 
 Output:
-  Text shows the first 200 characters of a long value and its length; use
-  --json or eval for the whole value.
-  JSON contains arguments, locals, and optionally globals, using the same
-  value encoding as eval. Each variable consumes one expansion level, so the
-  default expands lists but does not expand object variables."
+  Text output truncates values longer than 250 characters to their first 200
+  characters and shows the full length. Use --json or eval for full values.
+
+  JSON contains arguments, locals, and (with --globals) globals, encoded as in
+  eval. Each variable consumes one level of --depth, so at the default depth
+  lists expand while object variables do not."
 	},
 	Page {
 		path: &["eval"],
-		brief: "Evaluate a DM expression",
+		brief: "Evaluate a DM expression or proc body",
 		summary: "Evaluate a DM expression in the world or a paused stack frame.",
 		usage: "auxtools [--pid PID] eval EXPRESSION [OPTIONS]
 auxtools [--pid PID] eval --file FILE [OPTIONS]
 auxtools [--pid PID] eval - [OPTIONS]",
 		arguments: "",
 		sections: "Behavior:
-  Use exactly one input source. '-' reads stdin.
-  Put '--' before an expression that starts with '-', unless it is a number.
-  In a paused world, expressions can access frame variables and src.
-  In a running world, expressions can access globals and call procs.
-  Several statements form a proc body: separate them with newlines or ';'.
-  A proc body yields its return value or final expression. A final statement,
-  including an assignment or increment, leaves `.` as the result.
-  Expressions can use the project's #define macros when the world was started
-  by launch with hot reload enabled.
-  Evaluation can change world state through assignments and proc calls.
-  Evaluation errors exit with code 1; runtime diagnostics include locations
-  and the call stack when available. A callee runtime error ends only that
-  proc and returns null to the caller, as in DM. It is reported on stderr
-  without failing the evaluation.
-  Evaluated code cannot sleep unless --spawn is set. Spawned code runs outside
-  any frame (--src can set src), pauses at breakpoints, and records its result
-  in the journal (log --spawned). In a paused world it runs after execution
-  resumes. --spawn requires a world started by launch.
-  In launched worlds, auxtools_kept() stores values between evaluations
-  until reboot: auxtools_kept()[\"m\"] = m.
+  Provide exactly one input: EXPRESSION, --file FILE, or '-' to read stdin.
+  Put '--' before an expression starting with '-' unless it is a number.
+
+  In a paused world, expressions can access the selected frame's variables and
+  src. In a running world, they can access globals and call procs. Separate
+  multiple statements with newlines or ';' to form a proc body, which returns
+  its explicit return value or last expression (or '.', if the final statement
+  is an assignment, increment, or other non-value statement).
+
+  If launch started the world with hot reload, expressions can use the
+  project's #define macros. Evaluation can mutate world state through
+  assignments and proc calls. An error in the expression exits with code 1 and
+  prints the location and call stack when known. A runtime error inside a
+  called proc terminates only that proc (returning null to its caller as in
+  DM), prints to stderr, and lets evaluation continue.
+
+  Direct evaluation cannot sleep or move to the background (such as via
+  world.loop_checks or set background = 1). Pass --spawn to run such code on a
+  launched world. Spawned code runs outside any frame (use --src to set src),
+  pauses at breakpoints, runs after resuming if the world is paused, and logs
+  its result to the journal (readable via log --spawned). In a launched world,
+  auxtools_kept() persists values between evaluations until reboot (for
+  example, auxtools_kept()[\"m\"] = m).
 
 Output:
-  JSON represents numbers, text, and null directly. Lists use arrays, objects
-  for text-keyed associations, or arrays of {key, value} pairs. Objects use
-  {ref, type, name} with vars when expanded. Type paths use {path}; remaining
-  values use {kind, text}. Non-finite numbers use {number: \"inf\"},
-  {number: \"-inf\"}, or {number: \"nan\"}.
-  Lists expand at depth >= 1; object variables expand at depth >= 2.
-  Each nested value reduces the depth by one. Unexpanded lists use
-  {list: true, len}; unexpanded objects omit vars.
-  With --spawn and without --wait, the output is the spawn number: {spawn}.
+  JSON emits numbers, text, and null directly. Non-finite numbers become
+  {number: \"inf\"}, {number: \"-inf\"}, or {number: \"nan\"}. Lists without
+  associated values become arrays, lists whose keys are all distinct strings
+  become objects, and all other lists become arrays of {key, value} pairs.
+  Objects are {ref, type, name} (plus vars when expanded), type paths are
+  {path}, and other values are {kind, text}.
+
+  --depth controls expansion depth for direct evaluation: lists expand at
+  depth 1+, object variables at depth 2+, and each nesting level consumes one
+  depth level. Unexpanded lists render as {list: true, len}, and unexpanded
+  objects omit vars. With --spawn and no --wait, outputs the spawn number
+  (JSON: {spawn}). With --spawn --wait --json, results always render at depth
+  1 regardless of --depth.
 
 Exit codes:
   0  Evaluation completed, or the code was spawned.
-  1  Evaluation failed; with --wait, the spawned code ended in a runtime error.
-  2  --wait deadline expired (the spawned code keeps running), or the world
-     did not respond in time.
-  3  World exited or rebooted before the spawned code finished (--wait)."
+  1  Evaluation failed, or with --wait, the spawned code failed.
+  2  --wait timed out, or the world did not respond in time (spawned code
+     continues running).
+  3  World exited or rebooted before evaluation or --wait finished."
 	},
 	Page {
 		path: &["proc"],
-		brief: "Show a proc's source location, definitions, and reload status",
+		brief: "Show a proc's location, definitions, and reload status",
 		summary: "Show a proc's source location, definition count, and hot reload status.",
 		usage: "auxtools [--pid PID] proc /PATH[#N] [--json]",
-		arguments: "/PATH  Proc path, with or without /proc/: /mob/proc/attack or /mob/attack.
-       Procs without a path go by the names stacks show: (global init),
-       (in list) and (var initializer).
+		arguments: "/PATH  Proc path, with or without /proc/ (for example, /mob/proc/attack
+       or /mob/attack). For unnamed procs, use the stack trace name:
+       (global init), (in list), or (var initializer).
 #N     Zero-based definition index. [default: 0]",
 		sections: "Output:
-  JSON contains proc, file, line, definitions, and reloaded.
-  reloaded is null, \"lines\", \"code\", or \"added\"."
+  JSON contains proc, file, line, definitions, and reloaded (null, \"lines\",
+  \"code\", or \"added\")."
 	},
 	Page {
 		path: &["disassemble"],
-		brief: "Show a proc's current bytecode",
+		brief: "Disassemble a proc's current bytecode",
 		summary: "Disassemble a proc's current bytecode.",
 		usage: "auxtools [--pid PID] disassemble /PATH[#N] [--json]",
-		arguments: "/PATH  Proc path, with or without /proc/, or a name stacks show for
-       a proc without a path, such as (global init).
+		arguments: "/PATH  Proc path, with or without /proc/, or an unnamed proc name such as
+       (global init).
 #N     Zero-based definition index. [default: 0]",
 		sections: "Output:
-  Instructions include bytecode offsets, instruction text, and source lines.
-  After a hot reload, this shows the updated bytecode.
-  JSON contains proc, file, and instructions; each instruction contains
-  offset, text, and line."
+  Lists each instruction with its bytecode offset, text, and source line,
+  reflecting any hot-reloaded bytecode.
+
+  JSON contains proc, file, and instructions (entries with offset, text, and
+  line)."
 	},
 	Page {
 		path: &["pause"],
-		brief: "Pause execution and report the location",
-		summary: "Pause execution and report the location.",
+		brief: "Pause execution and report the current location",
+		summary: "Pause execution and report the current location.",
 		usage: "auxtools [--pid PID] pause [--hold-max SECONDS] [--json]",
 		arguments: "",
 		sections: "Behavior:
-  The world remains paused after the command exits. Use continue to resume,
-  or set --hold-max to limit the pause when no debugger is connected.
-  If the world is already paused, retain that pause and report it.
+  Keeps the world paused after this command exits. Use continue to resume, or
+  pass --hold-max to resume automatically after SECONDS with no debugger
+  connected. If the world is already paused, keeps the pause and reports it.
 
 Output:
-  Execution state and pause details, using the shared execution fields from
-  status: pid, paused, reason, message, caught, changes, stack, and instruction."
+  Reports the execution fields of status: pid, paused, reason, message,
+  caught, changes, stack, and instruction."
 	},
 	Page {
 		path: &["continue"],
-		brief: "Resume execution",
+		brief: "Resume a paused world",
 		summary: "Resume execution of a paused world.",
 		usage: "auxtools [--pid PID] continue [--json]",
 		arguments: "",
 		sections: "Behavior:
-  Requires a paused world.
-  Return after the resume request completes; do not wait for another pause.
+  Requires a paused world. Returns once execution resumes without waiting for
+  another pause.
 
 Output:
   JSON contains pid and resumed."
@@ -380,56 +398,60 @@ Output:
 	Page {
 		path: &["wait"],
 		brief: "Wait for a pause, hot reload, or reboot",
-		summary: "Wait for a debugger or world lifecycle event.",
+		summary: "Wait for a pause, hot reload, or reboot.",
 		usage: "auxtools [--pid PID] wait pause [OPTIONS]
 auxtools [--pid PID] wait reload [OPTIONS]
 auxtools [--pid PID] wait reboot [OPTIONS]",
 		arguments: "",
 		sections: "Commands:
-  pause   Wait for a pause, optionally installing breakpoints or watches.
-  reload  Wait for a hot reload attempt and report its result.
-  reboot  Wait for a world load and debugger readiness.
+  pause   Wait for any pause, or for breakpoints, changes, or runtime errors
+  reload  Wait for a hot reload attempt and report its result
+  reboot  Wait for a reboot and for the debug server to be ready
 
-Specify pause, reload, or reboot. Bare `auxtools wait` shows this help.
-Use `auxtools wait COMMAND --help` for options."
+Specify pause, reload, or reboot. 'auxtools wait' alone prints this help and
+exits with code 1. Run 'auxtools wait COMMAND --help' for options."
 	},
 	Page {
 		path: &["wait", "pause"],
-		brief: "Wait for a pause, optionally installing breakpoints or watches.",
+		brief: "Wait for any pause, or for breakpoints, changes, or runtime errors",
 		summary: "Wait for execution to pause and report the location and reason.",
 		usage: "auxtools [--pid PID] wait pause [OPTIONS]",
 		arguments: "",
 		sections: "Behavior:
-  With no triggers, observe any pause. With breakpoints, watches or
-  --runtimes, wait for a matching trigger and ignore other pauses.
-  If already paused, return immediately unless --change is specified.
-  With --change on a paused world, resolve watches in the selected frame,
-  resume execution, and wait for a pause.
-  Watches support object variables, list entries, globals, and proc variables.
-  Breakpoints and watches belong to this invocation and are removed on exit.
-  Invalid breakpoint locations fail before waiting. Resolved breakpoint
-  locations are reported on stderr and included in JSON output.
-  By default, the resulting pause persists after exit. --no-hold does not
-  request a retained pause; an existing hold or another debugger can still
-  keep the world paused.
-  --if does not filter runtime errors or pauses caused by other clients;
-  --runtime-filter selects errors by message: 'bounds, null' matches either
-  substring; '!libdreamluau' excludes messages containing libdreamluau.
+  Without --break, --change, or --runtimes (including flags that imply it),
+  waits for any pause. With one or more of them, waits only for pauses they
+  cause and ignores others.
+
+  If the world is already paused and --change is not given, returns
+  immediately (after validating and placing any --break locations). With
+  --change on a paused world, resolves data breakpoints in the selected frame,
+  resumes execution, and waits. Data breakpoints support object variables,
+  list entries, globals, and proc variables. All temporary breakpoints and
+  data breakpoints are removed on exit.
+
+  Invalid breakpoint locations fail before waiting begins, and resolved
+  breakpoint locations are printed to stderr and included in JSON output. By
+  default, the world stays paused after this command exits. Pass --no-hold to
+  skip holding the pause (another debugger or an existing hold can still keep
+  the world paused).
+
+  --if does not filter runtime errors or pauses from other clients.
+  --runtime-filter matches messages by comma-separated substrings: 'bounds,
+  null' matches either, and '!libdreamluau' excludes matching messages.
 
 Input:
-  For EXPR and CONDITION, @FILE reads text from a file.
-  Use @@ to represent a literal leading @.
+  For EXPR and CONDITION, @FILE reads the text from FILE. Write @@ for text
+  starting with @.
 
 Output:
-  The shared execution fields from status plus already, breakpoints, and watching.
-  already indicates that the world was paused before waiting.
-  breakpoints lists requested and resolved locations.
-  watching lists watch names and their initial values.
+  Reports the execution fields of status plus already (true if already
+  paused), breakpoints (requested and resolved locations), and watching
+  (data breakpoint targets and initial values).
 
 Exit codes:
   0  World paused, or was already paused.
   1  Setup or command failed.
-  2  Wait timed out.
+  2  Wait timed out, or the world did not respond in time.
   3  World exited or rebooted before a pause was reported.
 
 Examples:
@@ -440,103 +462,110 @@ Examples:
 	},
 	Page {
 		path: &["wait", "reload"],
-		brief: "Wait for a hot reload attempt and report its result.",
+		brief: "Wait for a hot reload attempt and report its result",
 		summary: "Wait for a hot reload attempt and report whether it was applied.",
 		usage: "auxtools [--pid PID] wait reload [--since N] [--timeout SECONDS] [--json]",
 		arguments: "",
 		sections: "Behavior:
-  Observe hot reload; do not trigger it or pause execution.
-  Start waiting before saving source changes, or use --since with a previously
-  recorded journal sequence number to include an attempt that already finished.
-  Historical events are available only while retained in the journal.
+  Waits for the next hot reload attempt without triggering a reload or pausing
+  the world. Start this command before saving source files, or pass --since N
+  with an earlier journal entry number to match a reload that has already
+  finished (while that entry remains in the journal). Reconnects across
+  reboots.
 
 Output:
   One reload journal entry, with the same fields as log --reloads.
 
 Exit codes:
   0  Reload was applied.
-  1  Reload was rejected or the command failed.
-  2  Wait timed out.
-  3  World exited before a reload result was received."
+  1  Reload was rejected or partially applied, or the command failed.
+  2  Wait timed out, or the world did not respond in time.
+  3  World exited before the reload result arrived."
 	},
 	Page {
 		path: &["wait", "reboot"],
-		brief: "Wait for a world load and debugger readiness.",
-		summary: "Wait for a world load and debugger readiness.",
+		brief: "Wait for a reboot and for the debug server to be ready",
+		summary: "Wait for the world to reboot and for its debug server to be ready.",
 		usage: "auxtools [--pid PID] wait reboot [--since N] [--timeout SECONDS] [--json]",
 		arguments: "",
 		sections: "Behavior:
-  Observe a reboot; do not initiate it or pause execution.
-  Reconnect after the reboot and return when the new world starts running,
-  after its launcher has reapplied hot reload changes.
-  With --since, a retained world-load event can satisfy the wait immediately.
+  Waits for a reboot without starting one or pausing the world. After the
+  reboot, reconnects and returns once the new world starts running (with
+  startup hot reload changes restored). With --since N, a world-load entry
+  already in the journal after N ends the wait immediately.
 
 Output:
   One world-load journal entry, with the same fields as log --world.
 
 Exit codes:
-  0  World-load event received from the responding debugger.
+  0  World loaded and its debug server responded.
   1  Command failed.
-  2  Wait timed out.
-  3  World exited before the operation completed."
+  2  Wait timed out, or the world did not respond in time.
+  3  World exited before the reboot completed."
 	},
 	Page {
 		path: &["trace"],
-		brief: "Log or count breakpoint hits without pausing execution",
+		brief: "Log or count breakpoint hits without pausing",
 		summary: "Log or count breakpoint hits without pausing execution.",
 		usage: "auxtools [--pid PID] trace LOCATION... [OPTIONS]",
-		arguments: "LOCATION  FILE:LINE or /proc/path[#N]. Specify one or more locations.
-          #N selects a zero-based definition. [default: 0]",
+		arguments: "LOCATION  One or more FILE:LINE or /proc/path[#N] locations.
+          #N selects a zero-based definition index. [default: 0]",
 		sections: "Behavior:
-  Default output identifies each hit location and caller.
-  --by suppresses per-hit output and sorts counts from highest to lowest.
-  --by and --log are mutually exclusive.
-  If both --for and --count are set, stop when either limit is reached.
-  Condition errors skip the hit, report a diagnostic once, and increment the
-  skipped count. Grouping expression errors are counted under the error text.
-  Trace breakpoints are removed when this command exits.
+  Prints the location and caller of each hit by default. With --by, suppresses
+  per-hit lines and prints counts at exit, highest first (--by and --log
+  cannot be used together). With both --for and --count, stops at whichever
+  limit is reached first.
+
+  If --if fails with an error, the hit is skipped, counted as skipped, and the
+  error is printed once. If --by EXPR fails, the hit is counted under the
+  error text. Temporary breakpoints are removed on exit.
 
 Input:
-  For MESSAGE, CONDITION, and EXPR, @FILE reads text from a file.
-  Use @@ to represent a literal leading @.
+  For MESSAGE, CONDITION, and EXPR, @FILE reads the text from FILE. Write @@
+  for text starting with @.
 
 Exit codes:
-  0  Duration or hit limit reached, or interrupted with Ctrl-C.
+  0  Duration or hit limit reached, or interrupted with Ctrl+C.
   1  Setup or command failed.
-  2  The world did not respond in time.
+  2  World did not respond in time.
   3  World exited or rebooted."
 	},
 	Page {
 		path: &["profile"],
-		brief: "Profile instruction execution",
-		summary: "Measure execution time by proc, source line and instruction.",
+		brief: "Profile instruction execution time",
+		summary: "Measure execution time by proc, source line, and instruction.",
 		usage: "auxtools [--pid PID] profile [/PATH[#N]...] [OPTIONS]",
-		arguments: "/PATH  Proc to measure, with or without /proc/. Specify any number.
+		arguments: "/PATH  One or more procs to measure, with or without /proc/.
        [default: every proc]
 #N     Zero-based definition index. [default: 0]",
 		sections: "Behavior:
-  Profile until --for expires or Ctrl-C, then show the report.
-  Profiling slows execution. Only one profile can run per world.
-  Calls from eval are included; sleep and engine work between runs are excluded.
-  Self time covers an instruction's work until the next instruction starts.
-  Time inside called procs is separate; calls that sleep are excluded from it.
-  The cheapest instruction's average time is subtracted as estimated overhead.
+  Profiles until --for expires or you press Ctrl+C, then prints the report.
+  Profiling slows execution, and only one profile can run in a world at a
+  time.
+
+  Includes code run by eval, while excluding sleeping time and BYOND work
+  between DM runs. Each instruction's self time lasts until the next
+  instruction begins. Time in called procs is tracked separately and excludes
+  calls that sleep. Profiler overhead is estimated from the cheapest sampled
+  instruction's average time and subtracted.
 
 Output:
-  Without proc paths, list the slowest procs and source lines.
-  With proc paths, show their instructions by source line: hits, share of the
-  proc's self time, nanoseconds per hit, and time in calls per hit.
-  --html adds an interactive report; --json prints structured data.
-  JSON contains seconds, ended (\"time\" or \"interrupted\"), overhead_ns,
-  instructions, ns, and procs. Each proc contains proc, override, old_code,
-  file, line, calls, instructions, ns, callee_ns, and listing: null outside
-  --top, else entries with offset, text, line, source, hits, ns, and callee_ns.
-  Instruction listings are limited by --top unless proc paths are given.
+  Without proc paths, lists the slowest procs and source lines (up to --top of
+  each). With proc paths, prints the proc table followed by per-instruction
+  listings grouped by source line, showing offset, hits, share of proc self
+  time, nanoseconds per hit, and average call time per hit.
+
+  --html also writes an interactive HTML report. --json emits one JSON object
+  with seconds, ended (\"time\" or \"interrupted\"), overhead_ns,
+  instructions, ns, and procs. Each proc has proc, override, old_code, file,
+  line, calls, instructions, ns, callee_ns, and listing (entries with offset,
+  text, line, source, hits, ns, and callee_ns). Without proc paths, listing is
+  null for procs outside --top.
 
 Exit codes:
-  0  Duration reached, or interrupted with Ctrl-C.
+  0  Duration reached, or interrupted with Ctrl+C.
   1  Setup or command failed.
-  2  The world did not respond in time.
+  2  World did not respond in time.
   3  World exited or rebooted."
 	},
 	Page {
@@ -544,36 +573,40 @@ Exit codes:
 		brief: "Check project source for known BYOND bugs",
 		summary: "Report known BYOND bugs detected in project source.",
 		usage: "auxtools check [DME] [OPTIONS]",
-		arguments: "DME  Path to the source project.
+		arguments: "DME  Path to the .dme project file.
      [default: the only .dme in the current directory]",
 		sections: "Behavior:
-  Compile every proc and report known bugs affecting the selected BYOND build.
-  No DMB is written, and BYOND need not be installed or running.
-  Unsupported procs and parse errors are reported as unchecked and do not
-  change the exit code. Text output lists them on stderr; JSON includes them.
+  Compiles every proc and reports known bugs affecting the selected BYOND
+  build, without writing a .dmb or requiring BYOND to be installed.
+
+  Parse errors and procs that fail to compile are reported as not checked
+  without changing the exit code. Text output lists them on stderr and JSON
+  output includes them.
 
 Output:
-  Print FILE:LINE: PROC: diagnostic, then a count of issues and checked procs.
-  Paths are relative to the project directory.
-  JSON contains byond, procs, found, not_checked, and parse_errors.
-  Each entry of found has file, line, proc, override, and text;
-  each entry of not_checked has file, proc, override, and error; parse_errors
-  are FILE:LINE: message strings. procs counts the procs checked.
+  Lists each issue with its file, optional line number, proc, and message
+  (paths relative to the project directory), followed by a summary of issues
+  and checked procs (printed to stderr when issues are found).
+
+  JSON contains byond, procs (checked count), found, not_checked, and
+  parse_errors. found entries have id (stable across wording changes), file,
+  line, proc, override, and text. not_checked entries have file, proc,
+  override, and error. parse_errors entries are FILE:LINE: TEXT strings.
 
 Exit codes:
   0  No known bugs found.
-  1  Check failed: the project could not be read.
+  1  Project could not be read.
   5  Known BYOND bugs found."
 	},
 	Page {
 		path: &["dap"],
-		brief: "Serve the Debug Adapter Protocol over stdin and stdout",
+		brief: "Serve the Debug Adapter Protocol over stdio",
 		summary: "Serve the Debug Adapter Protocol over stdin and stdout.",
 		usage: "auxtools dap",
 		arguments: "",
 		sections: "Behavior:
-  Accept editor requests to launch or attach to worlds, debug execution,
-  and hot reload source changes. Stdout is reserved for DAP messages."
+  Handles editor requests to launch or attach to worlds, debug them, and
+  hot-reload source changes. Writes only DAP messages to stdout."
 	},
 	Page {
 		path: &["help"],
@@ -599,10 +632,8 @@ Aliases: --version, -V"
 	}
 ];
 
-/// Extra option rows for values that need their own explanation.
-const MORE_ROWS: &[(&str, &str, &str, &str)] = &[("trace", "by", "--by caller", "Group hits by the calling proc and source line.")];
+const MORE_ROWS: &[(&str, &str, &str, &str)] = &[("trace", "by", "--by caller", "Count hits by calling proc and source line.")];
 
-/// The first page: every command, a line each
 pub fn overview() -> String {
 	let mut text = String::from(
 		"auxtools - Launch, inspect, and debug BYOND worlds
@@ -612,70 +643,71 @@ Usage:
   auxtools help [COMMAND [SUBCOMMAND]]
 "
 	);
-	let width = GROUPS
+	let width = args::GROUPS
 		.iter()
-		.flat_map(|(_, names)| names.iter())
-		.map(|name| name.len())
+		.flat_map(|(_, commands)| commands.iter())
+		.map(|(name, _)| name.len())
 		.max()
 		.unwrap_or(0);
-	for (group, names) in GROUPS {
+	for (group, commands) in args::GROUPS {
 		text += &format!("\n{}:\n", group);
-		for name in *names {
+		for (name, _) in *commands {
 			let brief = page(&[name]).map_or("", |page| page.brief);
 			text += &format!("  {:width$}  {}\n", name, brief);
 		}
 	}
-	text += "
+	text += &format!(
+		"
 World selection:
-  --pid PID    Select a world process. Required when selection is ambiguous.
-               Without --pid, select the only compatible world.
-               Use `auxtools list` to find process IDs.
+  --pid PID    Select a world process. When omitted, uses the only compatible
+               world. Required when multiple compatible worlds are running.
+               Run 'auxtools list' to find process IDs.
 
 Responses:
   --response-timeout SECONDS
-               Set the wait for each response from the world. [default: 30]
-               Exit with code 2 if the world does not respond in time.
-               Event waits are separate: use --timeout or --for where
-               available. log --follow has no event deadline.
+               {response_timeout}
+               Exits with code 2 if the world does not respond in time. Does
+               not limit event waits. Use --timeout or --for instead
+               (log --follow waits indefinitely).
 
 Output:
-  --json       Request structured output where supported.
-               log and trace emit JSON Lines; other commands emit one JSON value.
-               Default: text. See command help for details.
+  --json       Emit JSON instead of text where supported. log and trace emit
+               JSON Lines. Other commands emit a single JSON value. See each
+               command's help for its fields.
 
-Pause lifetime:
-  pause, step-over, step-in, step-out, and wait pause retain the resulting pause.
-  Use continue to resume. --hold-max SECONDS limits a retained pause when no
-  debugger is connected. Default: AUXTOOLS_HOLD_MAX, or no limit if unset.
+Pauses:
+  pause, step-over, step-in, step-out, and wait pause keep the world paused
+  after they exit. Use continue to resume. --hold-max SECONDS resumes the
+  world after SECONDS with no debugger connected.
+  [default: AUXTOOLS_HOLD_MAX, or unlimited if unset]
 
 Help:
   auxtools COMMAND --help
   auxtools help COMMAND
 
 Exit codes:
-  0  Command completed successfully
-  1  Command failed
-  2  Operation timed out
-  3  World connection ended before the operation completed
-  4  Foreground launch: world exited unsuccessfully or was terminated
-  5  check: known BYOND bugs found
+  0  Command completed successfully.
+  1  Command failed.
+  2  Operation timed out.
+  3  World connection ended before the operation completed.
+  4  Foreground launch: world exited with a nonzero code or was terminated.
+  5  check: known BYOND bugs found.
 
-Commands that follow lifecycle events can reconnect across reboots.
-";
+log --follow, wait reload, and wait reboot reconnect across reboots.
+",
+		response_timeout = args::response_timeout_help()
+	);
 	text
 }
 
-/// The page of the command at `path`
 pub fn page(path: &[&str]) -> Option<&'static Page> {
 	PAGES.iter().find(|page| page.path == path)
 }
 
-/// Lines, each two spaces in
 fn indented(lines: &str) -> String {
 	lines.lines().map(|line| format!("  {}\n", line)).collect()
 }
 
-/// An option as its row names it: `-f, --file FILE`
 fn spec(arg: &clap::Arg) -> String {
 	let mut names: Vec<String> = arg.get_short().iter().map(|short| format!("-{}", short)).collect();
 	names.extend(arg.get_long().iter().map(|long| format!("--{}", long)));
@@ -688,10 +720,9 @@ fn spec(arg: &clap::Arg) -> String {
 	text
 }
 
-/// List command-specific options, then shared options.
-/// Keep `--json` among command options when it has a custom description.
 fn option_rows(command: &clap::Command, path: &[&str]) -> Vec<(String, String)> {
-	const COMMON_JSON: &str = "Emit one JSON value on stdout.";
+	let row = |arg: &clap::Arg| (spec(arg), arg.get_help().map(ToString::to_string).unwrap_or_default());
+	let shared = |id: &str| command.get_arguments().find(|arg| arg.get_id() == id).map(row);
 	let mut rows = vec![];
 	let mut common_json = false;
 	for arg in command.get_arguments() {
@@ -699,38 +730,34 @@ fn option_rows(command: &clap::Command, path: &[&str]) -> Vec<(String, String)> 
 		if arg.is_positional() || arg.is_hide_set() || matches!(id, "help" | "pid" | "response_timeout") {
 			continue;
 		}
-		let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
-		if id == "json" && help == COMMON_JSON {
+		if id == "json" && arg.get_help().is_some_and(|help| help.to_string() == args::JSON) {
 			common_json = true;
 			continue;
 		}
-		rows.push((spec(arg), help));
+		rows.push(row(arg));
 		for (_, _, more, help) in MORE_ROWS.iter().filter(|(name, after, ..)| path == [*name] && *after == id) {
 			rows.push(((*more).to_owned(), (*help).to_owned()));
 		}
 	}
-	let selects_world = !matches!(path.first(), Some(&("launch" | "list" | "check" | "dap" | "help" | "version")));
-	if selects_world {
-		rows.push(("--pid PID".to_owned(), "Select the world process.".to_owned()));
+	let scope = path.first().and_then(|name| args::scope_of(name));
+	if matches!(scope, Some(Scope::World | Scope::WorldExit)) {
+		rows.extend(shared("pid"));
 	}
-	// `stop` waits for process exit rather than responses.
-	if selects_world && path.first() != Some(&"stop") {
-		rows.push(("--response-timeout SECONDS".to_owned(), super::args::RESPONSE_TIMEOUT.to_owned()));
+	if scope == Some(Scope::World) {
+		rows.extend(shared("response_timeout"));
 	}
 	if common_json {
-		rows.push(("--json".to_owned(), COMMON_JSON.to_owned()));
+		rows.extend(shared("json"));
 	}
 	rows.push(("-h, --help".to_owned(), "Show help for this command.".to_owned()));
 	rows
 }
 
-/// A command's page, around the options clap has for it
 pub fn render(page: &Page, command: &clap::Command) -> String {
 	let mut text = format!("{}\n\nUsage:\n{}", page.summary, indented(page.usage));
 	if !page.arguments.is_empty() {
 		text += &format!("\nArguments:\n{}", indented(page.arguments));
 	}
-	// A command that only has commands of its own says what they are
 	if !command.has_subcommands() {
 		let rows = option_rows(command, page.path);
 		let width = rows.iter().map(|(spec, _)| spec.len()).max().unwrap_or(0);
@@ -749,20 +776,10 @@ pub fn render(page: &Page, command: &clap::Command) -> String {
 	text
 }
 
-/// Gives clap each command's page, for `--help` to show
 pub fn attach(command: clap::Command) -> clap::Command {
-	fn attached(mut command: clap::Command, path: &[&'static str]) -> clap::Command {
-		let names: Vec<&'static str> = command
-			.get_subcommands()
-			.filter_map(|sub| {
-				PAGES
-					.iter()
-					.flat_map(|page| page.path.iter())
-					.find(|name| **name == sub.get_name())
-					.copied()
-			})
-			.collect();
-		for name in names {
+	fn attached(mut command: clap::Command, path: &[&str]) -> clap::Command {
+		let names: Vec<String> = command.get_subcommands().map(|sub| sub.get_name().to_owned()).collect();
+		for name in &names {
 			let mut below = path.to_vec();
 			below.push(name);
 			command = command.mut_subcommand(name, |sub| attached(sub, &below));
@@ -776,19 +793,17 @@ pub fn attach(command: clap::Command) -> clap::Command {
 			None => command
 		}
 	}
-	// Build first so inherited options are available to subcommands.
 	let mut command = command;
 	command.build();
 	attached(command, &[])
 }
 
-/// `auxtools help [COMMAND [SUBCOMMAND]]`
 pub fn show(path: &[String]) -> Result<()> {
 	if path.is_empty() {
 		say_part!("{}", overview());
 		return Ok(());
 	}
-	let root = super::args::command();
+	let root = args::command();
 	let mut command = &root;
 	for (i, name) in path.iter().enumerate() {
 		command = command
@@ -815,9 +830,9 @@ fn unknown_command(parents: &[&str], name: &str) -> String {
 	}
 }
 
-/// Resolve the command path to select the relevant help page for an error.
-fn command_path(args: &[String]) -> Vec<&'static str> {
-	let mut path: Vec<&'static str> = vec![];
+fn command_path<'a>(root: &'a clap::Command, args: &[String]) -> Vec<&'a str> {
+	let mut path = vec![];
+	let mut command = root;
 	let mut args = args.iter();
 	while let Some(arg) = args.next() {
 		if arg == "--pid" {
@@ -827,35 +842,30 @@ fn command_path(args: &[String]) -> Vec<&'static str> {
 		if arg.starts_with('-') {
 			continue;
 		}
-		let mut longer: Vec<&str> = path.clone();
-		longer.push(arg);
-		match page(&longer) {
-			Some(page) => path = page.path.to_vec(),
+		match command.find_subcommand(arg) {
+			Some(sub) => command = sub,
 			None => break
 		}
-		// (only `wait` has commands of its own)
-		if PAGES.iter().all(|page| page.path.len() <= path.len() || !page.path.starts_with(&path)) {
+		path.push(command.get_name());
+		if !command.has_subcommands() {
 			break;
 		}
 	}
 	path
 }
 
-/// Convert clap output to requested help or a single-line argument error.
-pub fn unparsed(error: &clap::Error, args: &[String]) -> Unparsed {
+pub fn unparsed(error: &clap::Error, args: &[String], root: &clap::Command) -> Unparsed {
 	if matches!(error.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand) {
 		return Unparsed::Help(error.render().to_string());
 	}
-	let path = command_path(args);
+	let path = command_path(root, args);
 	let text = |kind: ContextKind| match error.get(kind) {
 		Some(ContextValue::String(text)) => Some(text.clone()),
 		Some(ContextValue::Strings(texts)) => Some(texts.join(", ")),
 		Some(other) => Some(other.to_string()),
 		None => None
 	};
-	// An option as it's typed, without the name of its value
 	let option = |spec: String| spec.split([' ', '=']).next().unwrap_or_default().to_owned();
-	// The name of its value alone
 	let value_name = |spec: &str| spec.split_once(' ').map(|(_, value)| value.trim_matches(['<', '>', '.']).to_owned());
 	let usage = match path.as_slice() {
 		[] => "Run 'auxtools --help' for usage.".to_owned(),
@@ -867,7 +877,7 @@ pub fn unparsed(error: &clap::Error, args: &[String]) -> Unparsed {
 			let argument = text(ContextKind::InvalidArg).unwrap_or_default();
 			match path.as_slice() {
 				["wait"] => format!(
-					"unexpected argument '{}' before a wait command: specify pause, reload, or reboot.",
+					"unexpected argument '{}' before a wait command. Specify pause, reload, or reboot first.",
 					argument
 				),
 				_ => format!("unexpected argument '{}'.", argument)
@@ -897,7 +907,6 @@ pub fn unparsed(error: &clap::Error, args: &[String]) -> Unparsed {
 				_ => format!("{} cannot be used more than once.", first)
 			}
 		}
-		// Whatever else clap says, in its first line
 		_ => {
 			let rendered = error.render().to_string();
 			let line = rendered.lines().next().unwrap_or_default();
@@ -909,9 +918,16 @@ pub fn unparsed(error: &clap::Error, args: &[String]) -> Unparsed {
 
 #[cfg(test)]
 mod tests {
-	use super::{command_path, overview, page, render, GROUPS, PAGES};
+	use std::time::Duration;
 
-	/// Every command clap has, and those under it, by its path
+	use auxtools_cli::{byond::Server, local::PROBE_PATIENCE};
+
+	use super::{command_path, overview, page, render, spec, PAGES};
+	use crate::cli::{
+		args::{self, Scope},
+		check, hold, json, launch, HUNG_UP, TIMED_OUT
+	};
+
 	fn commands() -> Vec<(Vec<String>, clap::Command)> {
 		fn under(command: &clap::Command, path: &[String], found: &mut Vec<(Vec<String>, clap::Command)>) {
 			for sub in command.get_subcommands() {
@@ -922,8 +938,70 @@ mod tests {
 			}
 		}
 		let mut found = vec![];
-		under(&crate::cli::args::command(), &[], &mut found);
+		under(&args::command(), &[], &mut found);
 		found
+	}
+
+	fn names(path: &[String]) -> Vec<&str> {
+		path.iter().map(String::as_str).collect()
+	}
+
+	fn options_named(text: &str) -> Vec<(&str, &str)> {
+		let mut found = vec![];
+		let mut at = 0;
+		while let Some(offset) = text[at..].find('-') {
+			let start = at + offset;
+			let rest = &text[start..];
+			let hyphens = if rest.starts_with("--") { 2 } else { 1 };
+			let name = rest[hyphens..]
+				.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+				.next()
+				.unwrap_or_default()
+				.trim_end_matches('-');
+			at = start + hyphens + name.len();
+			if text[..start].ends_with(|c: char| c.is_alphanumeric() || c == '-') {
+				continue;
+			}
+			let long = hyphens == 2 && name.starts_with(|c: char| c.is_ascii_lowercase());
+			let short = hyphens == 1 && name.len() == 1 && name.starts_with(|c: char| c.is_ascii_alphabetic());
+			if long || short {
+				let before = text[..start].split_whitespace().next_back().unwrap_or_default();
+				found.push((before.trim_matches(|c: char| !c.is_ascii_alphanumeric()), &rest[..hyphens + name.len()]));
+			}
+		}
+		found
+	}
+
+	fn takes(command: &clap::Command, option: &str) -> bool {
+		command.get_arguments().any(|arg| {
+			arg.get_long().is_some_and(|long| format!("--{}", long) == option) || arg.get_short().is_some_and(|short| format!("-{}", short) == option)
+		})
+	}
+
+	fn defaults_stated(text: &str) -> Vec<&str> {
+		text.split("[default: ")
+			.skip(1)
+			.map(|rest| rest.split(']').next().unwrap_or_default())
+			.collect()
+	}
+
+	fn default_in_code(path: &[&str], id: &str) -> Option<String> {
+		let seconds = |default: Duration| default.as_secs_f64().to_string();
+		Some(match (path, id) {
+			(_, "response_timeout") => seconds(args::DEFAULT_RESPONSE_TIMEOUT),
+			(["stop"], "timeout") => seconds(args::DEFAULT_STOP_TIMEOUT),
+			(["stop"], "kill_timeout") => seconds(args::DEFAULT_KILL_TIMEOUT),
+			(["reboot" | "reconnect"], "timeout") => seconds(args::DEFAULT_REBOOT_TIMEOUT),
+			(["vars" | "eval"], "depth") => json::DEFAULT_DEPTH.to_string(),
+			(["profile"], "top") => args::DEFAULT_TOP.to_string(),
+			(["check"], "byond_version") => {
+				let latest = dmasm::ByondVersion::LATEST;
+				format!("{}.{}", latest.major, latest.build)
+			}
+			(_, "hold_max") => hold::HOLD_MAX_VAR.to_owned(),
+			(["vars" | "eval"] | ["wait", "pause"], "frame") | (["wait", "pause"], "breaks") | (_, "#N") => "0".to_owned(),
+			_ => return None
+		})
 	}
 
 	#[test]
@@ -934,33 +1012,6 @@ mod tests {
 			assert!(page(&names).is_some(), "{} has no page", path.join(" "));
 		}
 		assert_eq!(commands.len(), PAGES.len(), "a page is of no command");
-		for expected in [
-			"launch",
-			"list",
-			"status",
-			"stop",
-			"reboot",
-			"reconnect",
-			"log",
-			"stack",
-			"vars",
-			"eval",
-			"proc",
-			"disassemble",
-			"pause",
-			"continue",
-			"step-over",
-			"step-in",
-			"step-out",
-			"wait",
-			"trace",
-			"check",
-			"dap",
-			"help",
-			"version"
-		] {
-			assert!(page(&[expected]).is_some(), "{}", expected);
-		}
 		for gone in ["next", "step", "out", "dis", "--list", "run"] {
 			assert!(page(&[gone]).is_none(), "{}", gone);
 		}
@@ -969,17 +1020,40 @@ mod tests {
 	#[test]
 	fn the_first_page_lists_every_command_once() {
 		let help = overview();
-		let listed: Vec<&str> = GROUPS.iter().flat_map(|(_, names)| names.iter().copied()).collect();
-		for page in PAGES.iter().filter(|page| page.path.len() == 1) {
-			assert_eq!(listed.iter().filter(|name| **name == page.path[0]).count(), 1, "{}", page.path[0]);
-			assert!(
-				help.contains(&format!("  {:11}  {}\n", page.path[0], page.brief)),
-				"{} isn't in the help",
-				page.path[0]
+		let root = args::command();
+		let width = root.get_subcommands().map(|command| command.get_name().len()).max().unwrap();
+		for command in root.get_subcommands() {
+			let name = command.get_name();
+			let page = page(&[name]).unwrap();
+			assert_eq!(
+				help.matches(&format!("\n  {:width$}  {}\n", name, page.brief)).count(),
+				1,
+				"{} isn't in the help once",
+				name
 			);
 			assert!(!page.brief.ends_with('.'), "{}", page.brief);
 		}
-		assert_eq!(listed.len(), PAGES.iter().filter(|page| page.path.len() == 1).count());
+	}
+
+	#[test]
+	fn a_command_with_commands_lists_each_as_its_page_does() {
+		for (path, command) in commands() {
+			let mut names = names(&path);
+			let text = render(page(&names).unwrap(), &command);
+			let width = command.get_subcommands().map(|sub| sub.get_name().len()).max().unwrap_or(0);
+			for sub in command.get_subcommands() {
+				names.push(sub.get_name());
+				let brief = page(&names).unwrap().brief;
+				names.pop();
+				assert!(
+					text.contains(&format!("\n  {:width$}  {}\n", sub.get_name(), brief)),
+					"{} doesn't list {}: {}",
+					path.join(" "),
+					sub.get_name(),
+					text
+				);
+			}
+		}
 	}
 
 	#[test]
@@ -992,8 +1066,7 @@ mod tests {
 			assert!(page.summary.ends_with('.'), "{}", page.summary);
 			for usage in page.usage.lines() {
 				assert!(usage.contains(&format!(" {}", path.join(" "))), "{}", usage);
-				// Only a command to a world is given one
-				let selects = !matches!(names[0], "launch" | "list" | "check" | "dap" | "help" | "version");
+				let selects = args::scope_of(names[0]) != Some(Scope::Local);
 				assert_eq!(usage.starts_with("auxtools [--pid PID] "), selects, "{}", usage);
 			}
 			if command.has_subcommands() {
@@ -1001,12 +1074,7 @@ mod tests {
 				continue;
 			}
 			assert!(text.contains("  -h, --help"), "{}", text);
-			assert_eq!(
-				text.contains("  --pid PID "),
-				!matches!(names[0], "launch" | "list" | "check" | "dap" | "help" | "version"),
-				"{}",
-				text
-			);
+			assert_eq!(text.contains("  --pid PID "), args::scope_of(names[0]) != Some(Scope::Local), "{}", text);
 			assert!(!text.contains("--detached"), "{}", text);
 		}
 	}
@@ -1014,34 +1082,192 @@ mod tests {
 	#[test]
 	fn every_option_is_in_its_commands_page_and_says_what_it_does() {
 		for (path, command) in commands() {
-			let names: Vec<&str> = path.iter().map(String::as_str).collect();
+			if command.has_subcommands() {
+				continue;
+			}
+			let names = names(&path);
 			let text = render(page(&names).unwrap(), &command);
-			for arg in command.get_arguments().filter(|arg| !arg.is_positional() && !arg.is_hide_set()) {
-				let global = |id: &str, spec: &str| arg.get_id() == id && !text.contains(spec);
-				if arg.get_id() == "help" || global("pid", "--pid PID ") || global("response_timeout", "--response-timeout SECONDS ") {
+			let scope = args::scope_of(names[0]);
+			for arg in command.get_arguments().filter(|arg| !arg.is_positional()) {
+				let id = arg.get_id().as_str();
+				let spec = spec(arg);
+				let listed = match id {
+					"pid" => scope != Some(Scope::Local),
+					"response_timeout" => scope == Some(Scope::World),
+					_ => !arg.is_hide_set()
+				};
+				let row = format!("  {}  ", spec);
+				assert_eq!(
+					text.lines().filter(|line| line.starts_with(&row)).count(),
+					usize::from(listed),
+					"{} {}: {}",
+					path.join(" "),
+					spec,
+					text
+				);
+				if !listed || id == "help" {
 					continue;
 				}
-				let long = arg.get_long().map(|long| format!("--{}", long));
-				let short = arg.get_short().map(|short| format!("-{}", short));
-				let name = long.or(short).unwrap();
-				assert!(
-					text.lines()
-						.any(|line| line.trim_start().starts_with(&name) || line.contains(&format!(", {} ", name))),
-					"{} {}",
-					path.join(" "),
-					name
-				);
 				let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
-				// It starts with a verb, and ends as a sentence does (or with
-				// its default)
+				for line in help.lines() {
+					assert!(text.contains(&format!("  {}\n", line)), "{} {}: {:?}", path.join(" "), spec, line);
+				}
 				assert!(
 					help.chars().next().is_some_and(char::is_uppercase),
 					"{} {}: {:?}",
 					path.join(" "),
-					name,
+					spec,
 					help
 				);
-				assert!(help.ends_with('.') || help.ends_with(']'), "{} {}: {:?}", path.join(" "), name, help);
+				assert!(help.ends_with('.') || help.ends_with(']'), "{} {}: {:?}", path.join(" "), spec, help);
+			}
+		}
+	}
+
+	#[test]
+	fn a_usage_line_names_every_option_or_says_options() {
+		for (path, command) in commands() {
+			let page = page(&names(&path)).unwrap();
+			if command.has_subcommands() || page.usage.contains("[OPTIONS]") {
+				continue;
+			}
+			let own = command
+				.get_arguments()
+				.filter(|arg| !arg.is_positional() && !arg.is_hide_set() && !matches!(arg.get_id().as_str(), "help" | "pid" | "response_timeout"));
+			for arg in own {
+				let spec = spec(arg);
+				assert!(
+					page.usage.contains(&format!("[{}]", spec)) || page.usage.contains(&format!("[{} [", spec)),
+					"the usage of {} leaves out {}: {}",
+					path.join(" "),
+					spec,
+					page.usage
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn a_page_names_no_option_that_doesnt_exist() {
+		let root = args::command();
+		let commands = commands();
+		for (path, command) in &commands {
+			let text = render(page(&names(path)).unwrap(), command);
+			for (before, option) in options_named(&text) {
+				let others = root.find_subcommand(before).is_some_and(|other| takes(other, option));
+				assert!(
+					takes(command, option) || takes(&root, option) || others,
+					"the page of {} names {}, which isn't an option of it: {}",
+					path.join(" "),
+					option,
+					text
+				);
+			}
+		}
+		let first = overview();
+		for (_, option) in options_named(&first) {
+			assert!(
+				takes(&root, option) || commands.iter().any(|(_, command)| takes(command, option)),
+				"the first page names {}, which isn't an option",
+				option
+			);
+		}
+		assert_eq!(options_named("Put '--' before -x (--wait), log --follow; step-over -trusted Ctrl-C"), [
+			("before", "-x"),
+			("", "--wait"),
+			("log", "--follow")
+		]);
+	}
+
+	#[test]
+	fn a_default_the_help_states_is_the_one_the_code_uses() {
+		let check = |path: &[&str], id: &str, stated: &str| match default_in_code(path, id) {
+			Some(value) => assert!(
+				stated
+					.strip_prefix(value.as_str())
+					.is_some_and(|rest| rest.is_empty() || rest.starts_with([',', ' '])),
+				"{} {} says [default: {}], and the code uses {}",
+				path.join(" "),
+				id,
+				stated,
+				value
+			),
+			None => assert!(
+				!stated.starts_with(|c: char| c.is_ascii_digit()),
+				"{} {} says [default: {}]: name the value the code uses in `default_in_code`",
+				path.join(" "),
+				id,
+				stated
+			)
+		};
+		for (path, command) in commands() {
+			let names = names(&path);
+			let page = page(&names).unwrap();
+			for arg in command.get_arguments() {
+				let id = arg.get_id().as_str();
+				let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+				let stated = defaults_stated(&help);
+				if arg.get_action().takes_values() && !arg.get_default_values().is_empty() {
+					let given: Vec<_> = arg.get_default_values().iter().map(|value| value.to_string_lossy()).collect();
+					assert_eq!(stated, given, "{} {}", path.join(" "), id);
+				}
+				for stated in stated {
+					if names == ["launch"] && id == "server" {
+						let server: Server = serde_json::from_value(serde_json::json!(stated)).expect("a server by its name");
+						assert_eq!(server, Server::default_for_platform());
+						continue;
+					}
+					check(&names, id, stated);
+				}
+			}
+			for line in page.arguments.lines().chain(page.sections.lines()) {
+				let id = if line.trim_start().starts_with("#N ") { "#N" } else { "" };
+				for stated in defaults_stated(line) {
+					check(&names, id, stated);
+				}
+			}
+		}
+		let first = overview();
+		assert!(
+			first.contains(&format!("\n               {}\n", args::response_timeout_help())),
+			"{}",
+			first
+		);
+		assert_eq!(defaults_stated(&first).len(), 2, "{}", first);
+		assert!(
+			first.contains(&format!("[default: {}, or unlimited if unset]", hold::HOLD_MAX_VAR)),
+			"{}",
+			first
+		);
+	}
+
+	#[test]
+	fn the_times_and_exit_codes_in_the_prose_are_the_commands() {
+		let sections = |name: &str| page(&[name]).unwrap().sections;
+		let within = |time: Duration| format!("within {} seconds", time.as_secs());
+		assert!(sections("launch").contains(&within(launch::COMING_UP)), "{}", sections("launch"));
+		assert!(sections("list").contains(&within(PROBE_PATIENCE)), "{}", sections("list"));
+
+		fn codes(text: &str) -> Vec<i32> {
+			let listed = text.split("Exit codes:\n").nth(1).unwrap_or_default();
+			listed
+				.lines()
+				.take_while(|line| !line.is_empty())
+				.filter_map(|line| line.strip_prefix("  ")?.split("  ").next()?.parse().ok())
+				.collect()
+		}
+		let first = codes(&overview());
+		assert_eq!(first, [0, 1, TIMED_OUT, HUNG_UP, launch::WORLD_FAILED, check::FOUND]);
+		for page in PAGES {
+			for code in codes(page.sections) {
+				assert!(first.contains(&code), "{}: {}", page.path.join(" "), code);
+				assert!(
+					code != launch::WORLD_FAILED || page.path == ["launch"],
+					"{}: {}",
+					page.path.join(" "),
+					code
+				);
+				assert!(code != check::FOUND || page.path == ["check"], "{}: {}", page.path.join(" "), code);
 			}
 		}
 	}
@@ -1067,12 +1293,13 @@ mod tests {
 
 	#[test]
 	fn the_command_an_error_is_about_is_found_among_the_arguments() {
-		let args = |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<String>>();
-		assert_eq!(command_path(&args(&["--pid", "12", "wait", "pause", "--break", "x"])), ["wait", "pause"]);
-		assert_eq!(command_path(&args(&["wait", "--break", "x"])), ["wait"]);
-		assert_eq!(command_path(&args(&["eval", "wait", "pause"])), ["eval"]);
-		assert_eq!(command_path(&args(&["frobnicate", "stop"])), Vec::<&str>::new());
-		assert_eq!(command_path(&args(&["--json"])), Vec::<&str>::new());
+		let root = args::command();
+		let path = |args: &[&str]| command_path(&root, &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<String>>());
+		assert_eq!(path(&["--pid", "12", "wait", "pause", "--break", "x"]), ["wait", "pause"]);
+		assert_eq!(path(&["wait", "--break", "x"]), ["wait"]);
+		assert_eq!(path(&["eval", "wait", "pause"]), ["eval"]);
+		assert_eq!(path(&["frobnicate", "stop"]), Vec::<&str>::new());
+		assert_eq!(path(&["--json"]), Vec::<&str>::new());
 	}
 
 	#[test]
@@ -1083,11 +1310,11 @@ mod tests {
 		assert!(
 			text.contains(
 				"\nOptions:
-  --timeout SECONDS       Set the graceful shutdown deadline. [default: 10]
-  --kill                  Terminate the process if graceful shutdown times out.
-  --kill-timeout SECONDS  Set the wait after forced termination. [default: 5]
-                          Requires --kill.
-  --pid PID               Select the world process.
+  --timeout SECONDS       Wait up to SECONDS for graceful shutdown. [default: 10]
+  --kill                  Terminate the process if shutdown fails or times out.
+  --kill-timeout SECONDS  Wait up to SECONDS for exit after termination.
+                          [default: 5] Requires --kill.
+  --pid PID               Select the world process by PID.
   --json                  Emit one JSON value on stdout.
   -h, --help              Show help for this command.
 "
@@ -1096,15 +1323,15 @@ mod tests {
 			text
 		);
 		let (_, eval) = commands.iter().find(|(path, _)| path == &["eval".to_owned()]).unwrap();
-		assert!(render(page(&["eval"]).unwrap(), eval).contains("\n  -f, --file FILE             Read the expression from FILE.\n"));
+		assert!(render(page(&["eval"]).unwrap(), eval).contains("\n  -f, --file FILE             Read the expression or statements from FILE.\n"));
 		let (_, launch) = commands.iter().find(|(path, _)| path == &["launch".to_owned()]).unwrap();
 		assert!(
-			render(page(&["launch"]).unwrap(), launch).contains("\n  -D NAME[=VALUE]   Set a preprocessor define used by hot reload. Repeatable.\n")
+			render(page(&["launch"]).unwrap(), launch).contains("\n  -D NAME[=VALUE]   Define a preprocessor macro for hot reload. Repeatable.\n")
 		);
 		let (_, trace) = commands.iter().find(|(path, _)| path == &["trace".to_owned()]).unwrap();
 		assert!(render(page(&["trace"]).unwrap(), trace).contains(
-			"\n  --by EXPR                   Group hits by expression value and print counts at exit.\n  --by caller                 Group hits by \
-			 the calling proc and source line.\n"
+			"\n  --by EXPR                   Count hits by EXPR and print counts on exit.\n                              Cannot be used with \
+			 --log.\n  --by caller                 Count hits by calling proc and source line.\n"
 		));
 	}
 }

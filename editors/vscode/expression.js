@@ -1,10 +1,6 @@
-// Find a read-only hover expression ending at the selected identifier.
-// Include member chains such as `a.b.c`, `a?.b` and `a:b`, but reject
-// called names so hovering cannot invoke a proc.
-
 const NAME = /[A-Za-z_][A-Za-z0-9_]*/y;
+const KEYWORD = /^(var|proc|verb|if|else|for|while|do|switch|return|new|del|in|to|as|set|try|catch|throw|goto|break|continue|spawn|step|null|global|static|const|tmp)$/;
 
-// Identifier range containing or immediately preceding zero-based `column`.
 function nameAt(line, column) {
 	let start = column;
 	while (start > 0 && /[A-Za-z0-9_]/.test(line[start - 1])) {
@@ -18,7 +14,6 @@ function nameAt(line, column) {
 	return [start, start + match[0].length];
 }
 
-// Whether the position is inside a string or line comment.
 function inTextOrComment(line, position) {
 	let quoted = false;
 	for (let i = 0; i < position; i++) {
@@ -38,46 +33,101 @@ function inTextOrComment(line, position) {
 	return quoted;
 }
 
-// Return the hover range in `line`, or undefined.
+function brackets(line) {
+	const opened = [];
+	const opens = new Map();
+	let quoted = false;
+	for (let i = 0; i < line.length; i++) {
+		const c = line[i];
+		if (quoted) {
+			if (c === "\\") {
+				i++;
+			} else if (c === '"') {
+				quoted = false;
+			}
+		} else if (c === '"') {
+			quoted = true;
+		} else if (c === "[" || c === "(") {
+			opened.push(i);
+		} else if (c === "]" || c === ")") {
+			const open = opened.pop();
+			if (open !== undefined && line[open] === (c === "]" ? "[" : "(")) {
+				opens.set(i, open);
+			}
+		}
+	}
+	return opens;
+}
+
+function operandStart(line, end, opens) {
+	let at = end;
+	while (line[at - 1] === "]" && opens.has(at - 1)) {
+		at = opens.get(at - 1);
+		if (line[at - 1] === "?") {
+			at--;
+		}
+	}
+	const name = /[A-Za-z_][A-Za-z0-9_]*$/.exec(line.slice(0, at));
+	return name ? name.index : undefined;
+}
+
 function expressionAt(line, column) {
-	const name = nameAt(line, column);
-	if (!name || inTextOrComment(line, name[0])) {
-		return undefined;
+	const opens = brackets(line);
+	let start;
+	let end;
+	if (line[column] === "]" && opens.has(column)) {
+		if (inTextOrComment(line, column)) {
+			return undefined;
+		}
+		end = column + 1;
+		start = operandStart(line, end, opens);
+		if (start === undefined) {
+			return undefined;
+		}
+	} else {
+		const name = nameAt(line, column);
+		if (!name || inTextOrComment(line, name[0])) {
+			return undefined;
+		}
+		[start, end] = name;
+		if (/^\s*\(/.test(line.slice(end))) {
+			return undefined;
+		}
+		if (KEYWORD.test(line.slice(start, end))) {
+			return undefined;
+		}
+		if (/(^|[^A-Za-z0-9_])[0-9][A-Za-z0-9_]*\.$/.test(line.slice(0, start))) {
+			return undefined;
+		}
 	}
-	let [start, end] = name;
 
-	// A proc's name, where it's called or declared
-	if (/^\s*\(/.test(line.slice(end))) {
-		return undefined;
-	}
-	// A keyword, or a number's letters
-	const word = line.slice(start, end);
-	if (/^(var|proc|verb|if|else|for|while|do|switch|return|new|del|in|to|as|set|try|catch|throw|goto|break|continue|spawn|step|null|global|static|const|tmp)$/.test(word)) {
-		return undefined;
-	}
-	if (start > 1 && line[start - 1] === "." && /[0-9]/.test(line[start - 2])) {
-		return undefined;
-	}
-
-	// Extend through member-access operators and identifiers.
 	for (;;) {
-		const before = /([A-Za-z_][A-Za-z0-9_]*)\s*(\?\.|\?:|\.|:)\s*$/.exec(line.slice(0, start));
-		// Exclude ternary colons preceded by whitespace.
-		if (!before || (/:$/.test(before[2]) && /\s:\s*$/.test(line.slice(0, start)))) {
+		if (/(^|[^A-Za-z0-9_\])"])::$/.test(line.slice(0, start))) {
+			start -= 2;
 			break;
 		}
-		start = before.index;
+		const joined = /\s*(\?\.|\?:|\.|:)\s*$/.exec(line.slice(0, start));
+		if (!joined || (/:$/.test(joined[1]) && /\s:\s*$/.test(line.slice(0, start)))) {
+			break;
+		}
+		const before = operandStart(line, joined.index, opens);
+		if (before === undefined) {
+			return undefined;
+		}
+		start = before;
 	}
-	// Reject receivers requiring call or index evaluation.
-	const through = /(\?\.|\?:|\.|:)\s*$/.exec(line.slice(0, start));
-	if (through && !(through[1] === ":" && /\s:\s*$/.test(line.slice(0, start)))) {
-		return undefined;
-	}
-	// Type paths and declarations are not hover values.
 	if (start > 0 && line[start - 1] === "/") {
 		return undefined;
 	}
 	return { start, end };
 }
 
-module.exports = { expressionAt };
+function evaluatableExpression(vscode, document, position) {
+	const found = expressionAt(document.lineAt(position.line).text, position.character);
+	if (!found) {
+		return undefined;
+	}
+	return new vscode.EvaluatableExpression(new vscode.Range(position.line, found.start, position.line, found.end));
+}
+
+module.exports = { evaluatableExpression, expressionAt };

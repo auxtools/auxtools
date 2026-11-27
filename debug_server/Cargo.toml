@@ -1,31 +1,33 @@
 [package]
 name = "debug_server"
+description = "Debug library loaded into a BYOND world to serve debugging, hot reload, and console commands to the launcher"
 version.workspace = true
 publish = false
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-license.workspace = true
+license = "GPL-3.0"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 auxtools = { path = "../auxtools" }
+auxtools-protocol = { path = "../auxtools-protocol" }
+auxtools-dm = { path = "../auxtools-dm" }
 instruction_hooking = { path = "../instruction_hooking" }
 lazy_static = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-bincode = "1"
-clap = "4"
 dmasm = { workspace = true }
 dreammaker = { workspace = true }
-region = "3"
-retour = { workspace = true }
 interprocess = "=2.4.7"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["libloaderapi", "errhandlingapi", "ioapiset", "processthreadsapi"] }
+region = "3"
+winapi = { version = "0.3", features = ["libloaderapi", "errhandlingapi"] }
+
+[features]
+test-commands = []
 
 [lints]
 workspace = true

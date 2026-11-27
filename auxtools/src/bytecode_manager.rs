@@ -1,41 +1,48 @@
-// This module is in control of allocating buffers for use when replacing a
-// proc's bytecode. To keep things sane, we also have to return the pointers to
-// their original value before BYOND shuts down. We _also_ have to check if any
-// existing procs are still using our bytecode when we shut down and leak the
-// memory if so. It may be possible to avoid the leaks but it really doesn't
-// matter.
-
 use std::{
 	cell::UnsafeCell,
 	collections::{HashMap, HashSet},
-	convert::TryFrom
+	convert::TryFrom,
+	ffi::c_void,
+	sync::atomic::{AtomicU32, AtomicU64, Ordering}
 };
 
-use crate::{debug, raw_types, *};
+use crate::{
+	debug,
+	raw_types::{
+		self,
+		misc::{MiscId, Misc_V2},
+		procs::ProcId
+	},
+	runtime_tables::{self, ProcEntryWords},
+	*
+};
 
 static mut BYTECODE_ALLOCATIONS: UnsafeCell<Option<State>> = UnsafeCell::new(None);
 
-/// Generation counter for bytecode-derived caches.
-static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CHANGES: AtomicU64 = AtomicU64::new(0);
 
-/// Cache generation, incremented when hot reload repoints a proc and on
-/// world startup or shutdown. Invalidate bytecode-derived data when it
-/// changes. `set_bytecode` leaves it: its buffers are kept by content until
-/// shutdown, so a buffer's address always names the same code.
+static SERIAL: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Returns a monotonically increasing counter that advances whenever proc
+/// bytecode changes.
+///
+/// Safe to read from any thread, making it suitable for invalidating bytecode
+/// caches. Increments when `Proc::set_bytecode`, `own_code`, or `copy_code`
+/// updates a proc's code, when `remember_bytecode` is called, and on every
+/// initialization and shutdown.
 pub fn bytecode_changes() -> u64 {
-	CHANGES.load(std::sync::atomic::Ordering::Relaxed)
+	CHANGES.load(Ordering::Relaxed)
 }
 
 fn changed() {
-	CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+	CHANGES.fetch_add(1, Ordering::Relaxed);
 }
 
 struct State {
-	allocations: HashSet<Vec<u32>>,
-	original: HashMap<raw_types::procs::ProcId, (*mut u32, u16)>,
-	// Retired bytecode buffers indexed by address. Active frames continue
-	// executing the buffer they started with.
-	remembered: HashMap<usize, Vec<u32>>
+	allocations: HashMap<(ProcId, Vec<u32>), Box<[u32]>>,
+	original: HashMap<u32, (*mut u32, u16)>,
+	made: HashMap<u32, ProcId>,
+	retired_by_address: HashMap<usize, Vec<u32>>
 }
 
 pub fn init() {
@@ -43,9 +50,10 @@ pub fn init() {
 	unsafe {
 		let ptr = BYTECODE_ALLOCATIONS.get();
 		*ptr = Some(State {
-			allocations: HashSet::new(),
+			allocations: HashMap::new(),
 			original: HashMap::new(),
-			remembered: HashMap::new()
+			made: HashMap::new(),
+			retired_by_address: HashMap::new()
 		});
 	}
 }
@@ -72,22 +80,23 @@ fn get_active_bytecode_ptrs() -> HashSet<*mut u32> {
 
 pub fn shutdown() {
 	changed();
-	let active_ptrs = get_active_bytecode_ptrs();
+	let mut kept = get_active_bytecode_ptrs();
 
 	let state = unsafe { (*BYTECODE_ALLOCATIONS.get()).take().unwrap() };
 
-	for (id, (ptr, len)) in state.original {
-		let proc = Proc::from_id(id).unwrap();
-
+	for (entry, original) in state.original {
 		unsafe {
-			raw_types::misc::set_bytecode(*(*proc.entry()).metadata.bytecode(), ptr, len);
+			if references(entry) == Ok(1) {
+				let _ = point_at(entry, original);
+			} else if let Ok((buffer, _)) = code_at(entry) {
+				kept.insert(buffer);
+			}
 		}
 	}
 
-	for mut vec in state.allocations {
-		// If a proc with this bytecode is still running, just leak the mrmoy
-		if active_ptrs.contains(&vec.as_mut_ptr()) {
-			std::mem::forget(vec);
+	for mut buffer in state.allocations.into_values() {
+		if kept.contains(&buffer.as_mut_ptr()) {
+			std::mem::forget(buffer);
 		}
 	}
 }
@@ -96,24 +105,64 @@ fn state() -> &'static mut State {
 	unsafe { (*BYTECODE_ALLOCATIONS.get()).as_mut().unwrap() }
 }
 
-fn remember_original(state: &mut State, proc: &Proc) {
-	state.original.entry(proc.id).or_insert_with(|| unsafe { proc.bytecode_mut_ptr() });
+unsafe fn misc_entry(entry: u32) -> Result<*mut Misc_V2, String> {
+	let mut misc: *mut c_void = std::ptr::null_mut();
+	if raw_types::funcs::get_misc_by_id(&mut misc, MiscId::from_raw(entry)) != 1 || misc.is_null() {
+		return Err(format!("misc entry {} does not exist", entry));
+	}
+	Ok(misc as *mut Misc_V2)
 }
 
-/// Keeps a copy of bytecode that a proc is about to stop using, for
-/// [`bytecode_at`]. Hot reload calls this before repointing a proc, so it
-/// counts as a bytecode change.
+unsafe fn code_at(entry: u32) -> Result<(*mut u32, u16), String> {
+	let misc = misc_entry(entry)?;
+	Ok(((*misc).bytecode.bytecode, (*misc).bytecode.count))
+}
+
+unsafe fn point_at(entry: u32, (code, len): (*mut u32, u16)) -> Result<(), String> {
+	let misc = misc_entry(entry)?;
+	(*misc).bytecode.bytecode = code;
+	(*misc).bytecode.count = len;
+	Ok(())
+}
+
+unsafe fn references(entry: u32) -> Result<u32, String> {
+	Ok(*((misc_entry(entry)? as *const u8).add(4) as *const u32))
+}
+
+/// Records a copy of `bytecode` under the address `ptr` so [`bytecode_at`] can
+/// return the original words after the buffer is modified in place.
+///
+/// Call on BYOND's thread while the library is initialized. The first record
+/// for a given `ptr` is kept until shutdown, and subsequent calls for the same
+/// address leave the stored copy unchanged while still advancing
+/// [`bytecode_changes`]. `ptr` is used only as a lookup key and is never
+/// dereferenced.
+///
+/// # Panics
+///
+/// Panics if called before the library is initialized or after shutdown.
 pub fn remember_bytecode(ptr: *const u32, bytecode: &[u32]) {
 	changed();
-	state().remembered.entry(ptr as usize).or_insert_with(|| bytecode.to_vec());
+	state().retired_by_address.entry(ptr as usize).or_insert_with(|| bytecode.to_vec());
 }
 
-/// Copy current or retained bytecode at `ptr`. Includes original code and
-/// buffers replaced by reloads, which active frames may still execute.
+/// Returns a copy of the bytecode at `ptr` if this library replaced or recorded
+/// it.
+///
+/// Call on BYOND's thread while the library is initialized, passing the exact
+/// start address of a bytecode buffer. Checks recorded copies from
+/// [`remember_bytecode`] or moved procs first, then original buffers replaced
+/// by `Proc::set_bytecode`, and finally buffers allocated by
+/// `Proc::set_bytecode`. Returns `None` for bytecode this library has not
+/// modified or recorded.
+///
+/// # Panics
+///
+/// Panics if called before the library is initialized or after shutdown.
 pub fn bytecode_at(ptr: *const u32) -> Option<Vec<u32>> {
 	let state = state();
 
-	if let Some(bytecode) = state.remembered.get(&(ptr as usize)) {
+	if let Some(bytecode) = state.retired_by_address.get(&(ptr as usize)) {
 		return Some(bytecode.clone());
 	}
 
@@ -121,34 +170,152 @@ pub fn bytecode_at(ptr: *const u32) -> Option<Vec<u32>> {
 		return Some(unsafe { std::slice::from_raw_parts(original, len as usize) }.to_vec());
 	}
 
-	state.allocations.iter().find(|bytecode| bytecode.as_ptr() == ptr).cloned()
+	state
+		.allocations
+		.values()
+		.find(|buffer| buffer.as_ptr() == ptr)
+		.map(|buffer| buffer.to_vec())
 }
 
-pub fn set_bytecode(proc: &Proc, mut bytecode: Vec<u32>) {
+fn code_entry(proc: &Proc) -> Result<u32, String> {
+	runtime_tables::proc_entry(proc.id)
+		.map(|entry| entry.0[ProcEntryWords::BYTECODE])
+		.ok_or_else(|| format!("{} has no proc entry", proc.path))
+}
+
+unsafe fn owned_entry(state: &State, proc: &Proc) -> Option<u32> {
+	let entry = code_entry(proc).ok()?;
+	(state.made.get(&entry) == Some(&proc.id) && references(entry) == Ok(1)).then_some(entry)
+}
+
+unsafe fn new_entry(code: &[u32]) -> Result<u32, String> {
+	let mut words = code.to_vec();
+	words.push(0);
+	for _ in 0..8 {
+		*words.last_mut().unwrap() = SERIAL.fetch_sub(1, Ordering::Relaxed);
+		let entry = runtime_tables::intern_misc(&words)?;
+		if references(entry)? == 1 && runtime_tables::misc_words(entry).as_ref() == Some(&words) {
+			return Ok(entry);
+		}
+	}
+	Err("BYOND returned only shared bytecode entries after eight attempts".to_owned())
+}
+
+fn keep_frame_names(code: *mut u32, proc: ProcId) {
+	let stacks = debug::CallStacks::new();
+	for frame in stacks.active.iter().chain(stacks.suspended.iter().flatten()) {
+		let running = unsafe { *(*frame.context).bytecode() };
+		if frame.proc.id != proc && running == code && !debug::has_local_names(&frame.proc, code) {
+			let names = debug::local_names_for(&frame.proc, code);
+			debug::set_local_names(&frame.proc, code, names);
+		}
+	}
+}
+
+unsafe fn give_own_entry(state: &mut State, proc: &Proc, keep_address: bool) -> Result<u32, String> {
+	let old = code_entry(proc)?;
+	let (code, len) = code_at(old)?;
+	let words = std::slice::from_raw_parts(code, len as usize).to_vec();
+	let new = new_entry(&words)?;
+	let (copy, _) = code_at(new)?;
+
+	if keep_address {
+		keep_frame_names(code, proc.id);
+		point_at(new, (code, len))?;
+		point_at(old, (copy, len))?;
+		if let Some(original) = state.original.remove(&old) {
+			state.original.insert(new, original);
+		}
+		debug::copy_local_names(code, copy, |id| id != proc.id);
+		state.retired_by_address.entry(code as usize).or_insert(words);
+	} else {
+		point_at(new, (copy, len))?;
+		debug::copy_local_names(code, copy, |id| id == proc.id);
+		state.retired_by_address.entry(code as usize).or_insert(words);
+	}
+	runtime_tables::set_proc_entry_word(proc.id, ProcEntryWords::BYTECODE, new);
+	state.made.insert(new, proc.id);
+	changed();
+	Ok(new)
+}
+
+/// Ensures `proc` has an unshared bytecode entry while keeping its bytecode at
+/// the same address.
+///
+/// If `proc` already has an unshared entry created by this library, does
+/// nothing. Otherwise allocates a new entry that takes ownership of the
+/// existing bytecode buffer in place (so active frames see subsequent patches)
+/// and leaves a copy in the old entry for any other procs sharing it. Call on
+/// BYOND's thread while the library is initialized.
+///
+/// # Errors
+///
+/// Returns an error if `proc` has no bytecode entry or if BYOND cannot allocate
+/// a new entry (which requires `runtime_tables::available`).
+///
+/// # Panics
+///
+/// Panics if called before the library is initialized or after shutdown.
+///
+/// # Safety
+///
+/// No other library may have replaced `proc`'s bytecode. Because the new entry
+/// takes over the existing buffer, another library freeing that buffer at
+/// shutdown would cause use-after-free.
+pub unsafe fn own_code(proc: &Proc) -> Result<(), String> {
 	let state = state();
-	remember_original(state, proc);
+	if owned_entry(state, proc).is_none() {
+		give_own_entry(state, proc, true).map_err(|e| format!("could not allocate dedicated bytecode for {}: {}", proc.path, e))?;
+	}
+	Ok(())
+}
 
-	let (ptr, len) = {
-		let len = bytecode.len();
+/// Allocates a new, unshared bytecode entry for `proc` containing a copy of its
+/// bytecode at a new address.
+///
+/// Always creates a fresh entry, even if `proc` already owns an unshared one.
+/// Subsequent calls execute the new copy while already-running frames continue
+/// on the previous buffer. Call on BYOND's thread while the library is
+/// initialized.
+///
+/// # Errors
+///
+/// Returns an error if `proc` has no bytecode entry or if BYOND cannot allocate
+/// a new entry.
+///
+/// # Panics
+///
+/// Panics if called before the library is initialized or after shutdown.
+pub fn copy_code(proc: &Proc) -> Result<(), String> {
+	unsafe { give_own_entry(state(), proc, false) }
+		.map(|_| ())
+		.map_err(|e| format!("could not copy bytecode for {}: {}", proc.path, e))
+}
 
-		let ptr = match state.allocations.get(&bytecode) {
-			Some(bytecode) => {
-				bytecode.as_ptr() as *mut u32 // don't @ me
-			}
-
-			None => {
-				let ptr = bytecode.as_mut_ptr();
-				state.allocations.insert(bytecode);
-				ptr
-			}
-		};
-
-		(ptr, len)
-	};
-
-	let len = u16::try_from(len).unwrap();
-
+pub fn set_bytecode(proc: &Proc, bytecode: Vec<u32>) -> Result<(), String> {
+	let len = u16::try_from(bytecode.len()).map_err(|_| {
+		format!(
+			"bytecode length of {} words exceeds the 65535-word limit for {}",
+			bytecode.len(),
+			proc.path
+		)
+	})?;
 	unsafe {
-		raw_types::misc::set_bytecode(*(*proc.entry()).metadata.bytecode(), ptr, len);
+		let state = state();
+		let entry = match owned_entry(state, proc) {
+			Some(entry) => entry,
+			None => give_own_entry(state, proc, false).map_err(|e| format!("could not allocate dedicated bytecode for {}: {}", proc.path, e))?
+		};
+		let current = code_at(entry)?;
+		state.original.entry(entry).or_insert(current);
+
+		let ptr = state
+			.allocations
+			.entry((proc.id, bytecode))
+			.or_insert_with_key(|(_, bytecode)| bytecode.clone().into_boxed_slice())
+			.as_mut_ptr();
+		point_at(entry, (ptr, len))?;
+		changed();
+		Ok(())
 	}
 }

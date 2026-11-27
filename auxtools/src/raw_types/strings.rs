@@ -25,6 +25,6 @@ pub struct StringEntry {
 	pub unk_1: u32,
 	pub unk_2: u32,
 	pub encoding: u8,
-	/// Set for proc paths. BYOND never frees a string that has it.
+	/// Non-zero for proc path strings, preventing BYOND from freeing the entry.
 	pub is_proc_name: u8
 }

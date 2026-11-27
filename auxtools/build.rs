@@ -11,8 +11,6 @@ fn main() {
 		.cpp(true)
 		.compile("auxtools-cpp");
 
-	// The instruction hook's entry, in assembly: it has no calling convention
-	// Rust knows
 	let target_family = std::env::var("CARGO_CFG_TARGET_FAMILY").expect("CARGO_CFG_TARGET_FAMILY not set");
 	let target_env = std::env::var("CARGO_CFG_TARGET_ENV").expect("CARGO_CFG_TARGET_ENV not set");
 	let mut build = cc::Build::new();
@@ -24,11 +22,9 @@ fn main() {
 		"windows" => match target_env.as_str() {
 			"gnu" => {
 				build.file("src/instruction_hook/execute_instruction_hook.windows.S");
-				build.file("src/instruction_hook/514/execute_instruction_hook.windows.S");
 			}
 			"msvc" => {
 				build.file("src/instruction_hook/execute_instruction_hook.windows.asm");
-				build.file("src/instruction_hook/514/execute_instruction_hook.windows.asm");
 			}
 			other => panic!("don't know how to build the instruction hook for family=\"windows\", env={:?}", other)
 		},

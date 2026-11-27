@@ -1,6 +1,6 @@
-// Started with the debug library loaded into it, which adds the procs it
-// needs. It hooks this one when it's the world's own, so new code for it never
-// runs.
+/early_global()
+	return "early unreachable"
+
 /proc/auxtools_launched_world_del()
 	CRASH("auxtools not loaded")
 
@@ -16,24 +16,22 @@ var/reboot_requested = FALSE
 /proc/request_reboot()
 	reboot_requested = TRUE
 
-// The debug server only answers while DM code runs
+/world
+	fps = 100
+
 /proc/main_loop()
 	while (!reboot_requested)
 		tick()
-		sleep(1)
+		sleep(world.tick_lag)
 
-	// Rebooting has to happen out here. The test asks for it through the
-	// debug server, which can't shut itself down there.
 	world.Reboot()
 
-// A type's const is compiled into the code that uses it
 /datum/limits
 	var/const/MAX = 3
 
 /datum/limits/proc/max_doubled()
 	return MAX * 2
 
-// A global const, read alone and folded
 var/const/LIMIT_ALL = 10
 
 /proc/limit_all()
@@ -41,18 +39,15 @@ var/const/LIMIT_ALL = 10
 
 var/datum/limits/kept_limits = new
 
-// A var declared with another type later
 /datum/limits/var/list/things = null
 
 /datum/limits/proc/thing_count()
 	return length(things)
 
-// A proc whose `set name` changes, which call() by name follows
 /datum/limits/proc/label()
 	set name = "Label"
 	return "labelled"
 
-// Definitions of one proc, whose `..()` calls make a chain
 /datum/chain/proc/say()
 	return "1"
 
@@ -61,8 +56,6 @@ var/datum/limits/kept_limits = new
 
 var/datum/chain/the_chain = new
 
-// Definitions of a verb, of a world proc and of a global proc, which come and
-// go among the others too
 /mob/chain_verbs/verb/speak()
 	return "a"
 
@@ -86,13 +79,22 @@ var/mob/chain_verbs/verb_chain = new
 /world/chant()
 	return ..() + "z"
 
+/world/proc/hail()
+	set name = "Hail"
+	return "hailed"
+
+/proc/world_call(name)
+	try
+		return call(world, name)()
+	catch
+		return "missing"
+
 /proc/solo()
 	return "declared"
 
 /solo()
 	return "another"
 
-// Vars declared another way later
 /datum/declared
 	var/count = 1
 	var/shared = 10
@@ -111,14 +113,11 @@ var/mob/chain_verbs/verb_chain = new
 
 var/datum/declared/declared_one = new
 
-// Changed to code the compiler learnt late
 /proc/compiled_late()
 	return 0
 
 /proc/keyed(a, b)
 	return b
-
-// Static sharing a built-in sound var name absent from the build.
 
 /datum/hr_named
 	var/static/falloff = 9
@@ -129,8 +128,6 @@ var/datum/declared/declared_one = new
 	s.falloff = 7
 	. += "[s.falloff] [named.falloff]"
 
-// Reparented sound types use var-table built-ins. Avoid repeat and volume,
-// which new() sets from arguments.
 /sound/hr_sa
 	pan = 10
 
@@ -140,3 +137,152 @@ var/datum/declared/declared_one = new
 /sound/hr_st
 	parent_type = /sound/hr_sa
 	frequency = 3
+
+/datum/early_apart/speak()
+	return "override apart"
+
+/proc/calls_twice_unchanged()
+	return call(new /datum/twice, /datum/twice/speak)()
+
+/datum/names_twice
+	var/said = /datum/twice/speak
+	var/list/all_said = list(/datum/twice/speak)
+
+/proc/calls_inserted_unchanged()
+	return call(new /datum/inserted, /datum/inserted/speak)()
+
+/proc/reads_twice_default()
+	return /datum/names_twice::said
+
+/datum/reads_names_twice
+	var/list/all = list(/datum/names_twice::said)
+
+/mob/chooser/verb/choose_twice(x in list(/datum/twice/speak))
+	return x
+
+/proc/calls_kin_child()
+	return call(new /datum/kin/middle/child, /datum/kin/middle/child::speak())()
+
+/proc/calls_lone_unchanged()
+	return call(new /datum/lone, /datum/lone/speak)()
+
+/datum/names_lone
+	var/said = /datum/lone/speak
+
+/datum/gone
+
+/proc/calls_gone_unchanged()
+	return call(new /datum/gone, /datum/gone/proc/speak)()
+
+/datum/names_gone
+	var/gone_said = /datum/gone/proc/speak
+
+/proc/calls_last_unchanged()
+	return call(new /datum/last, /datum/last::speak())()
+
+/datum/names_last
+	var/said = /datum/last::speak()
+
+/proc/calls_kept_declaration()
+	var/last = /datum/kept::speak()
+	return "[call(new /datum/kept, /datum/kept/proc/speak)()], then [call(new /datum/kept, last)()]"
+
+var/hr_tally = 100
+
+/datum/tallied/proc/bump()
+	hr_tally++
+
+/proc/tallies()
+	var/datum/tallied/T = new
+	T.bump()
+	return "[("hr_tally" in T.vars) ? T.vars["hr_tally"] : "none"] [global.hr_tally]"
+
+/proc/hr_asked()
+	return "global"
+
+/datum/asking/proc/ask()
+	return hr_asked()
+
+/datum/asking/child
+
+/datum/config_read
+	var/list/limits = list(/datum/config_limits::limit)
+	var/copied = /datum/config_limits::limit
+
+/mob/limited/verb/choose_limit(x in list(/datum/config_limits::limit))
+	return x
+
+/datum/dep_colon_first
+	var/const/DEP_COLON = 5
+
+/proc/dep_colon(x)
+	return "[x:DEP_COLON + 1] [x:DEP_COLON]"
+
+/proc/dep_scoped_limit(x)
+	if(x)
+		var/const/DEP_SCOPED_BASE = 2
+		x = DEP_SCOPED_BASE
+	var/const/DEP_SCOPED_LIMIT = DEP_SCOPED_BASE + 1
+	return DEP_SCOPED_LIMIT
+
+/proc/dep_typed_limit(datum/dep_scoped_config/config)
+	var/const/DEP_TYPED_LIMIT = config.DEP_SCOPED + 1
+	return DEP_TYPED_LIMIT
+
+/datum/dep_parent/child/f(x)
+	var/last = /datum/dep_twice::f()
+	return last ? ..(DEP_PARENT) : 0
+
+/proc/dep_self(x)
+	var/last = /datum/dep_twice::f()
+	return x || !last ? x : .(DEP_PARENT)
+
+/mob/dep_colon_chooser
+	var/dep_colon_holder
+
+/mob/dep_colon_chooser/verb/choose_dep_colon_list(x as anything in list(dep_colon_holder:DEP_COLON_LIST + 1))
+	return x
+
+/datum/dep_colon_inits
+	var/dep_colon_holder
+	var/list/limits = list(dep_colon_holder:DEP_COLON_LIST + 1)
+
+/proc/dep_colon_alone(x)
+	var/last = /datum/dep_twice::f()
+	return last ? x:DEP_COLON_ALONE : 0
+
+/proc/dep_colon_local_const(x)
+	var/const/DEP_COLON_LOCAL = x:DEP_COLON_LIST + 1
+	return DEP_COLON_LOCAL
+
+/proc/dep_retyped_local_const()
+	var/const/DEP_RETYPED_LOCAL = dep_retype_target.DEP_RETYPE + 1
+	return DEP_RETYPED_LOCAL
+
+/proc/dep_colon_indexed()
+	var/list/items = list(/datum/dep_twice::f())
+	return items[1]:DEP_COLON_INDEXED
+
+/proc/dep_retyped_alone()
+	var/last = /datum/dep_twice::f()
+	return last ? dep_retype_alone_target.DEP_RETYPE_ALONE : 0
+
+/proc/dep_call_colon()
+	var/last = /datum/dep_twice::f()
+	var/datum/dep_call_colon_factory/factory = new
+	if(!last)
+		return 0
+	return factory.make():DEP_CALL_COLON
+
+/proc/dep_returned()
+	return dep_returned_make().DEP_RETURNED
+
+/proc/dep_bare_call()
+	return dep_bare_make().DEP_BARE_CALL
+
+/proc/dep_implicit_uncompiled()
+	var/last = /datum/dep_twice::f()
+	var/datum/dep_implicit_holder/holder = dep_implicit_make()
+	if(last)
+		dep_implicit_make(holder)?.dep_implicit_made = new
+	return holder.dep_implicit_made?.type

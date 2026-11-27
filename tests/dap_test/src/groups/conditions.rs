@@ -1,5 +1,3 @@
-//! Breakpoints with conditions
-
 use serde_json::json;
 
 use crate::{ok, world::World};
@@ -7,7 +5,6 @@ use crate::{ok, world::World};
 pub fn run() {
 	let mut world = World::start();
 
-	// middle() calls leaf(3), then leaf(8)
 	world.break_if(&[("leaf_1", "x == 8")]);
 	world.run("middle");
 	world.stop_on("breakpoint", "/leaf", "leaf_1");
@@ -34,8 +31,6 @@ pub fn run() {
 	world.run_through("parent");
 	ok("src member and global conditions");
 
-	// The condition calls a proc with a breakpoint of its own in it, which
-	// doesn't stop there
 	world.break_if(&[("leaf_2", ""), ("middle_3", "leaf(1) == 4")]);
 	world.run("middle");
 	for _ in 0..2 {
@@ -53,25 +48,21 @@ pub fn run() {
 	world.eval_global("global_number = 5");
 	ok("condition side effects run once per hit");
 
-	// A condition that fails with an error isn't a hit: a stop there would
-	// say it held. The console says so once, however many hits fail.
-	let failed = "failed; skipping affected hits (reported once): ";
+	let failed = "` failed: ";
 	world.break_if(&[("leaf_1", "x.len > 3")]);
-	// x is 3, then 8, each time
 	for _ in 0..3 {
 		world.run_through("middle");
 	}
 	let (_, line) = world.marks.place("leaf_1");
-	let said = "The condition (x.len > 3) of the breakpoint at ";
-	assert_eq!(world.count(said), 1, "expected exactly one diagnostic matching {:?}", said);
-	let place = format!("stepping.dm:{} {}runtime error: Cannot read 3.len", line, failed);
-	assert_eq!(world.count(&place), 1, "expected exactly one diagnostic matching {:?}", place);
-	// (The world's own output has each runtime error)
-	assert_eq!(world.count("(reported once)"), 1, "diagnostic was reported more than once");
+	let said = format!(
+		"Breakpoint at stepping.dm:{}: condition `x.len > 3` failed: runtime error: Cannot read 3.len. Hits where the condition fails are skipped. \
+		 This message is shown once.",
+		line
+	);
+	assert_eq!(world.count(&said), 1, "expected exactly one diagnostic matching {:?}", said);
+	assert_eq!(world.count("This message is shown once."), 1, "diagnostic was reported more than once");
 	ok("condition runtime errors reported once");
 
-	// Where it holds, it stops; where it fails, it doesn't, said once more
-	// for this breakpoint (another condition is another breakpoint)
 	world.break_if(&[("leaf_1", "x == 8 || x.len")]);
 	world.run("middle");
 	world.stop_on("breakpoint", "/leaf", "leaf_1");
@@ -83,19 +74,15 @@ pub fn run() {
 	assert_eq!(world.count(failed), 2);
 	ok("conditions that fail on some hits");
 
-	// One that doesn't compile isn't set, the others in the file are
 	let set = world.try_break_if(&[("leaf_1", "x =="), ("leaf_2", "y == 4"), ("middle_3", "nowhere_at_all == 1")]);
 	assert_eq!(set[0]["verified"], false, "{}", set[0]);
 	let why = set[0]["message"].as_str().unwrap();
-	assert!(why.starts_with("the condition doesn't compile: parser error: "), "{}", why);
+	assert!(why.starts_with("condition failed to compile: parse error: "), "{}", why);
 	assert_eq!((&set[1]["verified"], &set[2]["verified"]), (&json!(true), &json!(true)));
 	world.run("middle");
 	world.stop_on("breakpoint", "/leaf", "leaf_2");
-	// A name the world doesn't have is only found out when it's hit, and
-	// it's skipped like any condition that fails
 	world.resume_through("middle");
-	// The console's message can come after the world's own output
-	let undefined = format!("{}undefined var: nowhere_at_all", failed);
+	let undefined = format!("{}undefined variable: nowhere_at_all", failed);
 	world.wait_count(&undefined, 1);
 	assert_eq!(world.count(&undefined), 1);
 	let set = world.request(
@@ -106,7 +93,7 @@ pub fn run() {
 	assert!(set["breakpoints"][0]["message"]
 		.as_str()
 		.unwrap()
-		.starts_with("the condition doesn't compile: "));
+		.starts_with("condition failed to compile: "));
 	assert_eq!(set["breakpoints"][1]["verified"], true);
 	world.function_breakpoints(&[]);
 	ok("condition compile errors at installation");
@@ -123,9 +110,6 @@ pub fn run() {
 	world.end();
 }
 
-/// Sets the one breakpoint, on the first line of recurse(), with a hit
-/// condition and maybe a condition, runs recurse(3), which reaches it four
-/// times (at depths 3, 2, 1 and 0), and returns the depths it stopped at
 fn stops_with(world: &mut World, hit: &str, condition: Option<&str>) -> Vec<String> {
 	let (file, line) = world.marks.place("recurse_1");
 	let set = world.set_breakpoints(&file, json!([{ "line": line, "hitCondition": hit, "condition": condition }]));
@@ -133,17 +117,13 @@ fn stops_with(world: &mut World, hit: &str, condition: Option<&str>) -> Vec<Stri
 	stops_of(world)
 }
 
-/// Runs recurse(3) and returns the depths it stopped at
 fn stops_of(world: &mut World) -> Vec<String> {
 	world.run_collecting("recurse", |world| world.argument("depth"))
 }
 
-/// Lets the world carry on from a stop in `scenario`, which had finished
-/// `finished` times when it was run, to its end, and returns the depths it
-/// stopped at on the way
 fn resume_collecting(world: &mut World, scenario: &str, finished: usize) -> Vec<String> {
 	let over = format!("dap: finished {}\n", scenario);
-	let deadline = std::time::Instant::now() + crate::client::TIMEOUT;
+	let deadline = std::time::Instant::now() + test_support::dap::TIMEOUT;
 	let mut seen = vec![];
 	world.resume();
 	loop {
@@ -171,12 +151,10 @@ fn hit_counts(world: &mut World) {
 	assert_eq!(stops_with(world, "9", None), Vec::<String>::new());
 	ok("hit-count operators");
 
-	// Only the hits where the condition holds are counted: depths 3, 1, 0
 	assert_eq!(stops_with(world, "2", Some("depth != 2")), ["1", "0"]);
 	assert_eq!(stops_with(world, "% 2", Some("depth < 3")), ["1"]);
 	ok("count only hits passing the condition");
 
-	// A step that stops on it is a hit too: depth 3's, so 2 and 0 stop
 	let (file, line) = world.marks.place("recurse_1");
 	world.set_breakpoints(&file, json!([{ "line": line, "hitCondition": "% 2" }]));
 	world.function_breakpoints(&["/proc/sc_recurse"]);
@@ -189,17 +167,35 @@ fn hit_counts(world: &mut World) {
 	assert_eq!(resume_collecting(world, "recurse", finished), ["2", "0"]);
 	ok("step and breakpoint share one stop");
 
-	// The count goes on until the breakpoint is set again
 	assert_eq!(stops_with(world, "== 6", None), Vec::<String>::new());
 	assert_eq!(stops_of(world), ["2"]);
 	assert_eq!(stops_of(world), Vec::<String>::new());
 	ok("hit counts persist between runs");
 
 	let (file, line) = world.marks.place("recurse_1");
+	world.set_breakpoints(&file, json!([]));
+	assert_eq!(stops_with(world, "== 6", None), Vec::<String>::new());
+	let plain = world.marks.line("plain_1");
+	let set = world.set_breakpoints(&file, json!([{ "line": line, "hitCondition": "== 6" }, { "line": plain }]));
+	assert_eq!((&set[0]["verified"], &set[1]["verified"]), (&json!(true), &json!(true)), "{:?}", set);
+	assert_eq!(stops_of(world), ["2"]);
+	world.set_breakpoints(&file, json!([]));
+	let on_recurse = json!({ "name": "/proc/recurse", "hitCondition": "== 6" });
+	world.request("setFunctionBreakpoints", json!({ "breakpoints": [on_recurse] }));
+	assert_eq!(stops_of(world), Vec::<String>::new());
+	world.request(
+		"setFunctionBreakpoints",
+		json!({ "breakpoints": [on_recurse, { "name": "/proc/sc_plain" }] })
+	);
+	assert_eq!(stops_of(world), ["2"]);
+	world.function_breakpoints(&[]);
+	ok("adding a breakpoint keeps the others' hit counts");
+
+	let (file, line) = world.marks.place("recurse_1");
 	for (hit, why) in [
-		("soon", "invalid hit count \"soon\"; expected"),
+		("soon", "invalid hit count \"soon\": expected"),
 		("% 0", "hit interval must be greater than zero"),
-		("== two", "invalid hit count \"== two\"; expected")
+		("== two", "invalid hit count \"== two\": expected")
 	] {
 		let set = world.set_breakpoints(&file, json!([{ "line": line, "hitCondition": hit }]));
 		assert_eq!(set[0]["verified"], false, "{}", set[0]);
@@ -208,7 +204,6 @@ fn hit_counts(world: &mut World) {
 	world.set_breakpoints(&file, json!([]));
 	ok("invalid hit-count diagnostic");
 
-	// leaf(3), then leaf(8)
 	let set = world.request(
 		"setFunctionBreakpoints",
 		json!({ "breakpoints": [{ "name": "/proc/leaf", "hitCondition": "2" }] })

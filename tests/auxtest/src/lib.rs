@@ -2,10 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use auxtools::*;
 
+mod bytecode;
 mod hooks;
 mod lists;
 mod procs;
 mod strings;
+mod tables;
+mod turfs;
 mod value_from;
 mod weak;
 
@@ -19,7 +22,6 @@ fn inc_counter() {
 	}))
 }
 
-// Not a hook, so a failure still gets reported when hooks are what broke
 byond_ffi_fn! { auxtest_out(msg) {
 	eprintln!("\n{}", msg);
 	Some(String::new())
@@ -27,11 +29,10 @@ byond_ffi_fn! { auxtest_out(msg) {
 
 static FAIL_NEXT_INIT: AtomicBool = AtomicBool::new(false);
 
-#[hook("/proc/auxtest_fail_next_init")]
-fn fail_next_init() {
+byond_ffi_fn! { auxtest_fail_next_init() {
 	FAIL_NEXT_INIT.store(true, Ordering::Relaxed);
-	Ok(Value::NULL)
-}
+	Some(String::new())
+} }
 
 #[init(partial)]
 fn fail_init_on_request() -> Result<(), String> {
