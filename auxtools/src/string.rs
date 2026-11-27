@@ -34,7 +34,7 @@ pub fn text_of(bytes: &[u8]) -> String {
 /// no `From<&str>` implementation, so APIs accepting `Into<StringRef>` require
 /// a `StringRef`, `&StringRef`, or `byond_string!`.
 pub struct StringRef {
-	pub value: Value
+	value: Value
 }
 
 impl StringRef {
@@ -55,9 +55,7 @@ impl StringRef {
 			return None;
 		}
 
-		Some(StringRef {
-			value: unsafe { Value::from_raw(value.raw) }
-		})
+		Some(StringRef { value })
 	}
 
 	/// Creates a `StringRef` from a BYOND string ID, taking a new reference.
@@ -110,7 +108,7 @@ impl StringRef {
 
 impl Clone for StringRef {
 	fn clone(&self) -> Self {
-		Self::from_value(self.value.clone()).unwrap()
+		StringRef { value: self.value.clone() }
 	}
 }
 
