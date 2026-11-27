@@ -2,22 +2,36 @@
 
 DreamMaker records a file name for each proc in the `.dmb`'s debug information, and those names do
 not always match paths relative to the project directory. A nested `.dme` can include `_std/tgs.dm`
-yet record it as `tgs.dm`, and the `.dme` itself is recorded under the absolute path it had at
-build time, which may not exist on the current machine.
+yet record it as `tgs.dm`, a file included from outside the project directory is recorded under the
+name the include chain gives it with `..` components (for example,
+`#include "..\testing\testing.dm"` in a `.dme` under `game/` is recorded as
+`../testing/testing.dm`), and the `.dme` itself is recorded under the absolute path it had at build
+time, which may not exist on the current machine.
 
 ## How the adapter maps names and paths
 
-- **Debug names to local paths:** The debug adapter resolves debug names to local files through the
-  `.dme`'s include list. Any name missing from the list is joined to the project directory. If that
-  file does not exist and the cached include list is at least 5 seconds old, the adapter re-reads
-  the include list.
+- **Debug names to local paths (`WorldFiles::path`):** The debug adapter resolves debug names to
+  local files through the `.dme`'s include list. Any name missing from the list is joined to the
+  project directory. If that file does not exist and the cached include list is at least 5 seconds
+  old, the adapter re-reads the include list. The resulting path is normalized lexically, so
+  `../testing/testing.dm` under `/home/me/proj/game` gives `/home/me/proj/testing/testing.dm`
+  rather than `/home/me/proj/game/../testing/testing.dm`. An editor then opens the same document a
+  user opens by hand, and breakpoints set in it come back under the path the lookup below handles.
 - **The `.dme`'s own name:** An absolute debug name is kept as is, unless that path does not exist
   locally and its file name matches the project's `.dme`, in which case the adapter substitutes the
   local `.dme`.
-- **Local paths to debug names:** A path inside the project directory is mapped back to its debug
-  name using the include list, or converted to a relative path with forward slashes. A path outside
-  the project directory is sent to the debug server unchanged, because the server resolves it by
-  suffix and the adapter must not rewrite it.
+- **Local paths to debug names (`WorldFiles::name`):** A path inside the project directory is
+  mapped back to its debug name using the include list, or converted to a relative path with forward
+  slashes. For a file outside the project directory, an editor sends its real absolute path (for
+  example `/home/me/proj/testing/testing.dm`), which the debug server's suffix match cannot connect
+  to a debug name with `..` such as `../testing/testing.dm` (leaving breakpoints unverified with
+  "no executable code at or after this line"). The adapter therefore computes the path relative to
+  the project directory with leading `..` components (`relative_to`) and looks it up in the include
+  list. For this lookup, the include list's path-to-name map holds every included file, including
+  those whose debug name equals their path. If the include list names the file, its debug name is
+  sent. If the include list does not name it, or if `relative_to` returns nothing (when either path
+  is not absolute or the two share no root, such as two Windows drives), the path is sent unchanged
+  and the debug server resolves it by suffix.
 
 ## How the debug server matches names
 
@@ -29,5 +43,5 @@ files.
 ## Applies to
 
 - `auxtools-cli/src/adapter/files.rs`: `WorldFiles`, `WorldFiles::path`, `WorldFiles::name`,
-  `STALE`
+  `relative_to`, `STALE`
 - `debug_server/src/server/code.rs`: `procs_in`

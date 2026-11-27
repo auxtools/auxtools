@@ -62,7 +62,7 @@ file after adding a note or changing an `## Applies to` list.
 
 ### `auxtools-cli/src/adapter/files.rs`
 
-- [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `WorldFiles`, `WorldFiles::path`, `WorldFiles::name`, `STALE`
+- [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `WorldFiles`, `WorldFiles::path`, `WorldFiles::name`, `relative_to`, `STALE`
 
 ### `auxtools-cli/src/adapter/join.rs`
 
