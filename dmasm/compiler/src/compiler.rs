@@ -1578,17 +1578,54 @@ pub fn fold_in_proc(
     locals: &[(&str, &str)],
     byond: ByondVersion,
 ) -> Option<Folded> {
-    fold_after_statics(tree, ty, expr, locals, &[], byond)
+    let scope: Vec<InScope> = locals
+        .iter()
+        .map(|(name, path)| InScope::Local(name, path))
+        .collect();
+    fold_in_scope(tree, ty, expr, &scope, byond)
 }
 
-pub fn fold_after_statics(
+pub enum InScope<'a> {
+    Param(&'a str, &'a str),
+    Local(&'a str, &'a str),
+    Static(&'a str, &'a str, Option<Folded>),
+}
+
+pub fn fold_in_scope(
+    tree: &dreammaker::objtree::ObjectTree,
+    ty: dreammaker::objtree::TypeRef,
+    expr: &Expression,
+    scope: &[InScope],
+    byond: ByondVersion,
+) -> Option<Folded> {
+    in_scope(tree, ty, scope, byond, |compiler| {
+        fold::value(compiler, expr).filter(|v| *v != Folded::New)
+    })
+}
+
+pub fn field_globals_in_proc(
     tree: &dreammaker::objtree::ObjectTree,
     ty: dreammaker::objtree::TypeRef,
     expr: &Expression,
     locals: &[(&str, &str)],
-    statics: &[(&str, Option<Folded>)],
     byond: ByondVersion,
-) -> Option<Folded> {
+) -> Vec<Option<String>> {
+    let scope: Vec<InScope> = locals
+        .iter()
+        .map(|(name, path)| InScope::Local(name, path))
+        .collect();
+    in_scope(tree, ty, &scope, byond, |compiler| {
+        procs::field_globals(compiler, expr)
+    })
+}
+
+fn in_scope<R>(
+    tree: &dreammaker::objtree::ObjectTree,
+    ty: dreammaker::objtree::TypeRef,
+    scope: &[InScope],
+    byond: ByondVersion,
+    f: impl FnOnce(&Compiler) -> R,
+) -> R {
     let value = proc_value(vec![]);
     let source = procs::ProcSource {
         tree,
@@ -1601,17 +1638,29 @@ pub fn fold_after_statics(
         byond,
         file_names: None,
     };
-    let mut ctx = procs::proc_ctx(&source, vec![]);
-    for (name, path) in locals {
-        ctx.declare_typed_local(name, path.to_string());
-    }
-    for (name, folded) in statics {
-        ctx.declare_static(name, String::new(), None, None, false);
-        if let Some(value) = folded.clone().and_then(procs::local_const_value) {
-            ctx.fold_last_static(name, value);
+    let (mut params, mut param_types) = (vec![], vec![]);
+    for name in scope {
+        if let InScope::Param(name, path) = name {
+            params.push(name.to_string());
+            param_types.push(path.to_string());
         }
     }
-    let mut compiler = Compiler::new(vec![], ctx);
+    let mut ctx = procs::proc_ctx(&source, param_types);
+    for name in scope {
+        match name {
+            InScope::Param(..) => {}
+            InScope::Local(name, path) => {
+                ctx.declare_typed_local(name, path.to_string());
+            }
+            InScope::Static(name, path, folded) => {
+                ctx.declare_static(name, path.to_string(), None, None, false);
+                if let Some(value) = folded.clone().and_then(procs::local_const_value) {
+                    ctx.fold_last_static(name, value);
+                }
+            }
+        }
+    }
+    let mut compiler = Compiler::new(params, ctx);
     compiler.byond = byond;
-    fold::value(&compiler, expr).filter(|v| *v != Folded::New)
+    f(&compiler)
 }

@@ -193,6 +193,87 @@ pub fn dependents(built: Built) {
 	reload(&mut watcher, &changes);
 	assert_eq!(eval(&mut client, "\"[dep_local_offset()] [dep_local_default()]\""), "\"11 10\"");
 	println!("ok: a local const read alone follows the local consts and defaults it reads");
+
+	assert_eq!(eval(&mut client, "dep_colon()"), "\"6 5\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"/datum/dep_colon_later\n",
+		"/datum/dep_colon_later\n\tvar/const/DEP_COLON = 9\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "dep_colon()"), "\"10 9\"");
+	println!("ok: an untyped x:name in an unchanged file finds a later type's new declaration");
+
+	assert_eq!(eval(&mut client, "\"[dep_scoped_limit()] [dep_typed_limit()]\""), "\"6 6\"");
+	let changes = source.edit("dependents.dm", "DEP_SCOPED_BASE = 5", "DEP_SCOPED_BASE = 10");
+	reload(&mut watcher, &changes);
+	let changes = source.edit("dependents.dm", "DEP_SCOPED = 5", "DEP_SCOPED = 10");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "\"[dep_scoped_limit()] [dep_typed_limit()]\""), "\"11 11\"");
+	println!("ok: a local const in an unchanged file reads the names in scope where it is declared");
+
+	const PARENT: &str = "\"[(new /datum/dep_parent/child).f()] [dep_self()]\"";
+	assert_eq!(eval(&mut client, PARENT), "\"5 5\"");
+	let changes = source.edit("dependents.dm", "DEP_PARENT = 5", "DEP_PARENT = 10");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, PARENT), "\"10 10\"");
+	println!("ok: code dmasm can't compile that passes a changed const alone to ..() or .() sees its new value");
+
+	let changes = source.edit("dependents.dm", "/datum/dep_colon_later\n\tvar/const/DEP_COLON = 9\n", "");
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "dep_colon()"), "\"6 5\"");
+	println!("ok: an untyped x:name in an unchanged file finds an earlier type's declaration when a later type is removed");
+
+	assert_eq!(eval(&mut client, "(new /datum/dep_colon_inits).limits[1]"), "6");
+	assert_eq!(eval(&mut client, "dep_colon_local_const()"), "6");
+	let changes = source.edit(
+		"dependents.dm",
+		"/datum/dep_colon_list_later\n",
+		"/datum/dep_colon_list_later\n\tvar/const/DEP_COLON_LIST = 9\n"
+	);
+	let chooser = changes
+		.plan
+		.reloads
+		.iter()
+		.find(|r| r.proc.path == "/mob/dep_colon_chooser/choose_dep_colon_list");
+	let Some(InList::New(choices)) = chooser.map(|r| &r.params[0].in_list) else {
+		panic!("the verb's unchanged `in` list isn't compiled again: {:?}", chooser);
+	};
+	let code: Vec<_> = (choices.nodes.iter())
+		.filter_map(|node| match node {
+			dmasm::Node::Instruction(instruction, _) => Some(instruction),
+			_ => None
+		})
+		.collect();
+	assert!(
+		code.windows(2)
+			.any(|pair| matches!(pair, [dmasm::Instruction::PushInt(10), dmasm::Instruction::NewList(1)])),
+		"the verb's new `in` list isn't list(10): {}",
+		dmasm::format(&choices.nodes)
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "(new /datum/dep_colon_inits).limits[1]"), "10");
+	println!("ok: initializers and `in` lists in an unchanged file follow the declaration an untyped x:name finds");
+	assert_eq!(eval(&mut client, "dep_colon_local_const()"), "10");
+	println!("ok: a local const in an unchanged file follows the declaration an untyped x:name finds");
+
+	assert_eq!(eval(&mut client, "dep_colon_alone()"), "5");
+	let refused = refused_edit(
+		&mut source,
+		"dependents.dm",
+		"/datum/dep_colon_alone_later\n",
+		"/datum/dep_colon_alone_later\n\tvar/const/DEP_COLON_ALONE = 9\n"
+	);
+	let shown: Vec<String> = refused.iter().map(|r| format!("{:#}", r)).collect();
+	assert_eq!(
+		shown,
+		[
+			"/dep_colon_alone: reads a variable via `x:name` that another type now declares, so it must be recompiled, but it failed to compile: \
+			 unsupported: `type::proc()` targeting a type's second or later override"
+		],
+		"a proc dmasm can't compile that reads an untyped x:name alone from another type after the reload isn't refused"
+	);
+	println!("ok: a reload is refused for a proc dmasm can't compile that reads an untyped x:name alone from another type");
 }
 
 fn refused_edit(source: &mut Source, file: &str, from: &str, to: &str) -> Vec<dmasm::reload::Refusal> {

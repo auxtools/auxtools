@@ -506,6 +506,7 @@ pub struct Changes {
     restart_settings: Vec<(String, String)>,
     defaults_changed: Vec<String>,
     defaults_moved: Vec<String>,
+    colon_names: Vec<String>,
     moved_procs: Vec<String>,
 }
 
@@ -1871,11 +1872,27 @@ fn names_any(value: &ProcValue, names: &HashSet<&str>, defaults: &HashSet<&str>)
     found
 }
 
+fn colon_reads_any(value: &ProcValue, names: &HashSet<&str>) -> bool {
+    use dreammaker::ast::{Follow, PropertyAccessKind};
+    if names.is_empty() {
+        return false;
+    }
+    let mut found = false;
+    syntax::walk_proc(value, &mut |node| {
+        found |= matches!(node, syntax::Node::Follow(Follow::Field(
+            PropertyAccessKind::Colon | PropertyAccessKind::SafeColon,
+            name,
+        )) if names.contains(name.as_str()));
+    });
+    found
+}
+
 fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &mut Changes) {
     if changes.consts.is_empty()
         && changes.retyped.is_empty()
         && changes.defaults_changed.is_empty()
         && changes.defaults_moved.is_empty()
+        && changes.colon_names.is_empty()
     {
         return;
     }
@@ -1885,7 +1902,13 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         .chain(&changes.retyped)
         .map(String::as_str)
         .collect();
-    let consts: HashSet<&str> = changes.consts.iter().map(String::as_str).collect();
+    let colon_names: HashSet<&str> = changes.colon_names.iter().map(String::as_str).collect();
+    let consts: HashSet<&str> = changes
+        .consts
+        .iter()
+        .chain(&changes.colon_names)
+        .map(String::as_str)
+        .collect();
     let moved: HashSet<&str> = changes
         .defaults_changed
         .iter()
@@ -1908,22 +1931,24 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         let (Some(_), Some((new_ty, new_value))) = (old.find(&old_key), new.find(key)) else {
             continue;
         };
-        if !names_any(new_value, &names, &moved) {
+        if !names_any(new_value, &names, &moved) && !colon_reads_any(new_value, &colon_names) {
             continue;
         }
         let compiled = match (old.compile(&old_key), new.compile(key)) {
             (Ok(before), Ok(after)) => Some((before, after)),
             (_, after) => {
-                if !folds_changed(old, new, &new_ty.get().path, new_value, &consts) {
+                let path = &new_ty.get().path;
+                let why = if folds_changed(old, new, path, new_value, &consts) {
+                    "folds a `const` variable whose value changed"
+                } else if colon_rebinds(old, new, path, new_value, &colon_names) {
+                    "reads a variable via `x:name` that another type now declares"
+                } else {
                     continue;
-                }
+                };
                 if let Err(e) = after {
                     let refusal = new.uncompiled(key, &e);
                     changes.refused.push(Refusal {
-                        why: format!(
-                            "folds a const whose value changes, so it must be compiled again, but it {}",
-                            refusal.why
-                        ),
+                        why: format!("{why}, so it must be recompiled, but it {}", refusal.why),
                         ..refusal
                     });
                     continue;
@@ -1982,29 +2007,53 @@ fn local_consts<'a>(
     ty: TypeRef,
     value: &'a ProcValue,
 ) -> Vec<(&'a str, usize, Option<crate::compiler::Folded>)> {
-    let mut found = vec![];
-    if let Some(code) = &value.code {
-        global_init::static_statements(code, None, &mut found);
-    }
-    let mut seen: Vec<(&str, Option<crate::compiler::Folded>)> = vec![];
+    use crate::compiler::InScope;
+    let mut statics: Vec<&str> = vec![];
+    let mut folded: HashMap<usize, crate::compiler::Folded> = HashMap::new();
     let mut out = vec![];
-    for (_, var) in found {
-        let name = var.name.as_str();
-        let number = seen.iter().filter(|(n, _)| *n == name).count();
-        let mut folded = None;
-        if var.var_type.flags.is_const() {
-            folded = var.value.as_ref().and_then(|value| {
-                crate::compiler::fold_after_statics(&s.tree, ty, value, &[], &seen, s.byond)
-            });
-            out.push((name, number, folded.clone()));
+    retargeted::walk_scopes(value, &mut |var, scopes| {
+        let flags = var.var_type.flags;
+        if !flags.is_static() && !flags.is_const() {
+            return;
         }
-        seen.push((name, folded));
-    }
+        let name = var.name.as_str();
+        let number = statics.iter().filter(|n| **n == name).count();
+        statics.push(name);
+        if !flags.is_const() {
+            return;
+        }
+        let in_scope: Vec<InScope> = scopes
+            .iter()
+            .enumerate()
+            .flat_map(|(depth, scope)| scope.iter().map(move |d| (depth, d)))
+            .map(|(depth, d)| match d.var {
+                None if depth == 0 => InScope::Param(d.name, &d.ty),
+                Some(v) if v.var_type.flags.is_static() || v.var_type.flags.is_const() => {
+                    let at = v as *const dreammaker::ast::VarStatement as usize;
+                    InScope::Static(d.name, &d.ty, folded.get(&at).cloned())
+                }
+                _ => InScope::Local(d.name, &d.ty),
+            })
+            .collect();
+        let value = var.value.as_ref().and_then(|value| {
+            crate::compiler::fold_in_scope(&s.tree, ty, value, &in_scope, s.byond)
+        });
+        if let Some(value) = &value {
+            folded.insert(
+                var as *const dreammaker::ast::VarStatement as usize,
+                value.clone(),
+            );
+        }
+        out.push((name, number, value));
+    });
     out
 }
 
 fn local_const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &mut Changes) {
-    if changes.consts.is_empty() && changes.defaults_changed.is_empty() {
+    if changes.consts.is_empty()
+        && changes.defaults_changed.is_empty()
+        && changes.colon_names.is_empty()
+    {
         return;
     }
     let reloaded: HashSet<ProcKey> = changes
@@ -2117,6 +2166,7 @@ fn read_alone(s: &Snapshot, value: &ProcValue) -> HashSet<usize> {
                 }
                 let args: &[Expression] = match &term.elem {
                     Term::Call(name, args) if !builtin(name.as_str()) => args,
+                    Term::ParentCall(args) | Term::SelfCall(args) => args,
                     Term::List(args) | Term::Alist(args) => args,
                     Term::NewImplicit { args: Some(args) }
                     | Term::NewPrefab {
@@ -2269,6 +2319,49 @@ fn folds_changed(
                 }
                 _ => false,
             };
+    });
+    found
+}
+
+fn colon_rebinds(
+    old: &Snapshot,
+    new: &Snapshot,
+    ty: &str,
+    value: &ProcValue,
+    names: &HashSet<&str>,
+) -> bool {
+    use dreammaker::ast::{Expression, Follow, PropertyAccessKind, Term};
+    if names.is_empty() {
+        return false;
+    }
+    let local_types = retargeted::local_read_types(value);
+    let mut found = false;
+    syntax::walk_proc(value, &mut |node| {
+        let syntax::Node::Expression(expression @ Expression::Base { term, follow }) = node else {
+            return;
+        };
+        let colon = |f: &dreammaker::ast::Spanned<Follow>| {
+            matches!(&f.elem, Follow::Field(
+                PropertyAccessKind::Colon | PropertyAccessKind::SafeColon,
+                name,
+            ) if names.contains(name.as_str()))
+        };
+        if found || !follow.iter().any(colon) {
+            return;
+        }
+        let locals: Vec<(&str, &str)> = match &term.elem {
+            Term::Ident(head) => local_types
+                .get(&(&term.elem as *const Term as usize, head.to_string()))
+                .map(|path| vec![(head.as_str(), path.as_str())])
+                .unwrap_or_default(),
+            _ => vec![],
+        };
+        let globals = |s: &Snapshot| {
+            s.find_type(ty).map(|t| {
+                crate::compiler::field_globals_in_proc(&s.tree, t, expression, &locals, s.byond)
+            })
+        };
+        found = globals(old) != globals(new);
     });
     found
 }
@@ -3182,6 +3275,15 @@ fn compare_types(
         }
     }
     for path in old_types.keys().filter(|p| !new_types.contains_key(*p)) {
+        if let Some(o) = old.find_type(path) {
+            for (name, var) in o.get().vars.iter() {
+                if var.declaration.is_some()
+                    && !changes.colon_names.iter().any(|c| c == name.as_str())
+                {
+                    changes.colon_names.push(name.to_string());
+                }
+            }
+        }
         changes.warnings.push(note(
             Id::RemovedTypeRetained,
             path,
@@ -3223,6 +3325,9 @@ fn compare_types(
                     moved::var_moved(old, new, n, name.as_str(), old_var, Some(var), changes);
                 }
                 None if var.declaration.is_some() => {
+                    if !n.is_root() && !changes.colon_names.iter().any(|c| c == name.as_str()) {
+                        changes.colon_names.push(name.to_string());
+                    }
                     if new_var(new, n, name.as_str(), var, o.is_none(), changes) {
                         if let Some(added) = changes.plan.new_vars.last_mut() {
                             added.moved_from = moved::moved_from(old, n, name.as_str());
@@ -3309,6 +3414,9 @@ fn compare_types(
                         type_path: path.to_owned(),
                         var: name.to_string(),
                     });
+                    if !changes.colon_names.iter().any(|c| c == name.as_str()) {
+                        changes.colon_names.push(name.to_string());
+                    }
                 }
             } else if n.get_var_declaration(name.as_str()).is_some() {
                 var_default(old, new, path, name.as_str(), false, changes);

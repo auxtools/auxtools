@@ -211,3 +211,46 @@ var/hr_tally = 100
 
 /mob/limited/verb/choose_limit(x in list(/datum/config_limits::limit))
 	return x
+
+/datum/dep_colon_first
+	var/const/DEP_COLON = 5
+
+/proc/dep_colon(x)
+	return "[x:DEP_COLON + 1] [x:DEP_COLON]"
+
+/proc/dep_scoped_limit(x)
+	if(x)
+		var/const/DEP_SCOPED_BASE = 2
+		x = DEP_SCOPED_BASE
+	var/const/DEP_SCOPED_LIMIT = DEP_SCOPED_BASE + 1
+	return DEP_SCOPED_LIMIT
+
+/proc/dep_typed_limit(datum/dep_scoped_config/config)
+	var/const/DEP_TYPED_LIMIT = config.DEP_SCOPED + 1
+	return DEP_TYPED_LIMIT
+
+/datum/dep_parent/child/f(x)
+	var/last = /datum/dep_twice::f()
+	return last ? ..(DEP_PARENT) : 0
+
+/proc/dep_self(x)
+	var/last = /datum/dep_twice::f()
+	return x || !last ? x : .(DEP_PARENT)
+
+/mob/dep_colon_chooser
+	var/dep_colon_holder
+
+/mob/dep_colon_chooser/verb/choose_dep_colon_list(x as anything in list(dep_colon_holder:DEP_COLON_LIST + 1))
+	return x
+
+/datum/dep_colon_inits
+	var/dep_colon_holder
+	var/list/limits = list(dep_colon_holder:DEP_COLON_LIST + 1)
+
+/proc/dep_colon_alone(x)
+	var/last = /datum/dep_twice::f()
+	return last ? x:DEP_COLON_ALONE : 0
+
+/proc/dep_colon_local_const(x)
+	var/const/DEP_COLON_LOCAL = x:DEP_COLON_LIST + 1
+	return DEP_COLON_LOCAL

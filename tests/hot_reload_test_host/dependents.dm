@@ -195,3 +195,25 @@ var/const/DEP_OFFSET_BASE = 5
 /proc/dep_local_default()
 	var/const/DEP_DEFAULT_LIMIT = /datum/dep_local_config::dep_limit
 	return DEP_DEFAULT_LIMIT
+
+/datum/dep_colon_later
+
+var/const/DEP_SCOPED_BASE = 5
+
+/datum/dep_scoped_config
+	var/const/DEP_SCOPED = 5
+
+var/const/DEP_PARENT = 5
+
+/datum/dep_parent/proc/f(x)
+	return x
+
+/datum/dep_colon_list_first
+	var/const/DEP_COLON_LIST = 5
+
+/datum/dep_colon_list_later
+
+/datum/dep_colon_alone_first
+	var/const/DEP_COLON_ALONE = 5
+
+/datum/dep_colon_alone_later
