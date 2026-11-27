@@ -106,7 +106,7 @@ fn execute(raw: &[String]) -> Result<()> {
 	}
 	if cli.response_timeout.is_some() && !command.awaits_responses() {
 		return Err(match command {
-			Command::Stop(_) => "--response-timeout cannot be used with 'stop': it waits for the process to exit; use --timeout.".to_owned(),
+			Command::Stop(_) => "--response-timeout cannot be used with 'stop'. Use --timeout to set the shutdown timeout.".to_owned(),
 			_ => format!(
 				"--response-timeout cannot be used with '{}': it does not select an existing world",
 				command.name()
@@ -227,7 +227,7 @@ fn read_text(file: &str) -> Result<String> {
 fn read_stdin() -> Result<String> {
 	use std::io::{IsTerminal, Read};
 	if io::stdin().is_terminal() {
-		return Err("'-' reads the expression from stdin, but stdin is a terminal.".into());
+		return Err("cannot read expression from stdin: stdin is a terminal".into());
 	}
 	let mut text = String::new();
 	io::stdin().read_to_string(&mut text).map_err(|e| format!("cannot read stdin: {}", e))?;
@@ -282,12 +282,16 @@ fn only_world() -> Result<u32> {
 		[world] => Ok(world.pid),
 		[] if worlds.is_empty() => Err("no worlds found with the debug library loaded. Start one with 'auxtools launch'.".into()),
 		[] => Err(format!(
-			"no compatible worlds found: {} use another debug protocol version than this CLI ({}). Use 'auxtools list'.",
-			worlds.len(),
+			"no compatible worlds found. {} {} a different debug protocol (this CLI uses protocol {}). Run 'auxtools list' for details.",
+			match worlds.len() {
+				1 => "The running world".to_owned(),
+				n => format!("The {} running worlds", n)
+			},
+			if worlds.len() == 1 { "uses" } else { "use" },
 			PROTOCOL_VERSION
 		)
 		.into()),
-		_ => Err("multiple compatible worlds found. Specify --pid; use 'auxtools list'.".into())
+		_ => Err("multiple compatible worlds found. Select one with --pid (run 'auxtools list' to see their PIDs).".into())
 	}
 }
 
@@ -489,7 +493,7 @@ impl World {
 					let failure = Failure(
 						1,
 						format!(
-							"debugger initialization failed for pid {}: {}. The world is running; use 'auxtools stop' to terminate it.",
+							"debugger initialization failed for PID {}: {}. The world is still running. Run 'auxtools stop' to terminate it.",
 							self.pid, reason
 						)
 					);
@@ -537,7 +541,7 @@ impl World {
 		Failure(
 			TIMED_OUT,
 			format!(
-				"timed out after {} waiting for the world to {}; it is busy or hung. Set --response-timeout to wait longer.",
+				"timed out after {} waiting for the world to {} (it may be busy or hung). Pass --response-timeout to wait longer.",
 				seconds_text(self.patience),
 				act
 			)
@@ -710,12 +714,7 @@ impl World {
 		let frames = self.frames(0, Some(n.saturating_add(1)))?;
 		match frames.get(n as usize) {
 			Some(frame) => Ok(frame.id),
-			None => Err(format!(
-				"frame {} does not exist: the paused stack has {} frames (0 is innermost).",
-				n,
-				frames.len()
-			)
-			.into())
+			None => Err(format!("frame {} does not exist (stack depth is {}, with frame 0 innermost)", n, frames.len()).into())
 		}
 	}
 
@@ -856,7 +855,7 @@ impl World {
 			return Ok(());
 		};
 		if self.paused()?.is_some() {
-			eprintln!("the world is paused: spawn {} runs after execution resumes.", number);
+			eprintln!("the world is paused, so spawn {} will run once execution resumes", number);
 		}
 
 		let until = timeout.map(|timeout| Instant::now() + timeout);
@@ -866,7 +865,7 @@ impl World {
 				return Err(Failure(
 					TIMED_OUT,
 					format!(
-						"timed out after {} waiting for spawn {} to finish. It keeps running.",
+						"timed out after {} waiting for spawn {} to finish. The spawned code continues running.",
 						seconds_text(timeout.unwrap_or_default()),
 						number
 					)
@@ -1074,10 +1073,10 @@ impl World {
 			{
 				if let Some(at) = stack.iter().position(|frame| frame.proc == from) {
 					if at == 0 {
-						eprintln!("the step ended {} with a runtime error: {}", from, message);
+						eprintln!("{} ended with a runtime error during the step: {}", from, message);
 					} else {
 						eprintln!(
-							"during the step, {} (called by {}) ended with a runtime error: {}",
+							"{}, called by {}, ended with a runtime error during the step: {}",
 							stack[0].proc, from, message
 						);
 					}
@@ -1130,7 +1129,7 @@ impl World {
 				self.report(Some(&reason))
 			}
 			Stepped::Ended => {
-				eprintln!("step completed with the world running: no frame remained to pause in.");
+				eprintln!("step completed with the world running: no frame remained to pause in");
 				self.report(None)
 			}
 			Stepped::TimedOut => {
@@ -1140,7 +1139,7 @@ impl World {
 				Err(Failure(
 					TIMED_OUT,
 					format!(
-						"timed out after {} waiting for the step to complete. The world was neither paused nor resumed by this.",
+						"timed out after {} waiting for the step to complete. The timeout did not pause or resume the world.",
 						seconds_text(timeout.unwrap_or_default())
 					)
 				))
@@ -1327,11 +1326,11 @@ impl Bound {
 		let mut text = format!("breakpoint set at {}", self.spot());
 		if let (Some(asked), Some(line)) = (self.asked_line, self.line) {
 			if asked != line {
-				text += &format!(" (line {} has no code; this is the next line that has)", asked);
+				text += &format!(" (moved from line {}, which has no code)", asked);
 			}
 		}
 		if self.at.proc.path == GLOBAL_INIT {
-			text += ": this line initializes globals or static vars only at world startup";
+			text += " (runs only at world startup to initialize global or static variables)";
 		}
 		text
 	}
@@ -1358,7 +1357,7 @@ fn spot(proc: &ProcRef, old_code: bool, file: Option<&str>, line: Option<u32>) -
 fn hung_up() -> Failure {
 	Failure(
 		HUNG_UP,
-		"world connection ended before the operation completed: the world exited or rebooted.".to_owned()
+		"world connection ended before the operation completed. The world exited or rebooted.".to_owned()
 	)
 }
 

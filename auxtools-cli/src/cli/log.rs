@@ -28,7 +28,7 @@ pub fn log(world: &mut World, args: &args::Log) -> Result<()> {
 	};
 	if let Some(since) = args.since.filter(|since| first > since + 1) {
 		eprintln!(
-			"entries {} to {} are no longer retained: the journal keeps the most recent few thousand.",
+			"entries {} to {} are no longer in the journal (only the latest 4,000 entries are retained)",
 			since + 1,
 			first - 1
 		);
@@ -275,7 +275,7 @@ pub fn describe(event: &JournalEvent) -> (String, Vec<String>) {
 		JournalEvent::Output { lines } => ("output".to_owned(), lines.clone()),
 		JournalEvent::HoldEnded { seconds } => (
 			format!(
-				"retained pause resumed automatically: no debugger was connected for {} seconds (--hold-max)",
+				"world resumed automatically after {}s with no debugger connected (--hold-max)",
 				number(*seconds)
 			),
 			vec![]

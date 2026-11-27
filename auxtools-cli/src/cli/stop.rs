@@ -42,8 +42,8 @@ fn ended_by(world: &mut World, until: Instant) -> Result<bool> {
 			Ok(Some(Response::Eval(Err(error)))) if !error.message.starts_with(RUNTIME_ERROR) => {}
 			Ok(Some(Response::Eval(_))) => {
 				return Err(format!(
-					"world.Del() failed with a runtime error (see the world's log), so the world (pid {}) is still running. Fix world/Del() or \
-					 include --kill in the stop request.",
+					"world.Del() failed with a runtime error, leaving world process {} running. Check the world log for details, then fix \
+					 world/Del() or run 'auxtools stop --kill'.",
 					world.pid
 				)
 				.into())
@@ -92,8 +92,8 @@ pub fn stop(world: &mut World, args: &args::Stop) -> Result<()> {
 		return Err(Failure(
 			TIMED_OUT,
 			format!(
-				"timed out after {} waiting for the world process (pid {}) to exit. world.Del() shut down its debugger, so auxtools can no longer \
-				 reach it; include --kill in the stop request for a forced fallback.",
+				"timed out after {} waiting for world process {} to exit. world.Del() closed the debugger, so auxtools cannot reach the world now. \
+				 To terminate a world that does not exit, pass --kill to stop.",
 				seconds_text(timeout),
 				pid
 			)
@@ -103,11 +103,14 @@ pub fn stop(world: &mut World, args: &args::Stop) -> Result<()> {
 	if gone_by(pid, Instant::now() + kill_timeout) {
 		match (&world.unavailable, failed) {
 			(Some(why), _) => eprintln!(
-				"process terminated because debugger initialization failed: {}. world.Del() could not be called.",
+				"world.Del() could not run and the process was terminated because debugger initialization failed: {}",
 				why
 			),
-			(None, Some(_)) => eprintln!("world.Del() failed with a runtime error; the process was terminated."),
-			(None, None) => eprintln!("graceful shutdown timed out after {}; the process was terminated.", seconds_text(timeout))
+			(None, Some(_)) => eprintln!("world.Del() failed with a runtime error, so the process was terminated"),
+			(None, None) => eprintln!(
+				"graceful shutdown timed out after {}, so the process was terminated",
+				seconds_text(timeout)
+			)
 		}
 		done(
 			args.json,
@@ -119,7 +122,7 @@ pub fn stop(world: &mut World, args: &args::Stop) -> Result<()> {
 		Err(Failure(
 			TIMED_OUT,
 			format!(
-				"timed out after {} waiting for the terminated process (pid {}) to exit.",
+				"timed out after {} waiting for terminated process {} to exit",
 				seconds_text(kill_timeout),
 				pid
 			)
@@ -144,15 +147,15 @@ pub fn reconnect(world: &mut World, args: &args::Reconnect) -> Result<()> {
 		}
 		Response::Reconnect(Ok(Reconnected::Hosted)) => {
 			if !args.json {
-				eprintln!("DreamSeeker hosts the world: rebooting it instead.");
+				eprintln!("rebooting the world instead because DreamSeeker hosts it");
 			}
 			reboot(world, &args::Reboot {
 				timeout: args.timeout,
 				json: args.json
 			})
 		}
-		Response::Reconnect(Err(e)) => Err(format!("cannot reconnect the clients: {}.", e).into()),
-		other => Err(format!("unexpected response: {:?}", other).into())
+		Response::Reconnect(Err(e)) => Err(format!("cannot reconnect clients: {}", e).into()),
+		other => Err(format!("unexpected response from the world: {:?}", other).into())
 	}
 }
 
@@ -176,7 +179,7 @@ pub fn reboot(world: &mut World, args: &args::Reboot) -> Result<()> {
 		}
 	}
 
-	let exited = || Failure(HUNG_UP, format!("the world process (pid {}) exited instead of rebooting.", pid));
+	let exited = || Failure(HUNG_UP, format!("world process {} exited instead of rebooting", pid));
 	let never_ran = || {
 		Failure(
 			TIMED_OUT,

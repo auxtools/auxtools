@@ -331,7 +331,7 @@ pub fn hold_max(pid: u64) {
 	assert!(took >= Duration::from_millis(1500), "the pause was let go after {:?}", took);
 	let printed = run(pid, &["log", "--world", "--last", "1"], 0);
 	assert!(
-		printed.contains("retained pause resumed automatically: no debugger was connected for 1.5 seconds (--hold-max)"),
+		printed.contains("world resumed automatically after 1.5s with no debugger connected (--hold-max)"),
 		"log --world said {}",
 		printed
 	);
