@@ -352,11 +352,7 @@ impl Server {
 		let mut found: BTreeMap<String, bool> = BTreeMap::new();
 		match base {
 			Some(base) => {
-				let value = self.eval_expr(EvalRequest::new(frame_id, base)).value;
-				if let Some(state) = self.pause.state.as_mut() {
-					state.invalidate_stacks();
-				}
-				let Ok(value) = value else {
+				let Ok(value) = self.read_expr(frame_id, base) else {
 					return vec![];
 				};
 				members_of(&value, &mut found);

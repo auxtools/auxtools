@@ -90,3 +90,22 @@
 /proc/caught_inside()
 	var/text = "a"
 	return text // @caught_stop
+
+/datum/counted
+	var/reads = 0
+
+/datum/counted/proc/operator[](index)
+	reads++
+	return src
+
+/datum/counted/proc/operator+(other)
+	reads++
+	return 1
+
+/proc/counted_current()
+	counted.reads++
+	return counted
+
+var/datum/counted/counted = new
+var/list/counted_in = list(counted)
+var/list/counted_keys = list(1)
