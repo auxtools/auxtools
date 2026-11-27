@@ -5,11 +5,32 @@ use crate::{
 	Proc, StringRef, Value
 };
 
-thread_local! {
-	static LOCAL_NAMES: RefCell<HashMap<(procs::ProcId, usize), Vec<String>>> = RefCell::new(HashMap::new());
+#[derive(Clone)]
+struct Names {
+	locals: Vec<String>,
+	parameters: Vec<String>
 }
 
+thread_local! {
+	static LOCAL_NAMES: RefCell<HashMap<(procs::ProcId, usize), Names>> = RefCell::new(HashMap::new());
+}
+
+/// Records local variable names for frames of `proc` executing the bytecode
+/// starting at `bytecode`.
+///
+/// Also snapshots `proc`'s current parameter names so active frames continue to
+/// display them if a reload later renames parameters. `CallStacks`,
+/// `local_names_for`, and `parameter_names_for` prefer these recorded names
+/// over BYOND's proc table.
+///
+/// Calling this again for the same proc and address replaces the previous
+/// record. Records are stored per thread (use on BYOND's thread) and cleared at
+/// shutdown. `bytecode` is used only as a lookup key and is never dereferenced.
 pub fn set_local_names(proc: &Proc, bytecode: *const u32, names: Vec<String>) {
+	let names = Names {
+		locals: names,
+		parameters: proc.parameter_names().into_iter().map(String::from).collect()
+	};
 	LOCAL_NAMES.with(|map| map.borrow_mut().insert((proc.id, bytecode as usize), names));
 }
 
@@ -19,8 +40,14 @@ pub fn has_local_names(proc: &Proc, bytecode: *const u32) -> bool {
 
 pub fn local_names_for(proc: &Proc, bytecode: *const u32) -> Vec<String> {
 	LOCAL_NAMES
-		.with(|map| map.borrow().get(&(proc.id, bytecode as usize)).cloned())
+		.with(|map| map.borrow().get(&(proc.id, bytecode as usize)).map(|names| names.locals.clone()))
 		.unwrap_or_else(|| proc.local_names().into_iter().map(String::from).collect())
+}
+
+pub fn parameter_names_for(proc: &Proc, bytecode: *const u32) -> Vec<String> {
+	LOCAL_NAMES
+		.with(|map| map.borrow().get(&(proc.id, bytecode as usize)).map(|names| names.parameters.clone()))
+		.unwrap_or_else(|| proc.parameter_names().into_iter().map(String::from).collect())
 }
 
 pub(crate) fn copy_local_names(from: *const u32, to: *const u32, procs: impl Fn(procs::ProcId) -> bool) {
@@ -87,14 +114,16 @@ impl StackFrame {
 
 		let proc = Proc::from_id((*instance).proc).unwrap();
 		let offset = *(*context).bytecode_offset();
-		let param_names = proc.parameter_names();
 		let bytecode = *(*context).bytecode();
-		let local_names = LOCAL_NAMES.with(|map| {
-			map.borrow()
-				.get(&(proc.id, bytecode as usize))
-				.map(|names| names.iter().map(|name| StringRef::new(name).ok()).collect::<Vec<_>>())
+		let interned = |names: &[String]| names.iter().map(|name| StringRef::new(name).ok()).collect::<Vec<_>>();
+		let names = LOCAL_NAMES
+			.with(|map| (map.borrow().get(&(proc.id, bytecode as usize))).map(|names| (interned(&names.parameters), interned(&names.locals))));
+		let (param_names, local_names) = names.unwrap_or_else(|| {
+			(
+				proc.parameter_names().into_iter().map(Some).collect(),
+				proc.local_names().into_iter().map(Some).collect()
+			)
 		});
-		let local_names = local_names.unwrap_or_else(|| proc.local_names().into_iter().map(Some).collect());
 
 		let usr = Value::from_raw((*instance).usr);
 		let src = Value::from_raw((*instance).src);
@@ -102,7 +131,7 @@ impl StackFrame {
 
 		let args = (0..(*instance).args_count())
 			.map(|i| {
-				let name = param_names.get(i as usize).cloned();
+				let name = param_names.get(i as usize).cloned().flatten();
 				(name, Value::from_raw(*((*instance).args()).add(i as usize)))
 			})
 			.collect();

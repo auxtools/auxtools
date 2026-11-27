@@ -131,9 +131,20 @@ impl Proc {
 		Some(StringRef::from_id(file_id))
 	}
 
+	/// Returns this proc's parameter names in declaration order.
+	///
+	/// Call on BYOND's thread for a proc ID valid in the current world. Each
+	/// returned `StringRef` holds a BYOND reference. Returns an empty `Vec` if
+	/// the proc has no parameter table (for example, a type's initializer
+	/// proc).
 	pub fn parameter_names(&self) -> Vec<StringRef> {
+		use raw_types::misc::AsMiscId;
 		unsafe {
-			let (data, count) = raw_types::misc::get_parameters((*self.entry()).metadata.parameters);
+			let parameters = (*self.entry()).metadata.parameters;
+			if parameters.as_misc_id().raw() == runtime_tables::NONE {
+				return vec![];
+			}
+			let (data, count) = raw_types::misc::get_parameters(parameters);
 			(0..count).map(|i| StringRef::from_variable_id((*data.add(i)).name)).collect()
 		}
 	}
