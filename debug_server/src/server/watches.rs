@@ -131,7 +131,7 @@ impl Server {
 						continue;
 					}
 					unsafe {
-						if (*instance).proc != *proc || *(*ctx).bytecode_offset() == 0 {
+						if (*instance).proc != *proc || crate::instruction_hooking::starts_call(ctx) {
 							over.push((watch.id, "target proc ended"));
 							continue;
 						}
