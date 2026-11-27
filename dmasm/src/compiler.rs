@@ -430,7 +430,7 @@ fn compile_statements(
     if lines {
         compiler.emit_ins(Instruction::End);
     }
-    let locals = compiler.proc.take().unwrap().locals;
+    let locals = std::mem::take(&mut compiler.proc.locals);
     let warnings = compiler
         .warnings
         .take()
@@ -513,7 +513,7 @@ fn debugger_compiler<'a>(
     scope: Option<&'a ExprScope<'a>>,
 ) -> Compiler<'a> {
     let ctx = procs::proc_ctx(source, vec![String::new(); params.len()]);
-    let mut compiler = Compiler::new(params.iter().map(|x| x.to_string()).collect(), Some(ctx));
+    let mut compiler = Compiler::new(params.iter().map(|x| x.to_string()).collect(), ctx);
     compiler.byond = source.byond;
     compiler.expr_scope = scope;
     compiler.debugger = true;
@@ -654,7 +654,7 @@ struct Compiler<'a> {
     nodes: Vec<Node>,
     label_count: u32,
     short_circuit_labels: Vec<(String, bool)>,
-    proc: Option<procs::ProcCtx<'a>>,
+    proc: procs::ProcCtx<'a>,
     expr_scope: Option<&'a ExprScope<'a>>,
     debugger: bool,
     cache: Option<Vec<Variable>>,
@@ -685,7 +685,7 @@ struct Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
-    fn new(params: Vec<String>, proc: Option<procs::ProcCtx<'a>>) -> Self {
+    fn new(params: Vec<String>, proc: procs::ProcCtx<'a>) -> Self {
         Compiler {
             params,
             nodes: vec![],
@@ -730,11 +730,7 @@ impl<'a> Compiler<'a> {
         if let (Instruction::DbgLine(_), true) = (&ins, self.other_file) {
             self.other_file = false;
             self.last_line = None;
-            let file = self
-                .proc
-                .as_ref()
-                .map(|p| p.file.clone())
-                .unwrap_or_default();
+            let file = self.proc.file.clone();
             self.emit_ins(Instruction::DbgFile(DMString(file.into_bytes())));
         }
         if let Instruction::DbgLine(line) = ins {
@@ -753,9 +749,7 @@ impl<'a> Compiler<'a> {
                 | Instruction::PickSwitch(_)
                 | Instruction::PickProb(_)
         ) {
-            if let Some(ctx) = self.proc.as_mut() {
-                ctx.clear_new_vars = true;
-            }
+            self.proc.clear_new_vars = true;
         }
         let mut targets = procs::label_targets(&ins);
         targets.sort();
@@ -989,7 +983,7 @@ impl<'a> Compiler<'a> {
                 self.read_on(line);
             }
         }
-        let ends = self.proc.as_ref().map_or(&[][..], |p| p.end_lines);
+        let ends = self.proc.end_lines;
         let skip = std::mem::take(&mut self.skip_compound);
         if let Some(line) = compound_line(&expr, ends).filter(|_| !place && !skip) {
             let term = matches!(expr, Expression::Base { .. });
@@ -1131,7 +1125,7 @@ impl<'a> Compiler<'a> {
                         self.global_field = true;
                         let path = prefab.path.to_string();
                         let kind = procs::emit_type_scope(self, &path, &unspanned_follows[0])?;
-                        let ty = self.proc.as_ref().unwrap().tree.find(&path);
+                        let ty = self.proc.tree.find(&path);
                         return follow::emit_typed(self, unspanned_follows[1..].to_vec(), kind, ty);
                     }
                     if let (Some(scope), Follow::ProcReference(name)) =
@@ -1189,7 +1183,7 @@ impl<'a> Compiler<'a> {
                 let is_ident = matches!(term.elem, dreammaker::ast::Term::Ident(_));
                 let mut kind = term::emit(self, term.elem)?;
                 if is_ident
-                    && self.proc.as_ref().is_some_and(|c| !c.ty.is_root())
+                    && !self.proc.ty.is_root()
                     && matches!(
                         unspanned_follows.first(),
                         Some(
@@ -1377,7 +1371,7 @@ impl Compiler<'_> {
 
     pub(super) fn named_call_end(&self, expr: &Expression) -> Option<u32> {
         use dreammaker::ast::Term;
-        let ctx = self.proc.as_ref()?;
+        let ctx = &self.proc;
         let named = |args: &[Expression]| {
             args.iter().any(|a| {
                 matches!(
@@ -1417,7 +1411,7 @@ impl Compiler<'_> {
     }
 
     pub(super) fn read_on_line(&self, expr: &Expression) -> Option<u32> {
-        let ctx = self.proc.as_ref()?;
+        let ctx = &self.proc;
         let operator = |after: &Expression| {
             let at = first_token(after);
             line_at(ctx.operator_lines, at).unwrap_or(at.line)
@@ -1500,7 +1494,7 @@ pub(crate) fn fold_initializer(
         file_names: None,
     };
     let ctx = procs::proc_ctx(&source, vec![]);
-    let mut compiler = Compiler::new(vec![], Some(ctx));
+    let mut compiler = Compiler::new(vec![], ctx);
     compiler.byond = byond;
     if let Expression::BinaryOp {
         op: dreammaker::ast::BinaryOp::In,
