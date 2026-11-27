@@ -1,7 +1,9 @@
 use dmasm::compiler::{compile_body_in, is_body, CompileError, ExprGlobal, ExprScope, FoundProc};
 use dmasm::ByondVersion;
 
-fn body(code: &str) -> Result<(Vec<String>, Vec<String>), CompileError> {
+const PARAMS: [&str; 4] = [".", "src", "by", "globals"];
+
+fn with_scope<R>(compile: impl FnOnce(&ExprScope) -> R) -> R {
     let scope = ExprScope {
         has_src_var: &|name| name == "hp",
         has_src_proc: &|name| name == "bump",
@@ -34,18 +36,66 @@ fn body(code: &str) -> Result<(Vec<String>, Vec<String>), CompileError> {
             _ => None,
         },
     };
-    let compiled = compile_body_in(
-        code,
-        &[".", "src", "by", "globals"],
-        Some(&scope),
-        ByondVersion::LATEST,
-    )?;
-    let text = dmasm::format(&compiled.nodes)
+    compile(&scope)
+}
+
+fn lines(nodes: &[dmasm::Node]) -> Vec<String> {
+    dmasm::format(nodes)
         .lines()
         .map(|l| l.trim().to_owned())
         .filter(|l| !l.is_empty())
-        .collect();
-    Ok((text, compiled.locals))
+        .collect()
+}
+
+fn body(code: &str) -> Result<(Vec<String>, Vec<String>), CompileError> {
+    let compiled =
+        with_scope(|scope| compile_body_in(code, &PARAMS, Some(scope), ByondVersion::LATEST))?;
+    Ok((lines(&compiled.nodes), compiled.locals))
+}
+
+fn until_return(code: Vec<String>) -> Vec<String> {
+    let mut labels: Vec<String> = vec![];
+    let mut out = vec![];
+    for line in code {
+        if line.starts_with("DbgLine") {
+            continue;
+        }
+        let renamed = line
+            .split_inclusive(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map(|word| {
+                let name =
+                    word.trim_end_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+                if !name.starts_with("LAB_") {
+                    return word.to_owned();
+                }
+                let index = labels.iter().position(|l| l == name).unwrap_or_else(|| {
+                    labels.push(name.to_owned());
+                    labels.len() - 1
+                });
+                format!("L{index}{}", &word[name.len()..])
+            })
+            .collect::<String>();
+        let ret = renamed == "Ret";
+        out.push(renamed);
+        if ret {
+            break;
+        }
+    }
+    out
+}
+
+#[track_caller]
+fn same_alone_and_in_a_body(code: &str) -> Vec<String> {
+    let alone = with_scope(|scope| {
+        dmasm::compiler::compile_expr_in(code, &PARAMS, Some(scope), ByondVersion::LATEST)
+    })
+    .unwrap_or_else(|e| panic!("{code} alone: {e}"));
+    let (in_body, locals) =
+        body(&format!("return {code}")).unwrap_or_else(|e| panic!("{code} in a body: {e}"));
+    assert!(locals.is_empty(), "{code}: {locals:?}");
+    let alone = until_return(lines(&alone));
+    assert_eq!(alone, until_return(in_body), "{code}");
+    alone
 }
 
 const RETURN: [&str; 6] = [
@@ -526,10 +576,286 @@ fn an_assignment_to_a_global_is_a_value_too() {
 }
 
 #[test]
+fn null_is_read_alone_as_in_a_body() {
+    for code in ["null", "by == null", "by ? null : 1", "bump(null, , 1)"] {
+        let compiled = same_alone_and_in_a_body(code);
+        assert!(
+            compiled.iter().any(|l| l == "GetVar null"),
+            "{code}: {compiled:?}"
+        );
+    }
+    assert_has(
+        &same_alone_and_in_a_body("bump(null, , 1)"),
+        &["GetVar null", "PushVal null", "PushInt 1"],
+    );
+}
+
+#[test]
+fn parentheses_give_a_value_alone_as_in_a_body() {
+    for code in [
+        "(by)",
+        "(by).hp",
+        "(by.hp).len",
+        "&(by)",
+        "*(by)",
+        "*(&by)",
+        "-(by)",
+        "bump((by), (hp))",
+    ] {
+        same_alone_and_in_a_body(code);
+    }
+    assert_has(
+        &same_alone_and_in_a_body("(by).hp"),
+        &["GetVar arg(2)", "SetVar cache", "GetVar cache[\"hp\"]"],
+    );
+}
+
+#[test]
+fn a_result_is_regrouped_alone_as_in_a_body() {
+    assert_has(
+        &same_alone_and_in_a_body("by + (hp + 1) + 2"),
+        &["PushInt 1", "Add", "PushInt 2", "Add", "Add"],
+    );
+    for code in [
+        "(by + (hp + 1) + 2)",
+        "bump(by + (hp + 1) + 2)",
+        "by * (hp * 2) * 3",
+        "by | (hp | 1) | 2",
+        "by - (hp - 1) - 2",
+        "by ? by + (1 + hp) + 2 : 0",
+    ] {
+        same_alone_and_in_a_body(code);
+    }
+}
+
+#[test]
+fn a_chain_of_and_or_or_is_the_same_alone_as_in_a_body() {
+    for code in [
+        "by || (hp || ticks)",
+        "(by && hp) && (ticks && by)",
+        "by && (hp || ticks)",
+        "0 || by",
+        "\"a\" || by",
+        "null && by",
+        "by || 0 || hp",
+        "by.hp || by.hp.len || 0",
+        "bump(1 && by)",
+    ] {
+        same_alone_and_in_a_body(code);
+    }
+    let chain = same_alone_and_in_a_body("(by || hp) || ticks");
+    assert_eq!(
+        chain.iter().filter(|l| l.ends_with(':')).count(),
+        1,
+        "{chain:?}"
+    );
+    let folded = same_alone_and_in_a_body("1 && by");
+    assert!(!folded.iter().any(|l| l.starts_with("Jmp")), "{folded:?}");
+}
+
+#[test]
+fn squares_and_bit_constants_are_the_same_alone_as_in_a_body() {
+    assert_has(
+        &same_alone_and_in_a_body("by ** 2"),
+        &["GetVar arg(2)", "PowSquare"],
+    );
+    assert_has(
+        &same_alone_and_in_a_body("by ** -1"),
+        &["GetVar arg(2)", "PowNegativeOne"],
+    );
+    assert_has(
+        &same_alone_and_in_a_body("by * by"),
+        &["GetVar arg(2)", "PowSquare"],
+    );
+    assert_has(
+        &same_alone_and_in_a_body("hp * hp"),
+        &["GetVar cache = arg(1); cache[\"hp\"]", "PowSquare"],
+    );
+    assert_has(
+        &same_alone_and_in_a_body("16777217 & by"),
+        &["PushInt 0", "GetVar arg(2)", "Band"],
+    );
+    for code in [
+        "by ** 3",
+        "by * by * hp",
+        "(by + 1) * (by + 1)",
+        "255 & by",
+        "by | 255",
+        "-1 ^ by",
+        "3 * by",
+    ] {
+        same_alone_and_in_a_body(code);
+    }
+}
+
+#[test]
+fn a_condition_that_sets_the_test_flag_is_not_tested_again_alone_either() {
+    assert_has(
+        &same_alone_and_in_a_body("by == 1 ? 2 : 3"),
+        &["Teq", "Pop", "Jz L0", "PushInt 2"],
+    );
+    for code in [
+        "by in hp ? 1 : 2",
+        "isnull(by) ? 1 : 2",
+        "(by == 1) ? 2 : 3",
+        "by == 1 && hp ? 2 : 3",
+        "by == 1 ? by == 2 ? 1 : 2 : 3",
+    ] {
+        same_alone_and_in_a_body(code);
+    }
+}
+
+#[test]
+fn a_pick_with_weights_ends_the_same_alone_as_in_a_body() {
+    let picked = same_alone_and_in_a_body("pick(by; 1, hp; 2)");
+    assert_eq!(
+        picked.iter().filter(|l| l.starts_with("Jmp ")).count(),
+        1,
+        "{picked:?}"
+    );
+    for code in ["pick(by; 1, 2)", "pick(by; 1, hp; pick(ticks; 2, 3))"] {
+        same_alone_and_in_a_body(code);
+    }
+}
+
+#[test]
+fn a_safe_chain_is_the_same_alone_as_in_a_body() {
+    assert_has(
+        &same_alone_and_in_a_body("by?.hp?.len"),
+        &[
+            "GetVar arg(2)",
+            "SetCacheJmpIfNull L0",
+            "PushCache",
+            "GetVar cache[\"hp\"]",
+            "SetCacheJmpIfNull L1",
+            "GetVar cache[\"len\"]",
+            "L1:",
+            "PopCache",
+            "L0:",
+        ],
+    );
+    for code in [
+        "by?[1]",
+        "by?.hp[1]",
+        "by?.hp++",
+        "--by?.hp",
+        "by?.bump().hp",
+        "by?.bump()?.bump(hp)",
+        "by?.hp?.len == null",
+        "!by?.hp",
+        "by?.hp = 1",
+        "by?.hp += 1",
+        "by?.hp ||= 1",
+    ] {
+        same_alone_and_in_a_body(code);
+    }
+}
+
+#[test]
+fn a_logical_assignment_to_a_safe_place_is_a_value_in_a_body_too() {
+    for code in [
+        "by?.hp?.len ||= 1",
+        "by?[1] ||= 2",
+        "by?.hp[1] &&= 2",
+        "by?.bump()?.hp ||= 1",
+    ] {
+        let compiled = same_alone_and_in_a_body(code);
+        assert!(
+            compiled.iter().any(|l| l.starts_with("SetVarExpr cache")),
+            "{code}: {compiled:?}"
+        );
+    }
+}
+
+#[test]
+fn an_assignment_is_the_same_value_alone_as_in_a_body() {
+    assert_has(
+        &same_alone_and_in_a_body("by[1] = 2"),
+        &[
+            "PushInt 2",
+            "PushTop",
+            "GetVar arg(2)",
+            "PushInt 1",
+            "ListSet",
+        ],
+    );
+    assert_has(
+        &same_alone_and_in_a_body("ticks = 3"),
+        &[
+            "PushInt 3",
+            "PushTop",
+            "GetVar arg(3)",
+            "PushVal \"ticks\"",
+            "ListSet",
+        ],
+    );
+    for code in [
+        "*by = 1",
+        "(by).hp = 1",
+        "by.hp ||= 1",
+        "by[\"a\"] ||= 2",
+        "ticks ||= 3",
+        "hp &&= bump()",
+        "by = hp += 1",
+        "by[1] -= 1",
+        "hp <<= 2",
+        "by := 1",
+        "by.hp := 1",
+    ] {
+        same_alone_and_in_a_body(code);
+    }
+}
+
+#[test]
 fn bodies_compiled_one_after_another_see_the_same_types() {
     for _ in 0..3 {
         let (code, _) = body("var/list/L = list(1)\nreturn L.Copy() + NORTH").unwrap();
         assert_has(&code, &["Call cache = local(0); dynamic_proc(\"Copy\") 0"]);
         assert_has(&code, &["PushInt 1", "Add"]);
+    }
+}
+
+#[test]
+fn an_expression_is_the_body_that_returns_it() {
+    for code in [
+        "by",
+        "by.hp.len",
+        "hp + ticks",
+        "bump(1, hp)",
+        "by.bump(hp)",
+        "by:bump(a = 1)",
+        "global.ticks",
+        "by[1][2]",
+        "by++",
+        "-by.hp",
+        "~by",
+        "by in list(1, 2)",
+        "by in 1 to 5",
+        "\"[by] and [hp]\"",
+        "list(\"a\" = by)",
+        "new /datum(by)",
+        "new by.hp(1)",
+        "istype(by, /datum)",
+        "locate(/datum) in by",
+        "pick(1, 2, 3)",
+        "length(by)",
+        "sqrt(4) + by",
+        "rgb(1, 2, by)",
+        "call(by, \"f\")(1)",
+        "initial(by.hp)",
+        "by::hp",
+        "/datum/foo::double()",
+        "/datum/foo/proc/double",
+        "&by.hp",
+        "*by",
+        "by ? hp : ticks",
+        "NORTH | by",
+        "by.Copy()",
+        ".",
+        "src",
+        "world.time",
+        "args[1]",
+    ] {
+        same_alone_and_in_a_body(code);
     }
 }

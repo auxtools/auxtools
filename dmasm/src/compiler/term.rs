@@ -19,18 +19,13 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
         _ => RelativeCall::Itself,
     };
     match term {
-        Term::Expr(expr) if compiler.proc.is_some() => {
+        Term::Expr(expr) => {
             compiler.regroup_root = true;
             let kind = compiler.emit_expr(*expr)?;
             compiler.emit_move_to_stack(kind)
         }
-        Term::Expr(expr) => compiler.emit_expr(*expr),
 
-        Term::Null if compiler.proc.is_some() => Ok(EvalKind::Var(Variable::Null)),
-        Term::Null => {
-            compiler.emit_ins(Instruction::PushVal(Value::Null));
-            Ok(EvalKind::Stack)
-        }
+        Term::Null => Ok(EvalKind::Var(Variable::Null)),
         Term::Int(i) => {
             compiler.emit_number(i as f32);
             Ok(EvalKind::Stack)
@@ -201,9 +196,7 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
             Ok(EvalKind::Stack)
         }
 
-        Term::SelfCall(args) | Term::ParentCall(args)
-            if compiler.proc.is_some() && !compiler.debugger =>
-        {
+        Term::SelfCall(args) | Term::ParentCall(args) if !compiler.debugger => {
             let parent = matches!(term_kind, RelativeCall::Parent);
             let args = args.into_vec();
             if args.is_empty() {
@@ -249,7 +242,7 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
         }
         Term::NewImplicit { .. } => Err(CompileError::UnsupportedImplicitNew),
         Term::NewMiniExpr { expr, args } => {
-            if expr.ident.as_str() == "src" && !expr.fields.is_empty() && compiler.proc.is_some() {
+            if expr.ident.as_str() == "src" && !expr.fields.is_empty() {
                 compiler.explicit_src = true;
             }
             let var = compiler.emit_find_var(expr.ident.into())?;
@@ -452,7 +445,7 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
                         let kind = compiler.emit_expr(expr)?;
                         compiler.emit_move_to_stack(kind)?;
 
-                        if i + 1 < count || compiler.proc.is_none() {
+                        if i + 1 < count {
                             compiler.emit_ins(Instruction::Jmp(Label::Named(label_end.clone())));
                         }
                     }

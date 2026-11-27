@@ -63,6 +63,7 @@ pub(super) fn emit_typed<'a>(
     let mut kind = kind;
     let mut ty = ty;
     let mut elem_ty = compiler.list_elem_type.take();
+    let safe_place = std::mem::take(&mut compiler.safe_place);
 
     let mut field_buffer = vec![];
 
@@ -75,7 +76,7 @@ pub(super) fn emit_typed<'a>(
                     | Follow::Call(PropertyAccessKind::Dot | PropertyAccessKind::Colon, _, _)
             )
         );
-        if (compiler.proc.is_some() || ends_in_value_op(follow.as_slice())) && is_safe(&sub_expr) {
+        if is_safe(&sub_expr) && !safe_place {
             kind = commit_field_buffer(compiler, kind, &mut field_buffer)?;
             compiler.emit_move_to_stack(kind)?;
             return emit_safe(compiler, sub_expr, follow.collect(), ty);
@@ -236,9 +237,8 @@ pub(super) fn emit_typed<'a>(
                     }
 
                     access @ (PropertyAccessKind::Dot | PropertyAccessKind::Colon)
-                        if compiler.proc.is_none()
-                            || (compiler.debugger
-                                && !proc_known(compiler, receiver_ty, access, &ident)) =>
+                        if compiler.debugger
+                            && !proc_known(compiler, receiver_ty, access, &ident) =>
                     {
                         kind = commit_field_buffer(compiler, kind, &mut field_buffer)?;
                         compiler.emit_move_to_stack(kind)?;
@@ -262,9 +262,8 @@ pub(super) fn emit_typed<'a>(
                     access @ (PropertyAccessKind::Dot
                     | PropertyAccessKind::Colon
                     | PropertyAccessKind::Scope)
-                        if compiler.proc.is_some()
-                            && (!field_buffer.is_empty()
-                                || matches!(kind, EvalKind::Var(_) | EvalKind::Field(..))) =>
+                        if !field_buffer.is_empty()
+                            || matches!(kind, EvalKind::Var(_) | EvalKind::Field(..)) =>
                     {
                         let callee = callee_var(compiler, receiver_ty, access, &ident);
                         let parked = matches!(kind, EvalKind::Stack | EvalKind::ListRef);
@@ -374,7 +373,7 @@ pub(super) fn emit_typed<'a>(
                 kind = unary::emit(compiler, vec![op], kind)?;
             }
 
-            Follow::StaticField(ident) if compiler.proc.is_some() => {
+            Follow::StaticField(ident) => {
                 let decl = ty.and_then(|t| super::procs::member_var(t, ident.as_str()));
                 let static_scope = decl
                     .filter(super::procs::is_global_member)
@@ -415,17 +414,6 @@ pub(super) fn emit_typed<'a>(
                     kind = EvalKind::Stack;
                 }
                 ty = decl.and_then(|d| super::procs::declared_type(compiler, &d.get().var_type));
-            }
-
-            Follow::StaticField(ident) => {
-                kind = commit_field_buffer(compiler, kind, &mut field_buffer)?;
-                compiler.emit_move_to_stack(kind)?;
-                compiler.emit_ins(Instruction::SetVar(Variable::Cache));
-                compiler.emit_ins(Instruction::GetVar(Variable::Initial(Box::new(
-                    Variable::Field(DMString(ident.as_str().into())),
-                ))));
-                kind = EvalKind::Stack;
-                ty = None;
             }
 
             Follow::ProcReference(_) => {
@@ -510,13 +498,6 @@ fn is_safe(follow: &Follow) -> bool {
             _,
             _
         ) | Follow::Index(ListAccessKind::Safe, _)
-    )
-}
-
-fn ends_in_value_op(rest: &[Follow]) -> bool {
-    matches!(
-        rest.last(),
-        Some(Follow::Unary(UnaryOp::Not | UnaryOp::Neg | UnaryOp::BitNot))
     )
 }
 
