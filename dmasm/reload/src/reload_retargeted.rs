@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use dreammaker::ast::{Expression, Follow, PathOp, Prefab, Term};
+use dreammaker::ast::{Case, Expression, Follow, Ident, PathOp, Prefab, Spanned, Statement, Term};
 
 use super::*;
 use crate::operands::{Proc, Value};
@@ -23,6 +23,9 @@ pub(super) struct Retargeted<'s> {
     consts: HashSet<String>,
     member_vars: HashMap<String, Vec<String>>,
     member_procs: HashMap<String, Vec<String>>,
+    changed_defaults: HashSet<String>,
+    changed_consts: HashSet<String>,
+    retyped: HashSet<String>,
 }
 
 fn resolve(s: &Snapshot, path: &str) -> Option<ProcKey> {
@@ -81,6 +84,31 @@ fn type_call(s: &Snapshot, ty: &str, name: &str) -> Option<ProcKey> {
     }
 }
 
+fn declared_from(s: &Snapshot, ty: &str, kind: &str, name: &str) -> Option<String> {
+    let mut at = s.find_type(ty)?;
+    loop {
+        if at
+            .get()
+            .procs
+            .get(name)
+            .is_some_and(|p| p.declaration.is_some())
+        {
+            let ty = if at.is_root() { "" } else { &at.get().path };
+            return Some(format!("{ty}/{kind}/{name}"));
+        }
+        match at.parent_type() {
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    s.tree
+        .root()
+        .get()
+        .procs
+        .contains_key(name)
+        .then(|| format!("/{kind}/{name}"))
+}
+
 fn forms(ty: &str, name: &str) -> Vec<String> {
     let mut forms = vec![
         format!("{ty}/{name}"),
@@ -110,6 +138,9 @@ pub(super) fn retargeted<'s>(
         consts: HashSet::new(),
         member_vars: HashMap::new(),
         member_procs: HashMap::new(),
+        changed_defaults: changes.defaults_changed.iter().cloned().collect(),
+        changed_consts: changes.consts.iter().cloned().collect(),
+        retyped: changes.retyped.iter().cloned().collect(),
     };
     let touched: BTreeSet<&str> = realigned
         .keys()
@@ -200,6 +231,13 @@ pub(super) fn retargeted<'s>(
 
 impl Retargeted<'_> {
     pub(super) fn is_empty(&self) -> bool {
+        self.leaves_bodies()
+            && self.changed_defaults.is_empty()
+            && self.changed_consts.is_empty()
+            && self.retyped.is_empty()
+    }
+
+    fn leaves_bodies(&self) -> bool {
         self.paths.is_empty() && self.member_vars.is_empty() && self.member_procs.is_empty()
     }
 
@@ -297,7 +335,7 @@ impl Retargeted<'_> {
         forms("", name).iter().any(|form| self.paths.contains(form))
     }
 
-    fn prefab_might_name(&self, prefab: &Prefab) -> bool {
+    fn prefab_might_name(&self, prefab: &Prefab, ty: Option<&str>) -> bool {
         let parts: Vec<(PathOp, &str)> = prefab
             .path
             .iter()
@@ -309,12 +347,26 @@ impl Retargeted<'_> {
         if !prefab.vars.is_empty() || !self.names.contains(name) {
             return false;
         }
-        if parts.iter().any(|(op, _)| *op != PathOp::Slash) {
-            return true;
-        }
         let joined = |parts: &[(PathOp, &str)]| -> String {
             parts.iter().map(|(_, part)| format!("/{part}")).collect()
         };
+        if let [types @ .., (op, kind @ ("proc" | "verb")), _] = &parts[..] {
+            if *op != PathOp::Slash && types.iter().all(|(op, _)| *op == PathOp::Slash) {
+                let from = match (types, ty) {
+                    ([], Some(ty)) => ty.to_owned(),
+                    ([], None) => return true,
+                    (types, _) => joined(types),
+                };
+                let found = |s: &Snapshot| declared_from(s, &from, kind, name);
+                return match (found(self.old), found(self.new)) {
+                    (Some(before), Some(after)) => self.before(&before) != self.after(&after),
+                    (before, after) => before != after,
+                };
+            }
+        }
+        if parts.iter().any(|(op, _)| *op != PathOp::Slash) {
+            return true;
+        }
         match parts
             .iter()
             .position(|(_, part)| *part == "proc" || *part == "verb")
@@ -330,6 +382,7 @@ impl Retargeted<'_> {
 
     fn proc_might_name(&self, value: &ProcValue, own: &str, ty: &str) -> bool {
         let mut scan = Scan::new(self, Some(own), Some(ty));
+        scan.value = Some(value);
         for parameter in value.parameters.iter() {
             if let Some(default) = &parameter.default {
                 syntax::walk_expression(default, &mut |node| scan.visit(node));
@@ -353,6 +406,14 @@ impl Retargeted<'_> {
         scan.found
     }
 
+    pub(super) fn expression_might_name(&self, expression: &Expression, ty: &str) -> bool {
+        self.expressions_might_name([expression], Some(ty))
+    }
+
+    pub(super) fn retargets(&self, path: &str) -> bool {
+        self.before(path) != self.after(path)
+    }
+
     pub(super) fn inits_might_name(&self, inits: &[Init], ty: &str) -> bool {
         !self.is_empty()
             && self.expressions_might_name(inits.iter().map(|init| &init.value), Some(ty))
@@ -363,7 +424,12 @@ impl Retargeted<'_> {
             && before.statics.iter().zip(&after.statics).all(|(b, a)| {
                 b.name == a.name
                     && b.scope == a.scope
-                    && b.value == a.value
+                    && match (&b.value, &a.value) {
+                        (Some(ConstValue::Path(b)), Some(ConstValue::Path(a))) => {
+                            self.before(b) == self.after(a)
+                        }
+                        (b, a) => b == a,
+                    }
                     && match (&b.init, &a.init) {
                         (Some(b), Some(a)) => same_instructions(&b.nodes, &a.nodes),
                         (b, a) => b.is_none() && a.is_none(),
@@ -407,16 +473,34 @@ struct Scan<'r, 's> {
     r: &'r Retargeted<'s>,
     own: Option<&'r str>,
     ty: Option<&'r str>,
+    value: Option<&'r ProcValue>,
+    locals: Option<HashSet<(usize, String)>>,
     resolved: HashSet<*const Follow>,
     found: bool,
 }
 
 impl<'r, 's> Scan<'r, 's> {
+    fn rebinds_var(&mut self, at: usize, name: &str) -> bool {
+        if !self
+            .ty
+            .is_some_and(|ty| self.r.rebinds(&self.r.member_vars, ty, name))
+        {
+            return false;
+        }
+        let value = self.value;
+        let locals = self
+            .locals
+            .get_or_insert_with(|| value.map_or_else(HashSet::new, local_reads));
+        !locals.contains(&(at, name.to_owned()))
+    }
+
     fn new(r: &'r Retargeted<'s>, own: Option<&'r str>, ty: Option<&'r str>) -> Self {
         Scan {
             r,
             own,
             ty,
+            value: None,
+            locals: None,
             resolved: HashSet::new(),
             found: false,
         }
@@ -445,19 +529,235 @@ impl<'r, 's> Scan<'r, 's> {
                 !self.resolved.contains(&(follow as *const Follow))
                     && r.names.contains(name.as_str())
             }
-            syntax::Node::Follow(Follow::StaticField(name)) => r.defaults.contains(name.as_str()),
-            syntax::Node::Term(Term::Prefab(prefab)) => r.prefab_might_name(prefab),
-            syntax::Node::Term(Term::Ident(name)) => self
-                .ty
-                .is_some_and(|ty| r.rebinds(&r.member_vars, ty, name.as_str())),
+            syntax::Node::Follow(Follow::StaticField(name)) => {
+                r.defaults.contains(name.as_str())
+                    || (self.own.is_none() && r.changed_defaults.contains(name.as_str()))
+            }
+            syntax::Node::Term(Term::Prefab(prefab)) => r.prefab_might_name(prefab, self.ty),
+            syntax::Node::Term(term @ Term::Ident(name)) => self.rebinds_var(address(term), name),
+            syntax::Node::Term(term @ Term::NewMiniExpr { expr, .. }) => {
+                self.rebinds_var(address(term), &expr.ident)
+            }
+            syntax::Node::Statement(statement) => {
+                loop_targets(statement).any(|name| self.rebinds_var(address(statement), name))
+            }
             syntax::Node::Term(Term::Call(name, _)) => self
                 .ty
                 .is_some_and(|ty| r.rebinds(&r.member_procs, ty, name.as_str())),
             syntax::Node::Term(Term::__PROC__) => self.own.is_some_and(|own| r.names.contains(own)),
-            syntax::Node::Name(name) => r.consts.contains(name) || r.global_names.contains(name),
+            syntax::Node::Name(name) => {
+                r.consts.contains(name)
+                    || r.global_names.contains(name)
+                    || (self.own.is_none()
+                        && (r.changed_consts.contains(name) || r.retyped.contains(name)))
+            }
             _ => false,
         };
     }
+}
+
+fn address<T>(node: &T) -> usize {
+    node as *const T as usize
+}
+
+pub(super) fn local_reads(value: &ProcValue) -> HashSet<(usize, String)> {
+    struct Locals<'a> {
+        scopes: Vec<Vec<&'a str>>,
+        reads: HashSet<(usize, String)>,
+    }
+
+    impl<'a> Locals<'a> {
+        fn read(&mut self, at: usize, name: &str) {
+            if self.scopes.iter().any(|scope| scope.contains(&name)) {
+                self.reads.insert((at, name.to_owned()));
+            }
+        }
+
+        fn declare(&mut self, name: &'a str) {
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.push(name);
+            }
+        }
+
+        fn expression(&mut self, expression: &'a Expression) {
+            syntax::walk_expression(expression, &mut |node| match node {
+                syntax::Node::Term(term @ Term::Ident(name)) => self.read(address(term), name),
+                syntax::Node::Term(term @ Term::NewMiniExpr { expr, .. }) => {
+                    self.read(address(term), &expr.ident)
+                }
+                _ => {}
+            });
+        }
+
+        fn optional(&mut self, expression: &'a Option<Expression>) {
+            if let Some(expression) = expression {
+                self.expression(expression);
+            }
+        }
+
+        fn block(&mut self, block: &'a [Spanned<Statement>]) {
+            self.scopes.push(vec![]);
+            for statement in block {
+                self.statement(&statement.elem);
+            }
+            self.scopes.pop();
+        }
+
+        fn target(&mut self, at: usize, declared: bool, name: &'a str) {
+            match declared {
+                true => self.declare(name),
+                false => self.read(at, name),
+            }
+        }
+
+        fn statement(&mut self, statement: &'a Statement) {
+            let at = address(statement);
+            match statement {
+                Statement::Expr(value) | Statement::Throw(value) | Statement::Del(value) => {
+                    self.expression(value)
+                }
+                Statement::Return(value) | Statement::Crash(value) => self.optional(value),
+                Statement::While { condition, block } => {
+                    self.expression(&condition.elem);
+                    self.block(block);
+                }
+                Statement::DoWhile { block, condition } => {
+                    self.block(block);
+                    self.expression(&condition.elem);
+                }
+                Statement::If { arms, else_arm } => {
+                    for (condition, block) in arms {
+                        self.expression(&condition.elem);
+                        self.block(block);
+                    }
+                    if let Some(block) = else_arm {
+                        self.block(block);
+                    }
+                }
+                Statement::ForInfinite { block } => self.block(block),
+                Statement::ForLoop {
+                    init,
+                    test,
+                    inc,
+                    block,
+                } => {
+                    self.scopes.push(vec![]);
+                    if let Some(init) = init {
+                        self.statement(init);
+                    }
+                    if let Some(test) = test {
+                        self.expression(test);
+                    }
+                    if let Some(inc) = inc {
+                        self.statement(inc);
+                    }
+                    self.block(block);
+                    self.scopes.pop();
+                }
+                Statement::ForList(f) => {
+                    self.scopes.push(vec![]);
+                    self.optional(&f.in_list);
+                    self.target(at, f.var_type.is_some(), &f.name);
+                    self.block(&f.block);
+                    self.scopes.pop();
+                }
+                Statement::ForKeyValue(f) => {
+                    self.scopes.push(vec![]);
+                    self.optional(&f.in_list);
+                    self.target(at, f.var_type.is_some(), &f.key);
+                    self.target(at, f.var_type.is_some(), &f.value);
+                    self.block(&f.block);
+                    self.scopes.pop();
+                }
+                Statement::ForRange(f) => {
+                    self.scopes.push(vec![]);
+                    self.expression(&f.start);
+                    self.expression(&f.end);
+                    self.optional(&f.step);
+                    self.target(at, f.var_type.is_some(), &f.name);
+                    self.block(&f.block);
+                    self.scopes.pop();
+                }
+                Statement::Var(var) => {
+                    self.optional(&var.value);
+                    self.declare(&var.name);
+                }
+                Statement::Vars(vars) => {
+                    for var in vars {
+                        self.optional(&var.value);
+                        self.declare(&var.name);
+                    }
+                }
+                Statement::Setting { value, .. } => self.expression(value),
+                Statement::Spawn { delay, block } => {
+                    self.optional(delay);
+                    self.block(block);
+                }
+                Statement::Switch {
+                    input,
+                    cases,
+                    default,
+                } => {
+                    self.expression(input);
+                    for (values, block) in cases.iter() {
+                        for case in &values.elem {
+                            match case {
+                                Case::Exact(value) => self.expression(value),
+                                Case::Range(from, to) => {
+                                    self.expression(from);
+                                    self.expression(to);
+                                }
+                            }
+                        }
+                        self.block(block);
+                    }
+                    if let Some(block) = default {
+                        self.block(block);
+                    }
+                }
+                Statement::TryCatch {
+                    try_block,
+                    catch_params,
+                    catch_block,
+                } => {
+                    self.block(try_block);
+                    self.scopes.push(vec![]);
+                    if let Some(name) = catch_params.first().and_then(|path| path.iter().last()) {
+                        self.declare(name);
+                    }
+                    self.block(catch_block);
+                    self.scopes.pop();
+                }
+                Statement::Continue(_) | Statement::Break(_) | Statement::Goto(_) => {}
+                Statement::Label { block, .. } => self.block(block),
+            }
+        }
+    }
+
+    let parameters = value.parameters.iter().map(|p| p.name.as_str()).collect();
+    let mut locals = Locals {
+        scopes: vec![parameters],
+        reads: HashSet::new(),
+    };
+    for parameter in value.parameters.iter() {
+        locals.optional(&parameter.default);
+    }
+    if let Some(code) = &value.code {
+        locals.block(code);
+    }
+    locals.reads
+}
+
+fn loop_targets(statement: &Statement) -> impl Iterator<Item = &str> {
+    let names: [Option<&Ident>; 2] = match statement {
+        Statement::ForList(f) if f.var_type.is_none() => [Some(&f.name), None],
+        Statement::ForRange(f) if f.var_type.is_none() => [Some(&f.name), None],
+        Statement::ForKeyValue(f) if f.var_type.is_none() => [Some(&f.key), Some(&f.value)],
+        _ => [None, None],
+    };
+    IntoIterator::into_iter(names)
+        .flatten()
+        .map(|name| name.as_str())
 }
 
 fn code_paths<'c>(code: &'c ProcReload, out: &mut Vec<&'c str>) {
@@ -561,7 +861,10 @@ pub(super) fn path_users(r: &Retargeted, changes: &mut Changes) {
             }
         }
 
-        let body = if reloaded.is_none() && r.proc_might_name(value, name, &new_ty.get().path) {
+        let body = if reloaded.is_none()
+            && !r.leaves_bodies()
+            && r.proc_might_name(value, name, &new_ty.get().path)
+        {
             match new.compile_code(key) {
                 Ok(after) => r
                     .changes_code(old.compile_code(&old_key), &after)

@@ -3977,12 +3977,21 @@ fn init_types(changes: &Changes) -> Vec<&str> {
 
 #[test]
 fn a_member_var_added_or_removed_takes_unqualified_uses_from_a_global() {
-    let before = "var/count = 100\n\n\
-                  /datum/t\n\tvar/list/counts = list(count)\n\n\
-                  /datum/t/proc/bump()\n\tcount++\n\n\
-                  /datum/t/proc/local()\n\tvar/count = 1\n\treturn count\n\n\
-                  /datum/t/child/proc/bump_more()\n\tcount += 2\n\n\
-                  /datum/u/proc/bump()\n\tcount++\n";
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let before = format!(
+        "var/count = 100\n\n\
+         /datum/t\n\tvar/list/counts = list(count)\n\n\
+         /datum/t/proc/bump()\n\tcount++\n\n\
+         /datum/t/proc/local()\n\tvar/count = 1\n\treturn count\n\n\
+         /datum/t/proc/parameter(count, x)\n{uncompiled}\treturn count\n\n\
+         /datum/t/proc/defaulted(count, x, limit = count)\n{uncompiled}\treturn limit\n\n\
+         /datum/t/proc/local_uncompiled(x)\n\tvar/count = 1\n{uncompiled}\treturn count\n\n\
+         /datum/t/proc/inner(x)\n\tif(x)\n\t\tvar/count = 1\n\t\tcount++\n\tfor(var/count in list(1))\n\t\tcount++\n{uncompiled}\n\
+         /datum/t/proc/outer(x)\n\tif(x)\n\t\tvar/count = 1\n\t\tcount++\n\treturn count\n\n\
+         /datum/t/child/proc/bump_more()\n\tcount += 2\n\n\
+         /datum/u/proc/bump()\n\tcount++\n"
+    );
+    let before = before.as_str();
     let added = before.replace("/datum/t\n", "/datum/t\n\tvar/count = 0\n");
     for (name, before, after) in [
         ("member-var-added", before, added.as_str()),
@@ -3991,7 +4000,11 @@ fn a_member_var_added_or_removed_takes_unqualified_uses_from_a_global() {
         let changes = changes_of(name, before, after);
         assert_eq!(
             sorted_reloads(&changes),
-            ["/datum/t/bump", "/datum/t/child/bump_more"],
+            [
+                "/datum/t/bump",
+                "/datum/t/child/bump_more",
+                "/datum/t/outer"
+            ],
             "{}",
             name
         );
@@ -4032,4 +4045,328 @@ fn a_member_proc_added_or_removed_takes_unqualified_calls_from_a_global() {
     let overridden = format!("{added}\n/datum/t/child/helper()\n\treturn 3\n");
     let changes = changes_of("member-proc-overridden", &added, &overridden);
     assert_eq!(sorted_reloads(&changes), Vec::<String>::new());
+}
+
+#[test]
+fn a_changed_default_recompiles_the_initializers_and_in_lists_that_read_it() {
+    let before = "/datum/config\n\tvar/limit = 5\n\n\
+                  /datum/holder\n\tvar/list/limits = list(/datum/config::limit)\n\tvar/copied = /datum/config::limit\n\n\
+                  /mob/verb/choose(x in list(/datum/config::limit))\n\treturn x\n";
+    let after = before.replace("limit = 5", "limit = 10");
+    let changes = changes("default-read", before, &after);
+    assert_eq!(sorted_reloads(&changes), ["/mob/choose"]);
+    let in_list = &changes.plan.reloads[0].params[0].in_list;
+    assert!(matches!(in_list, InList::New(_)), "{:?}", in_list);
+    assert_eq!(init_types(&changes), ["/datum/holder"]);
+    let mut defaults: Vec<(&str, &ConstValue)> = changes
+        .plan
+        .var_defaults
+        .iter()
+        .map(|d| (d.var.as_str(), &d.value))
+        .collect();
+    defaults.sort_by_key(|d| d.0);
+    assert_eq!(
+        defaults,
+        [
+            ("copied", &ConstValue::Number(10.0)),
+            ("limit", &ConstValue::Number(10.0))
+        ]
+    );
+}
+
+#[test]
+fn a_global_initializer_naming_a_retargeted_path_is_given_to_a_reboot() {
+    let before = "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+                  var/list/handlers = list(/datum/t/f)\nvar/handler = /datum/t/f\nvar/other = list(1)\n\n\
+                  /datum/s\n\tvar/static/list/more = list(/datum/t/f)\n\n\
+                  /proc/kept()\n\tvar/static/list/l = list(/datum/t/f)\n\treturn l\n";
+    let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
+    let changes = changes("global-init-retargeted", before, &removed);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert_eq!(
+        global_init_sets(&changes),
+        [
+            ":handler @8",
+            ":other @9",
+            "/datum/s:more @12",
+            ":handlers @7",
+            "/proc/kept#0:l @15"
+        ]
+    );
+    assert_eq!(changes.global_init.as_ref().unwrap().table, 1);
+
+    let appended = format!("{before}\n/datum/t/f()\n\treturn 3\n");
+    let changes = changes_of("global-init-appended", before, &appended);
+    assert!(changes.global_init.is_none());
+}
+
+#[test]
+fn an_implicit_new_follows_the_vars_declared_type() {
+    let before = "/datum/a\n/datum/b\n\n\
+                  /datum/holder\n\tvar/datum/a/item = new\n\n\
+                  /datum/holder/child\n\n\
+                  /datum/other\n\tvar/datum/a/item = new\n";
+    let after = before.replacen("var/datum/a/item", "var/datum/b/item", 1);
+    let changes = changes("implicit-new-retyped", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert_eq!(
+        init_types(&changes),
+        ["/datum/holder", "/datum/holder/child"]
+    );
+    for init in &changes.plan.init_procs {
+        let code = dmasm_bytecode::format(&init.code.as_ref().unwrap().nodes);
+        assert!(code.contains("/datum/b"), "{}: {}", init.type_path, code);
+    }
+}
+
+#[test]
+fn a_member_var_added_takes_bare_names_in_new_and_loop_targets() {
+    let before = "/datum/a\n/datum/b\n\nvar/item_type = /datum/a\nvar/count = 100\nvar/other = 0\n\n\
+                  /datum/t\n\n\
+                  /datum/t/proc/make()\n\treturn new item_type()\n\n\
+                  /datum/t/proc/each()\n\tfor(count in list(7))\n\t\tbreak\n\n\
+                  /datum/t/proc/range()\n\tfor(count in 1 to 3)\n\t\tbreak\n\n\
+                  /datum/t/proc/stepped()\n\tfor(count = 1 to 3 step 2)\n\t\tbreak\n\n\
+                  /datum/t/proc/pairs()\n\tfor(other, count in list(1, 2))\n\t\tbreak\n\n\
+                  /datum/t/proc/unrelated()\n\tfor(other in list(7))\n\t\tbreak\n\treturn new /datum/a()\n";
+    let added = before.replace(
+        "/datum/t\n\n",
+        "/datum/t\n\tvar/item_type = /datum/b\n\tvar/count = 0\n\n",
+    );
+    for (name, before, after) in [
+        ("member-var-new-added", before, added.as_str()),
+        ("member-var-new-removed", added.as_str(), before),
+    ] {
+        let changes = changes_of(name, before, after);
+        assert_eq!(
+            sorted_reloads(&changes),
+            [
+                "/datum/t/each",
+                "/datum/t/make",
+                "/datum/t/pairs",
+                "/datum/t/range",
+                "/datum/t/stepped"
+            ],
+            "{}",
+            name
+        );
+    }
+}
+
+#[test]
+fn a_changed_const_recompiles_the_initializers_and_in_lists_that_fold_it() {
+    let before = "var/const/LIMIT = 5\nvar/list/global_limits = list(LIMIT + 1)\n\n\
+                  /datum/holder\n\tvar/list/limits = list(LIMIT + 1)\n\n\
+                  /datum/holder/child\n\n\
+                  /datum/c\n\tvar/const/CAP = 3\n\n\
+                  /datum/c/holder\n\tvar/list/caps = list(CAP * 2)\n\n\
+                  /datum/other\n\tvar/list/others = list(1)\n\n\
+                  /mob/verb/choose(x in list(LIMIT + 1))\n\treturn x\n";
+    for (name, after, inits) in [
+        (
+            "const-init-limit",
+            before.replace("LIMIT = 5", "LIMIT = 10"),
+            &["/datum/holder", "/datum/holder/child"][..],
+        ),
+        (
+            "const-init-cap",
+            before.replace("CAP = 3", "CAP = 4"),
+            &["/datum/c/holder"][..],
+        ),
+    ] {
+        let changes = changes_of(name, before, &after);
+        assert_eq!(init_types(&changes), inits, "{}", name);
+        assert_eq!(
+            changes.global_init.is_some(),
+            name == "const-init-limit",
+            "{}",
+            name
+        );
+        if name == "const-init-limit" {
+            assert_eq!(sorted_reloads(&changes), ["/mob/choose"], "{}", name);
+            let InList::New(code) = &changes.plan.reloads[0].params[0].in_list else {
+                panic!("{}: {:?}", name, changes.plan.reloads[0].params[0].in_list);
+            };
+            let code = dmasm_bytecode::format(&code.nodes);
+            assert!(code.contains("11"), "{}: {}", name, code);
+            for init in &changes.plan.init_procs {
+                let code = dmasm_bytecode::format(&init.code.as_ref().unwrap().nodes);
+                assert!(code.contains("11"), "{}: {}", init.type_path, code);
+            }
+        } else {
+            assert_eq!(sorted_reloads(&changes), Vec::<String>::new(), "{}", name);
+        }
+    }
+}
+
+#[test]
+fn a_retyped_var_recompiles_the_in_lists_that_read_a_static_through_it() {
+    let before = "/datum/a\n\tvar/static/list/choices = list(1)\n\n\
+                  /datum/b\n\tvar/static/list/choices = list(2)\n\n\
+                  /mob/holder\n\tvar/datum/a/target\n\n\
+                  /mob/holder/verb/choose(x in target::choices)\n\treturn x\n";
+    let after = before.replace("var/datum/a/target", "var/datum/b/target");
+    let changes = changes_of("retyped-in-list", before, &after);
+    assert_eq!(sorted_reloads(&changes), ["/mob/holder/choose"]);
+    let InList::New(code) = &changes.plan.reloads[0].params[0].in_list else {
+        panic!("{:?}", changes.plan.reloads[0].params[0].in_list);
+    };
+    let code = format!("{:?}", code.nodes);
+    assert!(
+        code.contains("/datum/b") && !code.contains("/datum/a"),
+        "{}",
+        code
+    );
+}
+
+#[test]
+fn a_default_read_from_a_type_proc_default_names_the_same_proc() {
+    let before = "/datum/t/proc/f()\n/datum/t/f()\n\n\
+                  /datum/config\n\tvar/handler = /datum/t::f()\n\n/datum/user\n";
+    let after = format!(
+        "{before}\tvar/copy = /datum/config::handler\n\tvar/paren = (/datum/config::handler)\n\n\
+         /datum/user2\n\tvar/copy2 = /datum/user::copy\n"
+    );
+    let changes = changes("new-var-reading-proc-reference", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let mut values: Vec<(String, ConstValue)> = changes
+        .plan
+        .new_vars
+        .iter()
+        .map(|v| (v.var.clone(), v.value.clone()))
+        .collect();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    let path = ConstValue::Path("/datum/t/f".to_owned());
+    assert_eq!(
+        values,
+        [
+            ("copy".to_owned(), path.clone()),
+            ("copy2".to_owned(), path.clone()),
+            ("paren".to_owned(), path)
+        ]
+    );
+}
+
+#[test]
+fn a_new_static_reads_a_static_s_value_at_run_time() {
+    let before = "/datum/t/proc/f()\n/datum/t/f()\n\n\
+                  /datum/config\n\tvar/static/handler = /datum/t::f()\n\tvar/plain = /datum/t::f()\n\n\
+                  /datum/user\n";
+    let after = format!(
+        "{before}\tvar/static/copy = /datum/config::handler\n\tvar/static/plain_copy = /datum/config::plain\n"
+    );
+    let changes = changes("new-static-reading-static", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    let added = |name: &str| {
+        changes
+            .plan
+            .new_vars
+            .iter()
+            .find(|v| v.var == name)
+            .unwrap_or_else(|| panic!("{} isn't added: {:?}", name, changes.plan.new_vars))
+    };
+    let copy = added("copy");
+    let init = copy.init.as_ref().expect("copy has no code to run");
+    let code = dmasm_bytecode::format(&init.nodes);
+    assert!(code.contains("handler"), "{}", code);
+    let plain_copy = added("plain_copy");
+    assert_eq!(
+        (&plain_copy.value, plain_copy.init.is_none()),
+        (&ConstValue::Path("/datum/t/f".to_owned()), true)
+    );
+}
+
+#[test]
+fn a_static_naming_a_retargeted_path_is_given_to_a_reboot() {
+    let before =
+        "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+                  /proc/callback()\n\tvar/static/handler = /datum/t/f\n\treturn handler\n\n\
+                  /proc/other()\n\tvar/static/kept = /datum/t/proc/f\n\treturn kept\n";
+    let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
+    let changes = changes("static-retargeted", before, &removed);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert_eq!(changes.global_init.as_ref().map(|i| i.table), Some(1));
+    assert_eq!(global_init_sets(&changes), ["/proc/callback#0:handler @8"]);
+}
+
+#[test]
+fn a_static_folding_a_changed_const_is_given_to_a_reboot() {
+    let before = "var/const/LIMIT = 5\n\n\
+                  /proc/limits()\n\tvar/static/list/limits = list(LIMIT + 1)\n\treturn limits\n";
+    let after = before.replace("LIMIT = 5", "LIMIT = 10");
+    let changes = changes("static-folding-const", before, &after);
+    assert!(changes.refused.is_empty(), "{:?}", changes.refused);
+    assert!(changes.deferred.is_empty(), "{:?}", changes.deferred);
+    assert_eq!(global_init_sets(&changes), ["/proc/limits#0:limits @4"]);
+    let code = dmasm_bytecode::format(&changes.global_init.as_ref().unwrap().code.nodes);
+    assert!(code.contains("PushInt 11"), "{}", code);
+}
+
+#[test]
+fn uncompiled_code_folding_a_changed_const_is_refused() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let before = format!(
+        "var/const/LIMIT = 5\n\n\
+         /proc/next(x)\n{uncompiled}\treturn LIMIT + 1\n\n\
+         /proc/parameter(LIMIT, x)\n{uncompiled}\treturn LIMIT + 1\n\n\
+         /proc/local(x)\n\tvar/LIMIT = 3\n{uncompiled}\treturn LIMIT + 1\n\n\
+         /datum/m\n\tvar/LIMIT = 2\n\n\
+         /datum/m/proc/member(x)\n{uncompiled}\treturn LIMIT + 1\n\n\
+         /datum/m/proc/qualified_member(x)\n{uncompiled}\treturn ::LIMIT + 1\n\n\
+         /datum/own\n\tvar/const/LIMIT = 2\n\n\
+         /datum/own/proc/own_limit(x)\n{uncompiled}\treturn LIMIT + 1\n\n\
+         /proc/qualified(x)\n{uncompiled}\treturn ::LIMIT + 1\n\n\
+         /proc/dotted(x)\n{uncompiled}\treturn global.LIMIT + 1\n\n\
+         /datum/c\n\tvar/const/CAP = 3\n\n\
+         /datum/c/proc/capped(x)\n{uncompiled}\treturn CAP * 2\n\n\
+         /proc/scoped(x)\n{uncompiled}\treturn /datum/c::CAP\n\n\
+         /proc/compiled()\n\treturn LIMIT + CAP\n"
+    );
+    for (name, after, refused) in [
+        (
+            "uncompiled-const-limit",
+            before.replace("LIMIT = 5", "LIMIT = 10"),
+            &[
+                "/datum/m/qualified_member",
+                "/dotted",
+                "/next",
+                "/qualified",
+            ][..],
+        ),
+        (
+            "uncompiled-const-cap",
+            before.replace("CAP = 3", "CAP = 4"),
+            &["/datum/c/capped", "/scoped"][..],
+        ),
+    ] {
+        let changes = changes_of(name, &before, &after);
+        let mut paths: Vec<&str> = changes.refused.iter().map(|r| r.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, refused, "{}: {:?}", name, changes.refused);
+        assert!(
+            changes.refused[0]
+                .why
+                .starts_with("folds a `const` variable whose value changed, so it must be recompiled, but it failed to compile: "),
+            "{}: {}",
+            name,
+            changes.refused[0]
+        );
+    }
+}
+
+#[test]
+fn uncompiled_code_naming_a_declaration_by_ancestor_search_is_not_refused() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let before = format!(
+        "/datum/t/proc/f()\n\treturn 0\n\n/datum/t/f()\n\treturn 1\n\n/datum/t/f()\n\treturn 2\n\n\
+         /datum/t/child\n\n\
+         /proc/searched(x)\n{uncompiled}\treturn call(new /datum/t, /datum/t.proc/f)()\n\n\
+         /proc/from_child(x)\n{uncompiled}\treturn call(new /datum/t, /datum/t/child.proc/f)()\n\n\
+         /datum/t/child/proc/relative(x)\n{uncompiled}\treturn call(src, .proc/f)()\n"
+    );
+    let removed = before.replace("/datum/t/f()\n\treturn 1\n\n", "");
+    let changes = changes("searched-uncompiled", &before, &removed);
+    assert_eq!(reloaded(&changes), []);
 }

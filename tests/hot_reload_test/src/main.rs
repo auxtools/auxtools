@@ -13,6 +13,8 @@ use test_support::{
 	temp::TempDir
 };
 
+mod dependents;
+
 struct Source {
 	dir: TempDir,
 	options: ParseOptions,
@@ -36,6 +38,7 @@ impl Source {
 			"hot_reload_test_host.dme",
 			"main.dm",
 			"reload.dm",
+			"dependents.dm",
 			"resources.dm",
 			"lamp.dmi",
 			"lamp_edited.dmi",
@@ -278,6 +281,7 @@ const SECTIONS: &[(&str, fn(Built))] = &[
 	("definitions", definitions),
 	("types", types),
 	("declarations", declarations),
+	("dependents", dependents::dependents),
 	("resources", resources)
 ];
 
@@ -2213,6 +2217,28 @@ fn definitions(built: Built) {
 	assert_eq!(eval(&mut client, "(new /datum/asking/child).ask()"), "\"member\"");
 	assert_eq!(eval(&mut client, "hr_asked()"), "\"global\"");
 	println!("ok: a new member proc takes an unchanged proc's call of a global proc");
+
+	let changes = source.edit("reload.dm", "\tvar/limit = 5\n", "\tvar/limit = 10\n");
+	let chooser = changes.plan.reloads.iter().find(|r| r.proc.path == "/mob/limited/choose_limit");
+	let Some(InList::New(choices)) = chooser.map(|r| &r.params[0].in_list) else {
+		panic!("the verb's unchanged `in` list isn't compiled again: {:?}", chooser);
+	};
+	let code: Vec<_> = (choices.nodes.iter())
+		.filter_map(|node| match node {
+			dmasm::Node::Instruction(instruction, _) => Some(instruction),
+			_ => None
+		})
+		.collect();
+	assert!(
+		code.windows(2)
+			.any(|pair| matches!(pair, [dmasm::Instruction::PushInt(10), dmasm::Instruction::NewList(1)])),
+		"the verb's new `in` list isn't list(10): {}",
+		dmasm::format(&choices.nodes)
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(eval(&mut client, "(new /datum/config_read).limits[1]"), "10");
+	assert_eq!(eval(&mut client, "(new /datum/config_read).copied"), "10");
+	println!("ok: initializers and `in` lists that read a changed default with :: follow it");
 
 	let changes = source.edit("reload.dm", "/datum/lone/speak()\n\treturn \"lone override\"\n", "");
 	let result = expect_reload_result(watcher.request(reload_request(&changes)));

@@ -1829,7 +1829,7 @@ pub fn diff(old: &Snapshot, new: &Snapshot, changed_files: Option<&HashSet<PathB
     reparent::reparented_users(old, new, &realigned, &mut changes);
     moved::moved_users(old, new, &realigned, &mut changes);
     retargeted::path_users(&retargeted, &mut changes);
-    global_init::compare(old, new, &mut changes);
+    global_init::compare(old, new, &retargeted, &mut changes);
     changes.collect_warnings();
     changes
 }
@@ -1877,6 +1877,7 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         .chain(&changes.retyped)
         .map(String::as_str)
         .collect();
+    let consts: HashSet<&str> = changes.consts.iter().map(String::as_str).collect();
     let moved: HashSet<&str> = changes
         .defaults_changed
         .iter()
@@ -1896,14 +1897,31 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
         if reloaded.contains(&old_key) {
             continue;
         }
-        let (Some(_), Some((_, new_value))) = (old.find(&old_key), new.find(key)) else {
+        let (Some(_), Some((new_ty, new_value))) = (old.find(&old_key), new.find(key)) else {
             continue;
         };
         if !names_any(new_value, &names, &moved) {
             continue;
         }
-        let (Ok(before), Ok(after)) = (old.compile(&old_key), new.compile(key)) else {
-            continue;
+        let compiled = match (old.compile(&old_key), new.compile(key)) {
+            (Ok(before), Ok(after)) => Some((before, after)),
+            (_, after) => {
+                if !folds_changed(old, new, &new_ty.get().path, new_value, &consts) {
+                    continue;
+                }
+                if let Err(e) = after {
+                    let refusal = new.uncompiled(key, &e);
+                    changes.refused.push(Refusal {
+                        why: format!(
+                            "folds a const whose value changes, so it must be compiled again, but it {}",
+                            refusal.why
+                        ),
+                        ..refusal
+                    });
+                    continue;
+                }
+                None
+            }
         };
         let code = |nodes: &[Node]| -> Vec<Node> {
             nodes
@@ -1912,7 +1930,7 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
                 .cloned()
                 .collect()
         };
-        if code(&before.nodes) == code(&after.nodes) {
+        if let Some((before, after)) = compiled.filter(|(b, a)| code(&b.nodes) == code(&a.nodes)) {
             match line_map(&before.nodes, &after.nodes) {
                 Some(lines) => {
                     let lines: Vec<(u32, u32)> = lines.into_iter().collect();
@@ -1949,6 +1967,72 @@ fn const_users(old: &Snapshot, new: &Snapshot, realigned: &Realigned, changes: &
             Err(e) => changes.refused.push(new.uncompiled(key, &e)),
         }
     }
+}
+
+fn folds_changed(
+    old: &Snapshot,
+    new: &Snapshot,
+    ty: &str,
+    value: &ProcValue,
+    consts: &HashSet<&str>,
+) -> bool {
+    use dreammaker::ast::{Expression, Follow, Term};
+    let bound_value = |s: &Snapshot, name: &str| {
+        let at = s.find_type(ty)?;
+        let (at, declaration) = match at.get_var_declaration(name) {
+            Some(declaration) => (at, declaration),
+            None => (s.tree.root(), s.tree.root().get_var_declaration(name)?),
+        };
+        if !declaration.get().var_type.flags.is_const() {
+            return None;
+        }
+        at.get_value(name)?.constant.clone()
+    };
+    let global_value = |s: &Snapshot, name: &str| {
+        let root = s.tree.root();
+        root.get_var_declaration(name)
+            .filter(|d| d.get().var_type.flags.is_const())
+            .and_then(|_| root.get_value(name))
+            .and_then(|v| v.constant.clone())
+    };
+    let global_changed =
+        |name: &str| consts.contains(name) && global_value(old, name) != global_value(new, name);
+    let locals = retargeted::local_reads(value);
+    let mut found = false;
+    syntax::walk_proc(value, &mut |node| {
+        found = found
+            || match node {
+                syntax::Node::Term(term @ Term::Ident(name)) => {
+                    consts.contains(name.as_str())
+                        && !locals.contains(&(term as *const Term as usize, name.to_string()))
+                        && bound_value(old, name) != bound_value(new, name)
+                }
+                syntax::Node::Term(Term::GlobalIdent(name)) => global_changed(name),
+                syntax::Node::Expression(Expression::Base { term, follow }) => {
+                    match (&term.elem, follow.first().map(|f| &f.elem)) {
+                        (Term::Ident(global), Some(Follow::Field(_, name)))
+                            if global.as_str() == "global" =>
+                        {
+                            global_changed(name)
+                        }
+                        (Term::Prefab(prefab), Some(Follow::StaticField(name)))
+                            if prefab.vars.is_empty() =>
+                        {
+                            let path = prefab.path.to_string();
+                            let default = |s: &Snapshot| {
+                                s.find_type(&path)
+                                    .and_then(|t| t.get_value(name.as_str()))
+                                    .map(|v| v.constant.clone())
+                            };
+                            default(old) != default(new)
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+    });
+    found
 }
 
 enum LineChange {
@@ -2341,13 +2425,17 @@ fn value_location(
 struct Init {
     var: String,
     on: String,
+    declared: String,
     value: dreammaker::ast::Expression,
     location: dreammaker::Location,
 }
 
 impl PartialEq for Init {
     fn eq(&self, other: &Self) -> bool {
-        self.var == other.var && self.on == other.on && self.value == other.value
+        self.var == other.var
+            && self.on == other.on
+            && self.declared == other.declared
+            && self.value == other.value
     }
 }
 
@@ -2364,8 +2452,8 @@ fn inits<'a>(t: TypeRef, memo: &'a mut HashMap<usize, Vec<Init>>) -> &'a [Init] 
                 if var.value.location.file == FileId::BUILTINS {
                     continue;
                 }
-                let flags = t
-                    .get_var_declaration(name.as_str())
+                let declaration = t.get_var_declaration(name.as_str());
+                let flags = declaration
                     .map(|d| d.get().var_type.flags)
                     .unwrap_or_default();
                 if flags.is_static() || flags.is_const() {
@@ -2378,6 +2466,9 @@ fn inits<'a>(t: TypeRef, memo: &'a mut HashMap<usize, Vec<Init>>) -> &'a [Init] 
                         list.push(Init {
                             var: name.as_str().to_owned(),
                             on: t.get().path.clone(),
+                            declared: declaration
+                                .map(|d| d.get().var_type.type_path.to_string())
+                                .unwrap_or_default(),
                             value,
                             location: var.value.location,
                         });
