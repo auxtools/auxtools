@@ -238,6 +238,7 @@ pub fn compile_expr_warned(
     let mut compiler = Compiler::new(params.iter().map(|x| x.to_string()).collect(), None);
     compiler.byond = byond;
     compiler.expr_scope = scope;
+    compiler.debugger = true;
     compiler.emit_ins(Instruction::DbgFile(DMString(
         b"<dmasm expression>".to_vec(),
     )));
@@ -410,6 +411,7 @@ pub fn compile_body_in(
     let mut compiler = Compiler::new(params.iter().map(|x| x.to_string()).collect(), Some(ctx));
     compiler.byond = byond;
     compiler.expr_scope = scope;
+    compiler.debugger = true;
     compiler.emit_ins(Instruction::DbgFile(DMString(
         BODY_FILE.as_bytes().to_vec(),
     )));
@@ -612,6 +614,7 @@ struct Compiler<'a> {
     short_circuit_labels: Vec<(String, bool)>,
     proc: Option<procs::ProcCtx<'a>>,
     expr_scope: Option<&'a ExprScope<'a>>,
+    debugger: bool,
     cache: Option<Vec<Variable>>,
     last_line: Option<u32>,
     implicit_type: Option<String>,
@@ -647,6 +650,7 @@ impl<'a> Compiler<'a> {
             short_circuit_labels: vec![],
             proc,
             expr_scope: None,
+            debugger: false,
             cache: None,
             last_line: None,
             implicit_type: None,
@@ -770,7 +774,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn proc_macros_known(&self) -> bool {
-        self.proc.is_some() && self.expr_scope.is_none()
+        self.proc.is_some() && !self.debugger
     }
 
     fn static_type_name(&self, expr: &Expression) -> Option<String> {
@@ -1089,7 +1093,7 @@ impl<'a> Compiler<'a> {
                     Some(Follow::StaticField(_) | Follow::ProcReference(_)),
                 ) = (type_term, unspanned_follows.first())
                 {
-                    if self.proc.is_some() && prefab.vars.is_empty() && self.expr_scope.is_none() {
+                    if self.proc.is_some() && prefab.vars.is_empty() && !self.debugger {
                         self.global_field = true;
                         let path = prefab.path.to_string();
                         let kind = procs::emit_type_scope(self, &path, &unspanned_follows[0])?;
