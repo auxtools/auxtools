@@ -214,9 +214,15 @@ impl Proc {
 		Err(runtime!("proc call failed"))
 	}
 
-	/// Gives this proc the override id [`Proc::APART`]. The other definitions
-	/// keep their ids. A path has only one proc set apart, so this replaces any
-	/// earlier one.
+	/// Moves this proc out of its path's override list and assigns it the
+	/// override ID [`Proc::APART`].
+	///
+	/// Updates only the library's lookup table without modifying BYOND's
+	/// tables. The proc keeps its BYOND proc ID, subsequent overrides shift
+	/// down by one override ID, and [`Proc::find`], [`Proc::find_override`]
+	/// (for numeric IDs), and `Proc::overrides` no longer return it. Only the
+	/// most recently set-apart proc for a given path can be retrieved with
+	/// [`Proc::APART`].
 	pub fn set_apart(&self) {
 		PROC_OVERRIDE_IDS.with(|override_ids| {
 			let mut override_ids = override_ids.borrow_mut();
