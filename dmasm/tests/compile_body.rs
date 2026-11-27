@@ -524,3 +524,12 @@ fn an_assignment_to_a_global_is_a_value_too() {
         assert_has(&compiled, &written);
     }
 }
+
+#[test]
+fn bodies_compiled_one_after_another_see_the_same_types() {
+    for _ in 0..3 {
+        let (code, _) = body("var/list/L = list(1)\nreturn L.Copy() + NORTH").unwrap();
+        assert_has(&code, &["Call cache = local(0); dynamic_proc(\"Copy\") 0"]);
+        assert_has(&code, &["PushInt 1", "Add"]);
+    }
+}
