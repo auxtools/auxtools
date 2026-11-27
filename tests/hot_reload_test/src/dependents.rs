@@ -425,6 +425,138 @@ pub fn dependents(built: Built) {
 		"recompiled make()?.name = new doesn't make the type DreamMaker makes"
 	);
 	println!("ok: recompiled make()?.name = new makes the type DreamMaker makes");
+
+	assert_eq!(eval(&mut client, "\"[dep_implicit_uncompiled()]\""), "\"/datum/dep_implicit_child\"");
+	let refused = refused_edit(
+		&mut source,
+		"dependents.dm",
+		"/proc/dep_implicit_make(holder) as /datum/dep_implicit_holder\n",
+		"/proc/dep_implicit_make(holder) as /datum/dep_implicit_other\n"
+	);
+	let shown: Vec<String> = refused.iter().map(|r| format!("{:#}", r)).collect();
+	assert_eq!(
+		shown,
+		[
+			"/dep_implicit_uncompiled: infers the type of `new`, `locate()`, `astype()`, or `istype()` from a variable whose type changed, so it \
+			 must be recompiled, but it failed to compile: unsupported: `type::proc()` targeting a type's second or later override"
+		],
+		"a proc dmasm can't compile whose make()?.name = new makes another type after the reload isn't refused"
+	);
+	println!("ok: a reload is refused for a proc dmasm can't compile whose make()?.name = new makes another type");
+
+	const GLOBAL_CALLED: &str = "\"/datum/dep_global_b 5\"";
+	assert_eq!(eval(&mut client, "(new /datum/dep_global_caller).call_global()"), GLOBAL_CALLED);
+	let changes = source.edit(
+		"dependents.dm",
+		"\treturn \"[::dep_global_make().type] ",
+		"\treturn \"[::dep_global_make().type]  "
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "(new /datum/dep_global_caller).call_global()"),
+		"\"/datum/dep_global_b  5\"",
+		"recompiled ::make() in a type with its own make() doesn't call the global proc and read by its return type"
+	);
+	println!("ok: recompiled ::make() in a type with its own make() calls the global proc and reads by its return type");
+
+	let read = "\"[dep_chain(new /datum/dep_chain_factory)] [isnull(dep_chain(null))]\"";
+	assert_eq!(eval(&mut client, read), "\"5 1\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"\treturn factory?.builder().dep_chain_make().DEP_CHAIN_LIMIT",
+		"\treturn 0 || factory?.builder().dep_chain_make().DEP_CHAIN_LIMIT"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, read),
+		"\"5 1\"",
+		"recompiled factory?.builder().make().name doesn't read the var DreamMaker reads"
+	);
+	println!("ok: recompiled factory?.builder().make().name reads the var DreamMaker reads, and null for a null factory");
+
+	assert_eq!(eval(&mut client, "dep_shared_bump()"), "\"0 1\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"\tdep_shared_make()?.DEP_SHARED.count += 1\n",
+		"\tdep_shared_make()?.DEP_SHARED.count += 2\n"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "dep_shared_bump()"),
+		"\"0 3\"",
+		"recompiled make()?.STATIC.name += value doesn't change the object that DreamMaker changes"
+	);
+	println!("ok: recompiled make()?.STATIC.name += value changes the object that DreamMaker changes");
+
+	let read = "\"[dep_show_on(new /mob/dep_shower)] [isnull(dep_show_on(null))]\"";
+	assert_eq!(eval(&mut client, read), "\"shown 1\"");
+	let changes = source.edit("dependents.dm", "\treturn target?:dep_show()", "\treturn 0 || target?:dep_show()");
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, read),
+		"\"shown 1\"",
+		"recompiled untyped target?:verb() doesn't call the verb by its `set name`"
+	);
+	println!("ok: recompiled untyped target?:verb() calls the verb by its `set name`");
+
+	const MAKE_ON: &str = "dep_make_on(new /datum/dep_maker_last)";
+	assert_eq!(eval(&mut client, MAKE_ON), "\"last\"");
+	let changes = source.edit("dependents.dm", "\treturn x:dep_make()", "\treturn 0 || x:dep_make()");
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, MAKE_ON),
+		"\"last\"",
+		"recompiled untyped x:make() doesn't call the proc of the last type made that declares make()"
+	);
+	println!("ok: recompiled untyped x:make() calls the proc of the last type made that declares make()");
+
+	let changes = source.edit(
+		"dependents.dm",
+		"/proc/dep_make_on(x)",
+		"/datum/dep_maker_later/proc/dep_make()\n\tset name = \"dep make later\"\n\treturn \"later\"\n\n/proc/dep_make_on(x)"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, "dep_make_on(new /datum/dep_maker_later)"),
+		"\"later\"",
+		"unchanged untyped x:make() doesn't call the make() of a type made later"
+	);
+	println!("ok: unchanged untyped x:make() calls the make() of a type made later");
+
+	const REFRESHED: &str = "\"[dep_refresh_first(list(new /datum/dep_refreshed))] [isnull(dep_refresh_first(null))]\"";
+	assert_eq!(eval(&mut client, REFRESHED), "\"refreshed 2 1\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"\treturn items?[1]:dep_refresh(2)",
+		"\treturn 0 || items?[1]:dep_refresh(2)"
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, REFRESHED),
+		"\"refreshed 2 1\"",
+		"recompiled items?[1]:refresh() doesn't call refresh() on the item, or a null list isn't skipped"
+	);
+	println!("ok: recompiled items?[1]:refresh() calls refresh() on the item, and a null list is skipped");
+
+	const NEW_FROM: &str = "\"[dep_new_from(new /datum/dep_new_config)] [dep_new_from(null)]\"";
+	assert_eq!(eval(&mut client, NEW_FROM), "\"/datum/dep_new_item/special /datum/dep_new_item/special\"");
+	let changes = source.edit(
+		"dependents.dm",
+		"\tvar/datum/dep_new_item/made = new config.item_type()\n\treturn made.type",
+		"\tvar/datum/dep_new_item/made = new config.item_type()\n\treturn 0 || made.type"
+	);
+	assert!(
+		changes.plan.reloads.iter().any(|r| r.proc.path == "/dep_new_from"),
+		"dep_new_from isn't compiled again: {:?}",
+		changes.plan
+	);
+	reload(&mut watcher, &changes);
+	assert_eq!(
+		eval(&mut client, NEW_FROM),
+		"\"/datum/dep_new_item/special /datum/dep_new_item/special\"",
+		"recompiled new config.item_type() doesn't read the static path of config's declared type"
+	);
+	println!("ok: recompiled new config.item_type() reads the static path of config's declared type, also with a null config");
 }
 
 fn refused_edit(source: &mut Source, file: &str, from: &str, to: &str) -> Vec<dmasm::reload::Refusal> {

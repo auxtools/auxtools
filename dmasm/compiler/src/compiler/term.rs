@@ -91,7 +91,25 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
             Ok(EvalKind::Stack)
         }
 
-        Term::Call(ident, args) | Term::GlobalCall(ident, args) => {
+        Term::GlobalCall(ident, args) => {
+            let path = operands::Proc(format!("/proc/{}", ident));
+            let arg_count = args.len() as u32;
+            match args::emit(compiler, args::ArgsContext::Proc, args.into_vec())? {
+                args::ArgsResult::Normal => {
+                    compiler.emit_ins(Instruction::CallGlob(arg_count, path));
+                }
+                args::ArgsResult::Assoc => {
+                    compiler.emit_ins(Instruction::NewAssocList(arg_count));
+                    compiler.emit_ins(Instruction::CallGlobalArgList(path));
+                }
+                args::ArgsResult::ArgList => {
+                    compiler.emit_ins(Instruction::CallGlobalArgList(path));
+                }
+            }
+            Ok(EvalKind::Stack)
+        }
+
+        Term::Call(ident, args) => {
             let args_vec = args.into_vec();
             match builtin_procs::emit(compiler, &ident, &args_vec)? {
                 Some(kind) => Ok(kind),
@@ -245,6 +263,7 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
             if expr.ident.as_str() == "src" && !expr.fields.is_empty() {
                 compiler.explicit_src = true;
             }
+            let ty = super::procs::term_type(compiler, &Term::Ident(expr.ident.clone()));
             let var = compiler.emit_find_var(expr.ident.into())?;
             let follows: Vec<Follow> = expr
                 .fields
@@ -252,7 +271,7 @@ pub(super) fn emit(compiler: &mut Compiler<'_>, term: Term) -> Result<EvalKind, 
                 .map(|f: &Field| f.clone().into())
                 .collect();
 
-            let kind = follow::emit(compiler, follows, var)?;
+            let kind = follow::emit_typed(compiler, follows, var, ty)?;
             compiler.emit_move_to_stack(kind)?;
 
             emit_new(compiler, args)

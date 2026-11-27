@@ -327,3 +327,99 @@ var/datum/dep_retype_alone_first/dep_retype_alone_target
 	typed.me()?.dep_new_made = new
 	untyped.untyped_me()?.dep_new_made = new
 	return "[typed.dep_new_made.type] [untyped.dep_new_made.type]"
+
+/datum/dep_implicit_child
+/datum/dep_implicit_child/special
+
+/datum/dep_implicit_holder
+	var/datum/dep_implicit_child/dep_implicit_made
+
+/datum/dep_implicit_other
+	var/datum/dep_implicit_child/special/dep_implicit_made
+
+/proc/dep_implicit_make(holder) as /datum/dep_implicit_holder
+	return holder || new /datum/dep_implicit_holder
+
+/datum/dep_global_a
+	var/const/DEP_GLOBAL_LIMIT = 5
+
+/datum/dep_global_b
+	var/const/DEP_GLOBAL_LIMIT = 9
+
+/proc/dep_global_make() as /datum/dep_global_a
+	return new /datum/dep_global_b
+
+/datum/dep_global_caller/proc/dep_global_make()
+	return src
+
+/datum/dep_global_caller/proc/call_global()
+	return "[::dep_global_make().type] [::dep_global_make().DEP_GLOBAL_LIMIT]"
+
+/datum/dep_chain_a
+	var/const/DEP_CHAIN_LIMIT = 5
+
+/datum/dep_chain_b
+	var/const/DEP_CHAIN_LIMIT = 9
+
+/datum/dep_chain_builder/proc/dep_chain_make() as /datum/dep_chain_a
+	return new /datum/dep_chain_b
+
+/datum/dep_chain_factory/proc/builder() as /datum/dep_chain_builder
+	return new /datum/dep_chain_builder
+
+/proc/dep_chain(datum/dep_chain_factory/factory)
+	return factory?.builder().dep_chain_make().DEP_CHAIN_LIMIT
+
+/datum/dep_shared_counter
+	var/count = 0
+
+/datum/dep_shared_a
+	var/static/datum/dep_shared_counter/DEP_SHARED = new
+
+/datum/dep_shared_b
+	var/static/datum/dep_shared_counter/DEP_SHARED = new
+
+/proc/dep_shared_make()
+	return new /datum/dep_shared_a
+
+/proc/dep_shared_bump()
+	dep_shared_make()?.DEP_SHARED.count += 1
+	var/datum/dep_shared_a/a = new
+	var/datum/dep_shared_b/b = new
+	return "[a.DEP_SHARED.count] [b.DEP_SHARED.count]"
+
+/mob/dep_shower/verb/dep_show()
+	set name = "Dep Display"
+	return "shown"
+
+/proc/dep_show_on(target)
+	return target?:dep_show()
+
+/datum/dep_maker_first
+/datum/dep_maker_last
+
+/datum/dep_maker_first/proc/dep_make()
+	set name = "dep make first"
+	return "first"
+
+/datum/dep_maker_last/proc/dep_make()
+	set name = "dep make last"
+	return "last"
+
+/proc/dep_make_on(x)
+	return x:dep_make()
+
+/datum/dep_refreshed/proc/dep_refresh(a)
+	return "refreshed [a]"
+
+/proc/dep_refresh_first(list/items)
+	return items?[1]:dep_refresh(2)
+
+/datum/dep_new_item
+/datum/dep_new_item/special
+/datum/dep_new_config
+	var/static/item_type = /datum/dep_new_item/special
+
+/proc/dep_new_from(datum/dep_new_config/config)
+	var/datum/dep_new_item/made = new config.item_type()
+	return made.type

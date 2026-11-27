@@ -872,6 +872,298 @@ var/const/LIMIT = 10
 	return (factory.typed()?.S = 4)
 /proc/f12(datum/factory/factory)
 	return factory.make()?.S++
+// Guards: a_global_call_calls_the_global_proc_and_reads_by_its_return_type (compile_proc.rs)
+/datum/a
+	var/const/LIMIT = 5
+	var/static/S = 1
+/datum/b
+	var/const/LIMIT = 9
+	var/static/S = 2
+/proc/make() as /datum/a
+	return new /datum/a
+/datum/thing/proc/make() as /datum/b
+	return new /datum/b
+/datum/thing/proc/f1()
+	return ::make()
+/datum/thing/proc/f2()
+	return ::make().LIMIT
+/datum/thing/proc/f3()
+	return make()
+/datum/thing/proc/f4()
+	return ::make()?.LIMIT
+/datum/thing/proc/f5()
+	return ::make().S
+/datum/thing/proc/f6()
+	::make()?.S = 3
+/datum/thing/proc/f7(a, b)
+	return ::make(a, b)
+/datum/thing/proc/f8()
+	return ::make(arglist(list(1)))
+/datum/thing/proc/f9()
+	return ::make(a = 1)
+/proc/f10()
+	return ::make().LIMIT
+// Guards: a_safe_chain_finds_each_calls_proc_and_value_by_the_type_before_it (compile_proc.rs)
+/datum/a
+	var/const/LIMIT = 5
+	var/static/S = 1
+/datum/b
+	var/const/LIMIT = 9
+	var/static/S = 2
+/datum/decoy/proc/make() as /datum/b
+	return new /datum/b
+/datum/decoy/proc/named()
+	return new /datum/b
+/datum/decoy/verb/shown()
+	return new /datum/b
+/datum/builder/proc/make() as /datum/a
+	return new /datum/b
+/datum/builder/proc/named()
+	set name = "build it"
+	return new /datum/b
+/datum/builder/proc/me() as /datum/builder
+	return src
+/datum/builder/proc/shown()
+	return new /datum/b
+/datum/factory/proc/builder() as /datum/builder
+	return new /datum/builder
+/proc/f1(datum/factory/factory)
+	return factory?.builder().make().LIMIT
+/proc/f2(datum/factory/factory)
+	return factory?.builder().make().S
+/proc/f3(datum/factory/factory)
+	return factory?.builder().named()
+/proc/f4(datum/factory/factory)
+	return factory?.builder().make()?.LIMIT
+/proc/f5(datum/factory/factory)
+	return factory?.builder().make():LIMIT
+/proc/f6(datum/factory/factory)
+	factory?.builder().make().S = 4
+/proc/f7(datum/factory/factory)
+	return factory?.builder().me().make().LIMIT
+/proc/f8(datum/factory/factory)
+	return factory?.builder().me().named()
+/proc/f9(datum/factory/factory)
+	return factory?.builder().shown()
+/proc/f10(datum/factory/factory)
+	return factory?.builder():make().LIMIT
+/proc/f11(datum/factory/factory)
+	return factory?.builder().make().LIMIT + 1
+// Guards: a_safe_write_finds_the_statics_it_goes_through_as_a_read_does (compile_proc.rs)
+// Known -516.1672: /proc/f7  before 516.1673 DreamMaker leaves out the null tests of `a?.b ||= v` and `&&=`; dmasm keeps them
+// Known -516.1672: /proc/f10  before 516.1673 DreamMaker leaves out the null tests of `a?.b ||= v` and `&&=`; dmasm keeps them
+// Known -516.1672: /proc/f11  before 516.1673 DreamMaker leaves out the null tests of `a?.b ||= v` and `&&=`; dmasm keeps them
+/datum/counter
+	var/count = 0
+	var/datum/counter/next
+	var/static/datum/counter/INNER
+/datum/a
+	var/static/datum/counter/SHARED = new
+	var/datum/counter/plain
+	var/static/S = 1
+/datum/b
+	var/static/datum/counter/SHARED = new
+	var/datum/counter/plain
+	var/static/S = 2
+/datum/holder
+	var/datum/a/a
+/proc/make()
+	return new /datum/a
+/proc/typed() as /datum/a
+	return new /datum/b
+/proc/f1()
+	make()?.SHARED.count += 1
+/proc/f2()
+	typed()?.SHARED.count += 1
+/proc/f3()
+	make()?.SHARED.count = 1
+/proc/f4()
+	make()?.SHARED?.count = 1
+/proc/f5()
+	make()?.SHARED.next.count++
+/proc/f6()
+	return make()?.SHARED.count
+/proc/f7()
+	make()?.SHARED.count ||= 2
+/proc/f8(datum/a/x)
+	x?.SHARED.count += 1
+/proc/f9()
+	make()?.SHARED?.count += 1
+/proc/f10()
+	return (make()?.SHARED.count ||= 2)
+/proc/f11()
+	return (typed()?.S ||= 2)
+/proc/f12(datum/holder/h)
+	h?.a.SHARED.count += 1
+/proc/f13(datum/a/x)
+	x?.plain.INNER.count = 3
+/proc/f14(datum/a/x)
+	x?.SHARED.INNER.count = 3
+/proc/f15(datum/a/x)
+	x?.SHARED.count++
+/proc/f16(datum/a/x)
+	return x?.SHARED.count++
+/proc/f17(datum/a/x)
+	x?.SHARED.next?.count = 3
+/proc/f18(datum/holder/h)
+	h?.a?.SHARED.count = 1
+/proc/f19(datum/a/x, i)
+	x?.SHARED.next.count = 3
+/proc/f20(x)
+	x?:SHARED.count = 3
+/proc/f21(datum/a/x)
+	return (x?.SHARED.count += 1)
+// Guards: a_safe_colon_call_on_an_untyped_value_finds_its_proc_as_a_colon_call_does (compile_proc.rs)
+/mob/verb/show()
+	set name = "Display"
+/datum/thing/proc/show_proc()
+	set name = "Show It"
+/mob/verb/plain_verb()
+/proc/f1(target)
+	target?:show()
+/proc/f2(target)
+	target:show()
+/proc/f3(target)
+	target?:show_proc()
+/proc/f5(target)
+	target?:plain_verb()
+/proc/f6(target)
+	return target?:show_proc()
+/proc/f7(target)
+	target?:show().x = 1
+/proc/f8(target)
+	return target?:show()?.x
+// Guards: a_colon_call_finds_its_proc_as_the_last_type_made_declares_it (compile_proc.rs)
+/datum/t1
+	var/const/LIMIT = 1
+	var/x
+/datum/t2
+	var/LIMIT = 2
+	var/x
+/datum/zz
+/datum/aa
+/datum/zz/proc/make() as /datum/t1
+	set name = "zz"
+/datum/aa/proc/make() as /datum/t2
+	set name = "aa"
+/datum/cb
+/datum/ca
+/datum/cb/cc
+/datum/ca/proc/tree_make()
+	set name = "ca"
+/datum/cb/cc/proc/tree_make()
+	set name = "cb/cc"
+/datum/holder/proc/act()
+	set name = "holder act"
+/mob/verb/act()
+	set name = "mob act"
+/datum/base
+/datum/base/s2
+/datum/base/s1
+/datum/base/s1/proc/build()
+	set name = "s1"
+/datum/base/s2/proc/build()
+	set name = "s2"
+/datum/other/proc/build()
+	set name = "other"
+/datum/base/proc/own()
+	set name = "base own"
+/datum/other/proc/own()
+	set name = "other own"
+/proc/f1(x)
+	return x:make()
+/proc/f2(x)
+	return x?:make()
+/proc/f3(list/items)
+	return items[1].make()
+/proc/f4(x)
+	return x:act()
+/proc/f5(datum/base/base)
+	return base:build()
+/proc/f6(datum/base/base)
+	return base?:build()
+/proc/f7(datum/base/base)
+	return base:own()
+/proc/f8(datum/base/base)
+	return base?:own()
+/proc/f9(list/items)
+	return items:make()
+/proc/f10(x)
+	return x:make().LIMIT
+/proc/f11(x)
+	return x?:make()?.LIMIT
+/proc/f12(x)
+	return x:tree_make()
+/proc/f13(datum/base/base)
+	base?:own().x = 1
+/proc/f14(x)
+	x:make()?:own().x = 1
+// Guards: a_safe_colon_field_finds_its_var_as_on_an_untyped_value (compile_proc.rs)
+/datum/base
+	var/LIMIT = 1
+/datum/later
+	var/static/LIMIT = 2
+/datum/later2
+	var/const/COUNT = 3
+/datum/base/sub
+	var/const/COUNT = 4
+/proc/f1(datum/base/sub/base)
+	return base?:LIMIT
+/proc/f2(datum/base/sub/base)
+	base?:LIMIT = 5
+/proc/f3(datum/base/sub/base)
+	base?:LIMIT += 1
+/proc/f4(datum/base/sub/base)
+	return base:LIMIT
+/proc/f5(datum/base/sub/base)
+	return base?.LIMIT
+/proc/f6(datum/base/sub/base)
+	return base?:COUNT
+// Guards: a_call_after_a_safe_index_keeps_the_indexed_item_as_its_receiver (compile_proc.rs)
+/datum/item/proc/refresh(a)
+	return a
+/datum/holder
+	var/list/items
+	var/datum/item/one
+/proc/f1(list/items)
+	return items?[1]:refresh()
+/proc/f2(list/items)
+	items?[1]:refresh()
+/proc/f3(list/items, x)
+	return items?[1]:refresh(x)
+/proc/f4(list/items)
+	return items?[1].refresh(items.len)
+/proc/f5(list/items, list/other)
+	return items?[1]:refresh(other?[1])
+/proc/f6(list/items)
+	return items?[1]:refresh()?:refresh()
+/proc/f7(datum/holder/h)
+	return h?.items[1].refresh(h.one)
+// Guards: new_of_a_field_chain_reads_it_by_the_declared_type (compile_proc.rs)
+/datum/item
+/datum/item/special
+/datum/config
+	var/static/item_type = /datum/item/special
+	var/plain_type = /datum/item
+	var/const/CONST_TYPE = /datum/item/special
+	var/datum/config/inner
+/proc/f1(datum/config/config)
+	return new config.item_type()
+/proc/f2(datum/config/config)
+	return new config.plain_type()
+/proc/f3(datum/config/config)
+	return new config.item_type(1)
+/proc/f4(datum/config/config)
+	return new config.inner.item_type()
+/proc/f5(config)
+	return new config:item_type()
+/proc/f6(datum/config/config)
+	return new config.CONST_TYPE()
+/proc/f7(datum/config/config)
+	var/datum/item/I = new config.item_type
+	return I
+/datum/config/proc/f8()
+	return new src.item_type()
 // Guards: a_safe_colon_call_finds_its_proc_and_value_as_a_colon_call_does (compile_proc.rs)
 /datum/a
 	var/const/LIMIT = 5

@@ -23,14 +23,7 @@ fn callee_var<'a>(
     access: PropertyAccessKind,
     name: &str,
 ) -> Variable {
-    let ty = match ty {
-        Some(t) if access == PropertyAccessKind::Colon => {
-            Some(super::procs::colon_proc_type(t, name).unwrap_or(t))
-        }
-        Some(t) => Some(t),
-        None => super::procs::first_declaring_type(compiler.proc.tree, name),
-    };
-    super::procs::call_var(ty, name)
+    super::procs::call_var(super::procs::callee_type(compiler, ty, access, name), name)
 }
 
 fn proc_known(
@@ -39,12 +32,9 @@ fn proc_known(
     access: PropertyAccessKind,
     name: &str,
 ) -> bool {
-    match ty {
-        Some(t) if access == PropertyAccessKind::Colon => {
-            super::procs::colon_proc_type(t, name).is_some()
-        }
-        Some(t) => t.get_proc(name).is_some(),
-        None => super::procs::first_declaring_type(compiler.proc.tree, name).is_some(),
+    match (ty, access) {
+        (Some(t), PropertyAccessKind::Dot) => t.get_proc(name).is_some(),
+        _ => super::procs::colon_proc_type(compiler, ty, name).is_some(),
     }
 }
 
@@ -512,7 +502,14 @@ fn emit_safe<'a>(
                     after,
                 );
                 super::statements::emit_safe_chain_write(
-                    compiler, chain, None, static_var, None, write, true,
+                    compiler,
+                    chain,
+                    (ty, after),
+                    None,
+                    static_var,
+                    None,
+                    write,
+                    true,
                 )?;
                 return Ok(EvalKind::Stack);
             }
@@ -535,6 +532,11 @@ fn emit_safe_inner<'a>(
     let end = compiler.new_label();
     compiler.emit_ins(Instruction::SetCacheJmpIfNull(Label::Named(end.clone())));
 
+    let ty = match first {
+        Follow::Field(PropertyAccessKind::SafeColon, _)
+        | Follow::Call(PropertyAccessKind::SafeColon, ..) => None,
+        _ => ty,
+    };
     let mut follows = vec![match first {
         Follow::Field(PropertyAccessKind::SafeColon, ident) => {
             Follow::Field(PropertyAccessKind::Colon, ident)
@@ -610,6 +612,7 @@ fn emit_safe_inner<'a>(
                 called = true;
                 (ty, after) = super::procs::call_result(compiler, receiver_ty, access, &ident);
                 kind = commit_field_buffer(compiler, kind, &mut field_buffer)?;
+                let computed = !matches!(kind, EvalKind::Var(_) | EvalKind::Field(..));
                 let builder = match kind {
                     EvalKind::Var(var) => ChainBuilder::begin(var),
                     EvalKind::Field(mut builder, field) => {
@@ -622,6 +625,15 @@ fn emit_safe_inner<'a>(
                         ChainBuilder::begin(Variable::Cache)
                     }
                 };
+                if computed {
+                    compiler.emit_ins(Instruction::PushCache);
+                    let count = compiler.emit_call_args(args.into_vec())?;
+                    compiler.emit_ins(Instruction::PopCache);
+                    let var = callee_var(compiler, receiver_ty, access, &ident);
+                    compiler.emit_ins(Instruction::Call(builder.get_leaf(var), count));
+                    kind = EvalKind::Stack;
+                    continue;
+                }
                 let start = compiler.nodes.len();
                 let count = compiler.emit_call_args(args.into_vec())?;
                 let touched = compiler.nodes[start..].iter().any(|n| {
@@ -639,17 +651,20 @@ fn emit_safe_inner<'a>(
                     compiler.emit_ins(Instruction::PopCache);
                     popped = true;
                 }
-                let var = super::procs::call_var(
-                    match (receiver_ty, access) {
-                        (Some(t), PropertyAccessKind::Colon) => {
-                            Some(super::procs::colon_proc_type(t, &ident).unwrap_or(t))
-                        }
-                        _ => receiver_ty,
-                    },
-                    &ident,
-                );
+                let var = callee_var(compiler, receiver_ty, access, &ident);
                 compiler.emit_ins(Instruction::Call(builder.get_leaf(var), count));
                 kind = EvalKind::Stack;
+            }
+            Follow::Call(access, ident, args) => {
+                (ty, after) = super::procs::call_result(compiler, receiver_ty, access, &ident);
+                kind = commit_field_buffer(compiler, kind, &mut field_buffer)?;
+                kind = emit_after(
+                    compiler,
+                    vec![Follow::Call(access, ident, args)],
+                    kind,
+                    receiver_ty,
+                    before,
+                )?;
             }
             other => {
                 kind = commit_field_buffer(compiler, kind, &mut field_buffer)?;

@@ -2239,6 +2239,76 @@ fn a_declaration_that_colon_lookup_finds_instead_recompiles_its_users() {
 }
 
 #[test]
+fn a_proc_declaration_that_colon_lookup_finds_instead_recompiles_its_callers() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let code = format!(
+        "/datum/a/proc/make()\n\tset name = \"a make\"\n\n\
+         /proc/colon(x)\n\treturn x:make()\n\n\
+         /proc/safe(x)\n\treturn x?:make()\n\n\
+         /proc/indexed(list/items)\n\treturn items[1].make()\n\n\
+         /proc/uncompiled_colon(x)\n{uncompiled}\treturn x:make()\n\n\
+         /proc/typed(datum/a/x)\n\treturn x:make()\n\n"
+    );
+    let (without, with) = (
+        "/datum/b\n",
+        "/datum/b/proc/make()\n\tset name = \"b make\"\n",
+    );
+    for (name, before, after, call) in [
+        (
+            "colon-proc-added",
+            without,
+            with,
+            "dynamic_proc(\"b make\")",
+        ),
+        (
+            "colon-proc-removed",
+            with,
+            without,
+            "dynamic_proc(\"a make\")",
+        ),
+        (
+            "colon-proc-type-removed",
+            with,
+            "",
+            "dynamic_proc(\"a make\")",
+        ),
+    ] {
+        let changes = types_changes(name, &code, before, after);
+        let refused: Vec<&str> = changes.refused.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            refused,
+            ["/uncompiled_colon"],
+            "{name}: {:?}",
+            changes.refused
+        );
+        assert!(
+            changes.refused[0].why.starts_with(
+                "calls a proc via `x:name()` that another type now declares, so it must be recompiled"
+            ),
+            "{name}: {}",
+            changes.refused[0]
+        );
+        let mut reloads: Vec<&str> = changes
+            .plan
+            .reloads
+            .iter()
+            .map(|r| r.proc.path.as_str())
+            .collect();
+        reloads.sort();
+        assert_eq!(
+            reloads,
+            ["/colon", "/indexed", "/safe"],
+            "{name}: {:?}",
+            changes.plan
+        );
+        for reload in &changes.plan.reloads {
+            let code = dmasm_bytecode::format(&reload.nodes);
+            assert!(code.contains(call), "{name}: {}: {code}", reload.proc.path);
+        }
+    }
+}
+
+#[test]
 fn a_declaration_that_colon_lookup_finds_after_a_call_recompiles_its_users() {
     let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
     let code = format!(
@@ -2318,6 +2388,14 @@ fn a_declaration_that_colon_lookup_finds_after_a_bare_call_recompiles_initialize
             "{name}"
         );
         assert_eq!(global_init_reads(&changes), [limit, limit], "{name}");
+        assert_eq!(init_types(&changes), ["/datum/holder"], "{name}");
+        let init = changes.plan.init_procs[0].code.as_ref().unwrap();
+        assert_eq!(global_reads(&init.nodes), [limit], "{name}");
+        assert_eq!(sorted_reloads(&changes), ["/mob/choose"], "{name}");
+        let InList::New(list) = &changes.plan.reloads[0].params[0].in_list else {
+            panic!("{}: {:?}", name, changes.plan.reloads[0].params[0].in_list);
+        };
+        assert_eq!(global_reads(&list.nodes), [limit], "{name}");
     }
 }
 
@@ -2331,7 +2409,10 @@ fn a_changed_return_type_recompiles_the_callers_that_read_through_it() {
          /proc/colon(datum/factory/factory)\n\treturn factory.make():LIMIT\n\n\
          /proc/uncompiled_dot(datum/factory/factory, x)\n{uncompiled}\treturn factory.make().LIMIT\n\n\
          /proc/uncompiled_colon(datum/factory/factory, x)\n{uncompiled}\treturn factory.make():LIMIT\n\n\
-         /proc/limits()\n\tvar/static/list/limits = list(gmake().LIMIT + 1)\n\treturn limits\n\n"
+         /proc/limits()\n\tvar/static/list/limits = list(gmake().LIMIT + 1)\n\treturn limits\n\n\
+         /datum/thing/proc/gmake()\n\treturn new /datum/b\n\n\
+         /datum/thing/proc/global_call()\n\treturn ::gmake().LIMIT\n\n\
+         /datum/thing/proc/uncompiled_global(x)\n{uncompiled}\treturn ::gmake().LIMIT\n\n"
     );
     let untyped = "/datum/factory/proc/make()\n\treturn new /datum/a\n\n/proc/gmake()\n\treturn new /datum/a\n";
     let typed = untyped.replace("make()\n", "make() as /datum/a\n");
@@ -2350,20 +2431,26 @@ fn a_changed_return_type_recompiles_the_callers_that_read_through_it() {
         ),
     ] {
         let changes = types_changes(name, &code, before, after);
-        let refused: Vec<String> = changes
+        let mut refused: Vec<String> = changes
             .refused
             .iter()
             .map(|r| format!("{}: {}", r.path, r.why))
             .collect();
-        assert_eq!(refused.len(), 1, "{name}: {refused:?}");
-        assert!(
-            refused[0].starts_with(
-                "/uncompiled_dot: reads a var through a proc that is declared to return another type now, so it must be compiled again"
-            ),
-            "{}: {:?}",
-            name,
-            refused
-        );
+        refused.sort();
+        assert_eq!(refused.len(), 2, "{name}: {refused:?}");
+        for (refusal, path) in refused
+            .iter()
+            .zip(["/datum/thing/uncompiled_global", "/uncompiled_dot"])
+        {
+            assert!(
+                refusal.starts_with(&format!(
+                    "{path}: reads a variable through a proc whose declared return type changed, so it must be recompiled"
+                )),
+                "{}: {:?}",
+                name,
+                refused
+            );
+        }
         let mut reloads: Vec<&str> = changes
             .plan
             .reloads
@@ -2371,13 +2458,132 @@ fn a_changed_return_type_recompiles_the_callers_that_read_through_it() {
             .map(|r| r.proc.path.as_str())
             .collect();
         reloads.sort();
-        assert_eq!(reloads, ["/bare", "/dot"], "{name}: {:?}", changes.plan);
+        assert_eq!(
+            reloads,
+            ["/bare", "/datum/thing/global_call", "/dot"],
+            "{name}: {:?}",
+            changes.plan
+        );
         assert_eq!(
             global_init_sets(&changes),
             ["/proc/limits#0:limits @29"],
             "{name}"
         );
         assert_eq!(global_init_reads(&changes), [limit], "{name}");
+    }
+}
+
+#[test]
+fn a_changed_implicit_type_refuses_the_callers_dmasm_cant_compile() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let code = format!(
+        "/datum/child\n\n/datum/child/special\n\n\
+         /datum/holder\n\tvar/datum/child/child\n\n\
+         /datum/other\n\tvar/datum/child/special/child\n\n\
+         /proc/compiled()\n\tmake()?.child = new\n\n\
+         /proc/uncompiled_new(x)\n{uncompiled}\tmake()?.child = new\n\n\
+         /proc/uncompiled_or(x)\n{uncompiled}\tmake()?.child ||= new\n\n\
+         /proc/uncompiled_astype(x)\n{uncompiled}\treturn astype(make().child)\n\n\
+         /proc/uncompiled_istype(x)\n{uncompiled}\treturn istype(make().child)\n\n\
+         /proc/uncompiled_value(x)\n{uncompiled}\tmake()?.child = x\n\n"
+    );
+    let before = "/proc/make() as /datum/holder\n\treturn new /datum/holder\n";
+    let after = before.replace("as /datum/holder", "as /datum/other");
+    for (name, before, after) in [
+        ("implicit-type-changed", before, after.as_str()),
+        ("implicit-type-changed-back", after.as_str(), before),
+    ] {
+        let changes = types_changes(name, &code, before, after);
+        let mut refused: Vec<&str> = changes.refused.iter().map(|r| r.path.as_str()).collect();
+        refused.sort();
+        assert_eq!(
+            refused,
+            [
+                "/uncompiled_astype",
+                "/uncompiled_istype",
+                "/uncompiled_new",
+                "/uncompiled_or"
+            ],
+            "{name}: {:?}",
+            changes.refused
+        );
+        for refusal in &changes.refused {
+            assert!(
+                refusal.why.starts_with(
+                    "infers the type of `new`, `locate()`, `astype()`, or `istype()` from a variable whose type changed, so it must be recompiled"
+                ),
+                "{}: {}",
+                name,
+                refusal
+            );
+        }
+        let reloads: Vec<&str> = changes
+            .plan
+            .reloads
+            .iter()
+            .map(|r| r.proc.path.as_str())
+            .collect();
+        assert_eq!(reloads, ["/compiled"], "{name}: {:?}", changes.plan);
+    }
+    let code = format!(
+        "/datum/child\n\n/datum/child/special\n\n\
+         /proc/compiled(datum/holder/holder)\n\tholder.child = new\n\n\
+         /proc/uncompiled_new(datum/holder/holder, x)\n{uncompiled}\tholder.child = new\n\n\
+         /proc/uncompiled_value(datum/holder/holder, x)\n{uncompiled}\tholder.child = x\n\n"
+    );
+    let before = "/datum/holder\n\tvar/datum/child/child\n";
+    let after = before.replace("child/child", "child/special/child");
+    let changes = types_changes("implicit-var-type-changed", &code, before, &after);
+    let refused: Vec<String> = changes
+        .refused
+        .iter()
+        .map(|r| format!("{}: {}", r.path, r.why))
+        .collect();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0].starts_with("/uncompiled_new: infers the type of `new`"),
+        "{:?}",
+        refused
+    );
+}
+
+#[test]
+fn a_retyped_global_refuses_the_callers_dmasm_cant_compile_that_make_it_by_global_name() {
+    let uncompiled = "\tswitch(x)\n\t\tif(x)\n\t\t\treturn 0\n";
+    let code = format!(
+        "/datum/child\n\n/datum/child/special\n\n/datum/child/other\n\n\
+         /datum/thing/proc/compiled()\n\t::current = new\n\n\
+         /datum/thing/proc/uncompiled_global(x)\n{uncompiled}\t::current = new\n\n\
+         /datum/thing/proc/uncompiled_member(x)\n{uncompiled}\tcurrent = new\n\n"
+    );
+    let declared = "var/datum/child/current\n\n/datum/thing\n\tvar/datum/child/other/current\n";
+    for (name, after, refused_path) in [
+        (
+            "global-retyped",
+            declared.replace("var/datum/child/current", "var/datum/child/special/current"),
+            "/datum/thing/uncompiled_global",
+        ),
+        (
+            "member-retyped",
+            declared.replace("child/other/current", "child/special/current"),
+            "/datum/thing/uncompiled_member",
+        ),
+    ] {
+        let changes = types_changes(name, &code, declared, &after);
+        let refused: Vec<String> = changes
+            .refused
+            .iter()
+            .map(|r| format!("{}: {}", r.path, r.why))
+            .collect();
+        assert_eq!(refused.len(), 1, "{}: {:?}", name, refused);
+        assert!(
+            refused[0].starts_with(&format!(
+                "{refused_path}: infers the type of `new`, `locate()`, `astype()`, or `istype()` from a variable whose type changed"
+            )),
+            "{}: {:?}",
+            name,
+            refused
+        );
     }
 }
 
@@ -3611,8 +3817,11 @@ fn global_init_sets(changes: &Changes) -> Vec<String> {
 
 fn global_init_reads(changes: &Changes) -> Vec<String> {
     let init = changes.global_init.as_ref().expect("no global init proc");
-    init.code
-        .nodes
+    global_reads(&init.code.nodes)
+}
+
+fn global_reads(nodes: &[Node]) -> Vec<String> {
+    nodes
         .iter()
         .filter_map(|node| match node {
             Node::Instruction(Instruction::GetVar(dmasm_bytecode::Variable::Global(var)), ()) => {

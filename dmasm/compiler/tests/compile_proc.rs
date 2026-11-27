@@ -256,23 +256,23 @@ fn a_var_after_a_call_is_found_by_the_procs_return_type() {
 }
 
 fn global_scopes(src: &str) -> Vec<String> {
+    global_scopes_in(src, "")
+}
+
+fn global_scopes_in(src: &str, ty: &str) -> Vec<String> {
     let ctx = dreammaker::Context::default();
     let pp = dreammaker::Preprocessor::from_buffer(&ctx, "test.dm".into(), src.to_owned());
     let mut parser = dreammaker::Parser::new(&ctx, pp);
     parser.enable_procs();
     let tree = parser.parse_object_tree();
-    let value = tree
-        .root()
-        .get()
-        .procs
-        .get("f")
-        .unwrap()
-        .value
-        .last()
-        .unwrap();
+    let ty = match ty {
+        "" => tree.root(),
+        path => tree.find(path).expect("type"),
+    };
+    let value = ty.get().procs.get("f").unwrap().value.last().unwrap();
     let source = ProcSource {
         tree: &tree,
-        ty: tree.root(),
+        ty,
         name: "f",
         value,
         file: "test.dm",
@@ -287,12 +287,17 @@ fn global_scopes(src: &str) -> Vec<String> {
         let Node::Instruction(ins, _) = node else {
             continue;
         };
-        for var in ins.variables() {
-            if let Variable::Global(g) = var {
-                let scope = format!("{:?}", g.scope);
-                if !scopes.contains(&scope) {
-                    scopes.push(scope);
+        let mut vars = ins.variables();
+        while let Some(var) = vars.pop() {
+            match var {
+                Variable::Global(g) => {
+                    let scope = format!("{:?}", g.scope);
+                    if !scopes.contains(&scope) {
+                        scopes.push(scope);
+                    }
                 }
+                Variable::SetCache(holder, field) => vars.extend([&**field, &**holder]),
+                _ => {}
             }
         }
     }
@@ -327,6 +332,142 @@ fn a_safe_write_after_a_call_finds_its_static_as_a_read_does() {
             "{}",
             body
         );
+    }
+}
+
+#[test]
+fn a_global_call_calls_the_global_proc_and_reads_by_its_return_type() {
+    let types = "/datum/a\n\tvar/const/LIMIT = 5\n\tvar/static/S = 1\n\
+                 /datum/b\n\tvar/const/LIMIT = 9\n\tvar/static/S = 2\n\
+                 /proc/make() as /datum/a\n\treturn new /datum/a\n\
+                 /datum/thing/proc/make() as /datum/b\n\treturn new /datum/b\n";
+    for (body, call) in [
+        ("return ::make()", "CallGlob 0 /proc/make"),
+        ("return ::make(1, 2)", "CallGlob 2 /proc/make"),
+        (
+            "return ::make(arglist(list(1)))",
+            "CallGlobalArgList /proc/make",
+        ),
+        ("return ::make(a = 1)", "CallGlobalArgList /proc/make"),
+        ("return ::make().LIMIT", "CallGlob 0 /proc/make"),
+    ] {
+        let code = compile(
+            &format!("{types}/datum/thing/proc/f()\n\t{body}\n"),
+            "/datum/thing",
+            "f",
+        );
+        assert_has(&code, &[call]);
+        assert!(!code.contains("dynamic_proc"), "{}: {}", body, code);
+    }
+    for (ty, body) in [
+        ("/datum/thing", "return ::make().LIMIT"),
+        ("/datum/thing", "return ::make().S"),
+        ("/datum/thing", "return ::make()?.LIMIT"),
+        ("/datum/thing", "::make()?.S = 3"),
+        ("", "return ::make().LIMIT"),
+    ] {
+        let src = match ty {
+            "" => format!("{types}/proc/f()\n\t{body}\n"),
+            ty => format!("{types}{ty}/proc/f()\n\t{body}\n"),
+        };
+        assert_eq!(
+            global_scopes_in(&src, ty),
+            ["Some(Type(\"/datum/a\"))"],
+            "{}",
+            body
+        );
+    }
+}
+
+#[test]
+fn a_safe_chain_finds_each_calls_proc_and_value_by_the_type_before_it() {
+    let types = "/datum/a\n\tvar/const/LIMIT = 5\n\tvar/static/S = 1\n\
+                 /datum/b\n\tvar/const/LIMIT = 9\n\tvar/static/S = 2\n\
+                 /datum/decoy/proc/make() as /datum/b\n\treturn new /datum/b\n\
+                 /datum/decoy/proc/named()\n\treturn new /datum/b\n\
+                 /datum/decoy/verb/shown()\n\treturn new /datum/b\n\
+                 /datum/builder/proc/make() as /datum/a\n\treturn new /datum/b\n\
+                 /datum/builder/proc/named()\n\tset name = \"build it\"\n\treturn new /datum/b\n\
+                 /datum/builder/proc/me() as /datum/builder\n\treturn src\n\
+                 /datum/builder/proc/shown()\n\treturn new /datum/b\n\
+                 /datum/factory/proc/builder() as /datum/builder\n\treturn new /datum/builder\n";
+    for body in [
+        "return factory?.builder().make().LIMIT",
+        "return factory?.builder().make().S",
+        "return factory?.builder().make()?.LIMIT",
+        "return factory?.builder().me().make().LIMIT",
+        "return factory?.builder():make().LIMIT",
+        "return factory?.builder().make().LIMIT + 1",
+    ] {
+        let src = format!("{types}/proc/f(datum/factory/factory)\n\t{body}\n");
+        assert_eq!(
+            global_scopes(&src),
+            ["Some(Type(\"/datum/a\"))"],
+            "{}",
+            body
+        );
+    }
+    for (body, call) in [
+        (
+            "return factory?.builder().named()",
+            "Call dynamic_proc(\"build it\") 0",
+        ),
+        (
+            "return factory?.builder().me().named()",
+            "Call dynamic_proc(\"build it\") 0",
+        ),
+        (
+            "return factory?.builder().shown()",
+            "Call dynamic_proc(\"shown\") 0",
+        ),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(datum/factory/factory)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert_has(&code, &[call]);
+    }
+}
+
+#[test]
+fn a_safe_write_finds_the_statics_it_goes_through_as_a_read_does() {
+    let types = "/datum/counter\n\tvar/count = 0\n\tvar/datum/counter/next\n\
+                 \tvar/static/datum/counter/INNER\n\
+                 /datum/a\n\tvar/static/datum/counter/SHARED = new\n\
+                 \tvar/datum/counter/plain\n\tvar/static/S = 1\n\
+                 /datum/b\n\tvar/static/datum/counter/SHARED = new\n\
+                 \tvar/datum/counter/plain\n\tvar/static/S = 2\n\
+                 /datum/holder\n\tvar/datum/a/a\n\
+                 /proc/make()\n\treturn new /datum/a\n\
+                 /proc/typed() as /datum/a\n\treturn new /datum/b\n";
+    for (body, scopes) in [
+        ("make()?.SHARED.count += 1", &["/datum/b"][..]),
+        ("typed()?.SHARED.count += 1", &["/datum/a"]),
+        ("make()?.SHARED.count = 1", &["/datum/b"]),
+        ("make()?.SHARED?.count = 1", &["/datum/b"]),
+        ("make()?.SHARED?.count += 1", &["/datum/b"]),
+        ("make()?.SHARED.next.count++", &["/datum/b"]),
+        ("make()?.SHARED.count ||= 2", &["/datum/b"]),
+        ("return (make()?.SHARED.count ||= 2)", &["/datum/b"]),
+        ("return (typed()?.S ||= 2)", &["/datum/a"]),
+        ("x?.SHARED.count += 1", &["/datum/a"]),
+        ("x?.SHARED.count++", &["/datum/a"]),
+        ("return x?.SHARED.count++", &["/datum/a"]),
+        ("return (x?.SHARED.count += 1)", &["/datum/a"]),
+        ("x?.SHARED.next?.count = 3", &["/datum/a"]),
+        ("h?.a.SHARED.count += 1", &["/datum/a"]),
+        ("h?.a?.SHARED.count = 1", &["/datum/a"]),
+        ("x?.plain.INNER.count = 3", &["/datum/counter"]),
+        ("x?.SHARED.INNER.count = 3", &["/datum/a", "/datum/counter"]),
+        ("y?:SHARED.count = 3", &["/datum/b"]),
+    ] {
+        let src = format!("{types}/proc/f(datum/a/x, datum/holder/h, y)\n\t{body}\n");
+        let want: Vec<String> = scopes
+            .iter()
+            .map(|s| format!("Some(Type(\"{s}\"))"))
+            .collect();
+        assert_eq!(global_scopes(&src), want, "{}", body);
     }
 }
 
@@ -368,6 +509,176 @@ fn a_safe_colon_call_finds_its_proc_and_value_as_a_colon_call_does() {
         );
         assert_has(&code, &[call]);
     }
+}
+
+#[test]
+fn a_safe_colon_call_on_an_untyped_value_finds_its_proc_as_a_colon_call_does() {
+    let types = "/mob/verb/show()\n\tset name = \"Display\"\n\
+                 /datum/thing/proc/show_proc()\n\tset name = \"Show It\"\n\
+                 /mob/verb/plain_verb()\n";
+    for (body, call) in [
+        ("target?:show()", "Call dynamic_verb(\"Display\") 0"),
+        (
+            "target:show()",
+            "CallStatement cache = arg(0); dynamic_verb(\"Display\") 0",
+        ),
+        ("target?:show_proc()", "Call dynamic_proc(\"Show It\") 0"),
+        (
+            "return target?:show_proc()",
+            "Call dynamic_proc(\"Show It\") 0",
+        ),
+        (
+            "target?:plain_verb()",
+            "Call dynamic_verb(\"plain verb\") 0",
+        ),
+        ("target?:show().x = 1", "Call dynamic_verb(\"Display\") 0"),
+    ] {
+        let code = compile(&format!("{types}/proc/f(target)\n\t{body}\n"), "", "f");
+        assert_has(&code, &[call]);
+    }
+}
+
+#[test]
+fn a_colon_call_finds_its_proc_as_the_last_type_made_declares_it() {
+    let types = "/datum/t1\n\tvar/const/LIMIT = 1\n\tvar/x\n\
+                 /datum/t2\n\tvar/LIMIT = 2\n\tvar/x\n\
+                 /datum/zz\n/datum/aa\n\
+                 /datum/zz/proc/make() as /datum/t1\n\tset name = \"zz\"\n\
+                 /datum/aa/proc/make() as /datum/t2\n\tset name = \"aa\"\n\
+                 /datum/holder/proc/act()\n\tset name = \"holder act\"\n\
+                 /mob/verb/act()\n\tset name = \"mob act\"\n\
+                 /datum/base\n/datum/base/s2\n/datum/base/s1\n\
+                 /datum/base/s1/proc/build()\n\tset name = \"s1\"\n\
+                 /datum/base/s2/proc/build()\n\tset name = \"s2\"\n\
+                 /datum/other/proc/build()\n\tset name = \"other\"\n\
+                 /datum/base/proc/own()\n\tset name = \"base own\"\n\
+                 /datum/other/proc/own()\n\tset name = \"other own\"\n";
+    for (body, call) in [
+        ("return x:make()", "dynamic_proc(\"aa\") 0"),
+        ("return x?:make()", "dynamic_proc(\"aa\") 0"),
+        ("return items[1].make()", "dynamic_proc(\"aa\") 0"),
+        ("return x:act()", "dynamic_verb(\"mob act\") 0"),
+        ("return base:build()", "dynamic_proc(\"s1\") 0"),
+        ("return base?:build()", "dynamic_proc(\"other\") 0"),
+        ("return base:own()", "dynamic_proc(\"base own\") 0"),
+        ("return base?:own()", "dynamic_proc(\"other own\") 0"),
+        ("return items:make()", "dynamic_proc(\"aa\") 0"),
+        ("base?:own().x = 1", "dynamic_proc(\"other own\") 0"),
+        ("x:make()?:own().x = 1", "dynamic_proc(\"other own\") 0"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(x, datum/base/base, list/items)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert!(
+            code.contains(call),
+            "{}: expected {} in\n{}",
+            body,
+            call,
+            code
+        );
+    }
+    for body in ["return x:make().LIMIT", "return x?:make()?.LIMIT"] {
+        let code = compile(&format!("{types}/proc/f(x)\n\t{body}\n"), "", "f");
+        assert!(
+            code.contains("cache[\"LIMIT\"]"),
+            "{}: expected /datum/t2's LIMIT, a field, in\n{}",
+            body,
+            code
+        );
+    }
+}
+
+#[test]
+fn a_safe_colon_field_finds_its_var_as_on_an_untyped_value() {
+    let types = "/datum/base\n\tvar/LIMIT = 1\n\
+                 /datum/later\n\tvar/static/LIMIT = 2\n\
+                 /datum/base/sub\n";
+    for (body, var) in [
+        ("return base?:LIMIT", "GetVar global(\"LIMIT\""),
+        ("base?:LIMIT = 5", "SetVar global(\"LIMIT\""),
+        ("base?:LIMIT += 1", "global(\"LIMIT\""),
+        ("return base:LIMIT", "cache[\"LIMIT\"]"),
+        ("return base?.LIMIT", "GetVar cache[\"LIMIT\"]"),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(datum/base/sub/base)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert!(
+            code.contains(var),
+            "{}: expected {} in\n{}",
+            body,
+            var,
+            code
+        );
+    }
+}
+
+#[test]
+fn a_call_after_a_safe_index_keeps_the_indexed_item_as_its_receiver() {
+    let types = "/datum/item/proc/refresh(a)\n\treturn a\n";
+    for (body, call) in [
+        (
+            "return items?[1]:refresh()",
+            "Call dynamic_proc(\"refresh\") 0",
+        ),
+        (
+            "items?[1]:refresh(x)",
+            "GetVar arg(1)\nPopCache\nCall dynamic_proc(\"refresh\") 1",
+        ),
+        (
+            "return items?[1].refresh(items.len)",
+            "PopCache\nCall dynamic_proc(\"refresh\") 1",
+        ),
+    ] {
+        let code = compile(
+            &format!("{types}/proc/f(list/items, x)\n\t{body}\n"),
+            "",
+            "f",
+        );
+        assert_has(&code, &["ListGet", "SetVar cache", "PushCache"]);
+        assert_has(&code, &[call, "PopCache"]);
+    }
+}
+
+#[test]
+fn new_of_a_field_chain_reads_it_by_the_declared_type() {
+    let types = "/datum/item\n/datum/item/special\n\
+                 /datum/config\n\tvar/static/item_type = /datum/item/special\n\
+                 \tvar/const/CONST_TYPE = /datum/item/special\n\
+                 \tvar/plain_type = /datum/item\n\tvar/datum/config/inner\n";
+    for body in [
+        "return new config.item_type()",
+        "return new config.item_type(1)",
+        "return new config.inner.item_type()",
+        "return new config.CONST_TYPE()",
+    ] {
+        let src = format!("{types}/proc/f(datum/config/config)\n\t{body}\n");
+        assert_eq!(
+            global_scopes(&src),
+            ["Some(Type(\"/datum/config\"))"],
+            "{}",
+            body
+        );
+    }
+    let code = compile(
+        &format!("{types}/datum/config/proc/f()\n\treturn new src.item_type()\n"),
+        "/datum/config",
+        "f",
+    );
+    assert_has(&code, &["GetVar global(\"item_type\")", "New 0"]);
+    let code = compile(
+        &format!("{types}/proc/f(datum/config/config)\n\treturn new config.plain_type()\n"),
+        "",
+        "f",
+    );
+    assert_has(
+        &code,
+        &["GetVar cache = arg(0); cache[\"plain_type\"]", "New 0"],
+    );
 }
 
 #[test]

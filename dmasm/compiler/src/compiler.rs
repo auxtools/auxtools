@@ -1608,7 +1608,7 @@ pub fn fold_in_scope(
     })
 }
 
-pub fn field_globals_in_proc(
+pub fn chain_targets_in_proc(
     tree: &dreammaker::objtree::ObjectTree,
     ty: dreammaker::objtree::TypeRef,
     expr: &Expression,
@@ -1620,7 +1620,39 @@ pub fn field_globals_in_proc(
         .map(|(name, path)| InScope::Local(name, path))
         .collect();
     in_scope(tree, ty, &scope, byond, |compiler| {
-        procs::field_globals(compiler, expr)
+        procs::chain_targets(compiler, expr)
+    })
+}
+
+pub fn place_type_in_proc(
+    tree: &dreammaker::objtree::ObjectTree,
+    ty: dreammaker::objtree::TypeRef,
+    place: &Expression,
+    locals: &[(&str, &str)],
+    byond: ByondVersion,
+) -> Option<String> {
+    let scope: Vec<InScope> = locals
+        .iter()
+        .map(|(name, path)| InScope::Local(name, path))
+        .collect();
+    in_scope(tree, ty, &scope, byond, |compiler| {
+        compiler.place_type_name(place)
+    })
+}
+
+pub fn value_type_in_proc(
+    tree: &dreammaker::objtree::ObjectTree,
+    ty: dreammaker::objtree::TypeRef,
+    expr: &Expression,
+    locals: &[(&str, &str)],
+    byond: ByondVersion,
+) -> Option<String> {
+    let scope: Vec<InScope> = locals
+        .iter()
+        .map(|(name, path)| InScope::Local(name, path))
+        .collect();
+    in_scope(tree, ty, &scope, byond, |compiler| {
+        compiler.static_type_name(expr)
     })
 }
 
