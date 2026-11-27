@@ -299,7 +299,11 @@ fn start() {
 		}
 	};
 	if std::env::var(DEBUG_VAR).is_ok_and(|value| value == "wait") {
+		let ends = crate::WORLD_ENDS.load(Ordering::Relaxed);
 		let _ = crate::guard_server(&mut server, Server::process_until_configured);
+		if crate::WORLD_ENDS.load(Ordering::Relaxed) != ends {
+			return;
+		}
 	}
 	crate::install_server(server);
 

@@ -16,7 +16,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct World {
 	game: Game,
-	output: Arc<Mutex<String>>
+	output: Arc<Mutex<String>>,
+	exited: mpsc::Receiver<Option<i32>>
 }
 
 impl World {
@@ -25,6 +26,7 @@ impl World {
 		let args = ["-trusted".to_owned(), "-close".to_owned()];
 		let output = Arc::new(Mutex::new(String::new()));
 		let printed = output.clone();
+		let (exit, exited) = mpsc::channel();
 		let game = Game::start(
 			Launch {
 				program: crate::paths::find_dreamdaemon(),
@@ -37,11 +39,18 @@ impl World {
 				print!("  | {}", line);
 				printed.lock().unwrap().push_str(&line);
 			},
-			|code| println!("  | the world exited ({:?})", code)
+			move |code| {
+				println!("  | the world exited ({:?})", code);
+				let _ = exit.send(code);
+			}
 		)
 		.unwrap();
 
-		Self { game, output }
+		Self { game, output, exited }
+	}
+
+	pub fn exit_code(&self) -> Option<i32> {
+		self.exited.recv_timeout(TIMEOUT).expect("the world is still running")
 	}
 
 	pub fn output(&self) -> String {
