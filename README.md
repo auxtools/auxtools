@@ -88,6 +88,13 @@ can produce text, JSON, or a standalone interactive HTML report. See
 or [Instruction profiling](editors/vscode/README.md#instruction-profiling) in the VS Code extension
 README.
 
+## Line coverage
+
+`auxtools launch --lcov` and `--cobertura` record source line hit counts across a world run for
+worlds compiled with `#define DEBUG`, printing a terminal summary and writing LCOV tracefiles or
+Cobertura XML reports with no changes to DM source. See [Line coverage](docs/coverage.md) for usage,
+report formats, and overhead.
+
 ## Hot reload (experimental)
 
 Hot reload is enabled by default for launched worlds and applies supported changes to procs, types,
@@ -124,6 +131,8 @@ check a new BYOND build with `check_recipes`.
   exit codes
 - [Instruction profiling](docs/profiling.md): Profiling with `auxtools profile`, timing measurement,
   and overhead limits
+- [Line coverage](docs/coverage.md): Recording line coverage with `auxtools launch`, LCOV and
+  Cobertura XML reports, and overhead
 - [Hot reload (experimental)](docs/hot-reload.md): Supported live edits, reboot and rebuild rules,
   skins and client scripts, and runtime behavior
 - [Checking for known BYOND bugs](docs/bug-checker.md): Static checking with `auxtools check`,

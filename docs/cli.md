@@ -67,7 +67,7 @@ within that window.
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Success (for `trace` and `profile`, duration or hit limit reached or interrupted with `Ctrl+C`; for `log --follow`, the world exited) |
-| `1` | Command failed (for `wait reload`, the reload was rejected or partially applied) |
+| `1` | Command failed (for `wait reload`, the reload was rejected or partially applied; for `launch` with `--lcov` or `--cobertura`, the world exited with code `0` without reporting coverage) |
 | `2` | Operation timed out (request response, wait/step/stop/reboot timeout, or detached `launch` 120-second startup limit) |
 | `3` | World exited or rebooted before the command finished |
 | `4` | Foreground `launch`: the world exited with a nonzero code or was terminated |
