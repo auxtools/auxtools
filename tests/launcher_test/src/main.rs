@@ -273,6 +273,15 @@ fn command_line(pid: u64, code: &Path) {
 	);
 	cli.run(&["continue"], 0);
 
+	let absolute = format!("{}:{}", host_file("attach_host.dm").display(), line);
+	let printed = cli.run(&["wait", "pause", "--break", &absolute, "--timeout", "15"], 0);
+	assert!(
+		printed.starts_with(&format!("pid {}: paused at a breakpoint\n#0 /value  attach_host.dm:", pid)),
+		"unexpected wait output for an absolute file path: {}",
+		printed
+	);
+	cli.run(&["continue"], 0);
+
 	let declared = line_of(code, "/proc/value()");
 	let printed = cli.run(
 		&["wait", "pause", "--break", &format!("attach_host.dm:{}", declared), "--timeout", "15"],

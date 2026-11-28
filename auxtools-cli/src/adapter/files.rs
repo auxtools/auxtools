@@ -1,6 +1,6 @@
 use std::{
 	collections::HashMap,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf},
 	time::{Duration, Instant}
 };
 
@@ -34,8 +34,8 @@ impl WorldFiles {
 		for (name, path) in debug_files::names(dme, &|_| true) {
 			if Path::new(&name) != path {
 				by_name.entry(name.clone()).or_insert_with(|| path.clone());
-				by_path.entry(path).or_insert(name);
 			}
+			by_path.entry(path).or_insert(name);
 		}
 		self.names = Some((by_name, by_path, Instant::now()));
 	}
@@ -56,34 +56,50 @@ impl WorldFiles {
 			self.read();
 		}
 		if let Some(path) = self.names.as_ref().and_then(|(by_name, ..)| by_name.get(&name)) {
-			return root.join(path);
+			return debug_files::normalize(&root.join(path));
 		}
-		let path = root.join(debug_files::normalize(Path::new(&name)));
+		let path = debug_files::normalize(&root.join(&name));
 		if !path.is_file() && self.names.as_ref().is_some_and(|(.., read)| read.elapsed() >= STALE) {
 			self.read();
 			if let Some(found) = self.names.as_ref().and_then(|(by_name, ..)| by_name.get(&name)) {
-				return root.join(found);
+				return debug_files::normalize(&root.join(found));
 			}
 		}
 		path
 	}
 
 	pub fn name(&mut self, path: &str) -> String {
-		let Some(relative) = self.root().and_then(|root| Path::new(path).strip_prefix(root).ok()).map(Path::to_owned) else {
+		let Some(root) = self.root().map(Path::to_owned) else {
 			return path.to_owned();
 		};
 		if self.names.is_none() {
 			self.read();
 		}
-		match self
-			.names
-			.as_ref()
-			.and_then(|(_, by_path, _)| by_path.get(&debug_files::normalize(&relative)))
-		{
-			Some(name) => name.clone(),
-			None => relative.to_string_lossy().replace('\\', "/")
+		let included = |relative: &Path| self.names.as_ref().and_then(|(_, by_path, _)| by_path.get(relative)).cloned();
+		match Path::new(path).strip_prefix(&root) {
+			Ok(inside) => included(&debug_files::normalize(inside)).unwrap_or_else(|| inside.to_string_lossy().replace('\\', "/")),
+			Err(_) => relative_to(&root, Path::new(path))
+				.and_then(|outside| included(&outside))
+				.unwrap_or_else(|| path.to_owned())
 		}
 	}
+}
+
+pub fn relative_to(root: &Path, path: &Path) -> Option<PathBuf> {
+	let (root, path) = (debug_files::normalize(root), debug_files::normalize(path));
+	if !root.is_absolute() || !path.is_absolute() {
+		return None;
+	}
+	let shared = root.components().zip(path.components()).take_while(|(a, b)| a == b).count();
+	if !root.components().take(shared).any(|part| matches!(part, Component::RootDir)) {
+		return None;
+	}
+	let mut relative = PathBuf::new();
+	for _ in root.components().skip(shared) {
+		relative.push("..");
+	}
+	relative.extend(path.components().skip(shared));
+	Some(relative)
 }
 
 fn is_absolute(name: &str) -> bool {
@@ -128,9 +144,61 @@ mod tests {
 		assert_eq!(name(&mut files, "_std/__std.dme"), "_std/__std.dme");
 		assert_eq!(files.name("/elsewhere/code/map.dm"), "/elsewhere/code/map.dm");
 
+		assert_eq!(files.name(&dir.join("code/../code/map.dm").to_string_lossy()), "code/map.dm");
+
 		let mut none = WorldFiles::default();
 		assert_eq!(none.path("code\\map.dm"), Path::new("code/map.dm"));
 		assert_eq!(none.name("/elsewhere/code/map.dm"), "/elsewhere/code/map.dm");
 		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn files_included_from_outside_the_project() {
+		let dir = std::env::temp_dir().join(format!("auxtools-world-files-outside-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		let write = |path: &str, text: &str| {
+			let path = dir.join(path);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(path, text).unwrap();
+		};
+		write(
+			"game/world.dme",
+			"#include \"code\\map.dm\"\n#include \"..\\testing\\testing.dm\"\n#include \"sub\\sub.dme\"\n"
+		);
+		write("game/code/map.dm", "");
+		write("testing/testing.dm", "");
+		write("game/sub/sub.dme", "#include \"..\\..\\shared\\tools.dm\"\n");
+		write("shared/tools.dm", "");
+		write("shared/unlisted.dm", "");
+		let mut files = WorldFiles::new(Some(dir.join("game/world.dme")));
+		let at = |path: &str| dir.join(path).to_string_lossy().into_owned();
+
+		assert_eq!(files.name(&at("testing/testing.dm")), "../testing/testing.dm");
+		assert_eq!(files.name(&at("game/../testing/testing.dm")), "../testing/testing.dm");
+		assert_eq!(files.name(&at("shared/tools.dm")), "../../shared/tools.dm");
+		assert_eq!(files.name(&at("shared/unlisted.dm")), at("shared/unlisted.dm"));
+		assert_eq!(files.name(&at("game/code/map.dm")), "code/map.dm");
+
+		assert_eq!(files.path("../testing/testing.dm"), dir.join("testing/testing.dm"));
+		assert_eq!(files.path("..\\testing\\testing.dm"), dir.join("testing/testing.dm"));
+		assert_eq!(files.path("../../shared/tools.dm"), dir.join("shared/tools.dm"));
+		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn relative_paths_between_absolute_ones() {
+		let at = |path: &str| PathBuf::from(format!("{}{}", if cfg!(windows) { "C:\\" } else { "/" }, path));
+		let relative = |root: &Path, path: &Path| relative_to(root, path);
+		assert_eq!(relative(&at("a/game"), &at("a/testing/t.dm")), Some(PathBuf::from("../testing/t.dm")));
+		assert_eq!(
+			relative(&at("a/game"), &at("a/game/../testing/t.dm")),
+			Some(PathBuf::from("../testing/t.dm"))
+		);
+		assert_eq!(relative(&at("a/game"), &at("a/game/code/t.dm")), Some(PathBuf::from("code/t.dm")));
+		assert_eq!(relative(&at("a/b/game"), &at("c/t.dm")), Some(PathBuf::from("../../../c/t.dm")));
+		assert_eq!(relative(&at("a/game"), Path::new("testing/t.dm")), None);
+		assert_eq!(relative(Path::new("game"), &at("a/testing/t.dm")), None);
+		#[cfg(windows)]
+		assert_eq!(relative(Path::new("C:\\a\\game"), Path::new("D:\\a\\testing\\t.dm")), None);
 	}
 }

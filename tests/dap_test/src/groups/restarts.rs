@@ -44,6 +44,13 @@ pub fn run() {
 	let joined = world.request("auxtoolsJoin", json!({ "open": false }));
 	assert_eq!((&joined["address"], &joined["opened"]), (&json!(address), &json!(false)), "{}", joined);
 	ok("world join address");
+	let joined = world.request("auxtoolsJoin", json!({ "open": false, "ckey": "Ada Lovelace" }));
+	assert_eq!((&joined["address"], &joined["opened"]), (&json!(address), &json!(false)), "{}", joined);
+	assert_eq!(
+		world.refused("auxtoolsJoin", json!({ "open": false, "ckey": "a|b" })),
+		"invalid guest key 'a|b': a key cannot contain '|'"
+	);
+	ok("a join names the next guest's ckey");
 	world.break_on(&["leaf_1"]);
 
 	world.request("restart", json!({}));

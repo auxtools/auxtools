@@ -57,16 +57,18 @@ file after adding a note or changing an `## Applies to` list.
 - [Ordering stop events after resume responses](cli/0022-report-stops-after-the-response-that-resumed.md): `Input::Stopped` arm of the adapter loop
 - [DAP and VS Code display rules for frames, variables, and disassembly](cli/0023-dap-and-vs-code-display-rules.md): `stack_trace`, `variables`, `disassemble`
 - [Resolving breakpoint lines under hot reload](cli/0024-breakpoint-lines-under-hot-reload.md): `UnsavedArguments`, `unsaved_changed`, `set_breakpoints`, `code_changed`, and the `code::Event::Reload` arm of `code_event`
+- [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `Adapter::take_macros`
 - [Evaluation limits for hover, completion, and watch expressions](tests/0034-what-hover-completion-and-watches-evaluate.md): `hover_refuses`
 - [Deferring breakpoints sent on save until hot reload](tests/0051-breakpoints-sent-on-save-wait-for-the-reload.md): `sourceModified` handling
 
 ### `auxtools-cli/src/adapter/files.rs`
 
-- [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `WorldFiles`, `WorldFiles::path`, `WorldFiles::name`, `STALE`
+- [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `WorldFiles`, `WorldFiles::path`, `WorldFiles::name`, `relative_to`, `STALE`
 
 ### `auxtools-cli/src/adapter/join.rs`
 
 - [DreamSeeker clients on process exit and hosted-world reconnects](cli/0011-dreamseeker-cannot-follow-a-new-process.md): `Joined::world_ended`
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): `JoinArguments`, `Adapter::give_next_guest`, `Adapter::join`
 
 ### `auxtools-cli/src/adapter/lifecycle.rs`
 
@@ -89,6 +91,11 @@ file after adding a note or changing an `## Applies to` list.
 - [Pause lifetime with multiple clients, watchers, and holds](cli/0007-pauses-with-several-clients.md): `only_looks`, `watch_only`, runtime arm of the pause wait
 - [Keeping a numbered journal across world reboots](cli/0012-the-journal.md): `spawn`
 - [Exiting quietly when an output pipe closes](cli/0027-closed-output-pipes-end-the-cli-quietly.md): `say!`, `say_part!`, `say`, `run`
+- [Mapping DreamMaker debug file names to local paths](cli/0031-mapping-debug-file-names.md): `Place`, `World::name_in_world`
+
+### `auxtools-cli/src/cli/check.rs`
+
+- [Catching and reporting panics in `auxtools check`](cli/0034-catching-panics-in-auxtools-check.md): `catching_panics`, `Panicked`, `check`
 
 ### `auxtools-cli/src/cli/hold.rs`
 
@@ -129,7 +136,7 @@ file after adding a note or changing an `## Applies to` list.
 
 - [Restoring hot reloads, skins, and resources across a reboot](cli/0003-reloads-across-a-reboot.md): `catch_up`, `restore_resources`, `reload_resources`, and the wait for `Command::Reloaded` in `reload`
 - [Refused reloads, partial failures, and removed definitions](cli/0015-what-a-reload-refuses-and-leaves-behind.md): removed-variable filter in the reload path
-- [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `Code::run`, `MOST_ALONE`, `give_back_memory`
+- [Dedicated source worker thread for hot reload parsing](cli/0029-the-source-worker.md): `Code::run`, `MOST_ALONE`, `give_back_memory`, `Code::changed_macros`, `Code::give_macros`
 - [Detecting changed source files by modification time](cli/0030-detecting-changed-files.md): `STAMP_LAG`, `Watched`, `unless_saved_since`, `listed_times`, `listed`
 
 ### `auxtools-cli/src/coverage.rs`
@@ -213,6 +220,10 @@ file after adding a note or changing an `## Applies to` list.
 
 - [Length-prefixed protocol frames](cli/0004-length-prefixed-protocol-frames.md): `frame`, `write`, `read`, `MAX_MESSAGE_LEN`
 
+### `auxtools-protocol/src/guest.rs`
+
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): `LONGEST_KEY`, `Unusable`, `unusable`
+
 ### `auxtools-protocol/src/hello.rs`
 
 - [Protocol versioning and wire compatibility](cli/0005-protocol-compatibility.md): `Hello`, `world_socket_name`, `LAST_NAMED_PROTOCOL`, `old_socket_name`
@@ -241,6 +252,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Ordering stop events after resume responses](cli/0022-report-stops-after-the-response-that-resumed.md): `Response::StepEnded`
 - [Collecting and reporting line coverage](cli/0033-collecting-and-reporting-line-coverage.md): `Response::CoverageEnded`
 - [Recording line coverage](debug-server/0049-recording-line-coverage.md): `Request::Coverage`, `Response::Coverage`, `Coverage`, `CoveredFile`, `CoveredLine`
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): `Request::GuestKey`, `Response::GuestKey`
 
 ### `auxtools-protocol/src/plan_format.rs`
 
@@ -365,12 +377,14 @@ file after adding a note or changing an `## Applies to` list.
 - [Unlinking and reinserting changed appearances](auxtools/0018-a-changed-appearance-is-unlinked-by-byond-and-reinserted-by-auxtools.md): `APPEARANCE_RELEASE`, `APPEARANCE_RELEASE_EARLY`, `appearance_tree_unlink`, `appearance_tree_rebalance` recipes
 - [List checks call the function behind `islist()`](auxtools/0019-list-checks-call-the-function-behind-islist.md): `value_is_list` recipes
 - [Skin and script field offsets, and proc layout test baselines](auxtools/0025-skin-and-script-field-offsets-are-read-from-byonds-code.md): `SKIN`, `SKIN_EARLY`, `SCRIPT`, `SCRIPT_EARLY`, and the `world_skin`, `world_skin_data`, `world_skin_field`, `client_script_send`, `client_script_data`, and `client_script_count` recipes
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): the `guest_key_formatter_call` recipes
 
 ### `auxtools/src/registry/windows.rs`
 
 - [Unlinking and reinserting changed appearances](auxtools/0018-a-changed-appearance-is-unlinked-by-byond-and-reinserted-by-auxtools.md): `APPEARANCE_RELEASE`, `appearance_tree_unlink`, `appearance_tree_rebalance` recipes
 - [List checks call the function behind `islist()`](auxtools/0019-list-checks-call-the-function-behind-islist.md): `value_is_list` recipes
 - [Skin and script field offsets, and proc layout test baselines](auxtools/0025-skin-and-script-field-offsets-are-read-from-byonds-code.md): `SKIN`, `SCRIPT`, and the `world_skin`, `world_skin_data`, `world_skin_field`, `client_script_send`, `client_script_data`, and `client_script_count` recipes
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): the `guest_key_formatter_call` recipe
 
 ### `auxtools/src/runtime_tables.rs`
 
@@ -488,6 +502,10 @@ file after adding a note or changing an `## Applies to` list.
 
 - [The Windows crash handler must not wait or panic](debug-server/0019-the-windows-crash-handler-must-not-wait.md): `exception_filter`, `report`
 
+### `debug_server/src/guest_key.rs`
+
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): `give_next_guest`, `give_keys_again`, `take_the_call`, `give_the_call_back`, `formats_guest_key`, `KEYS`, `writing`
+
 ### `debug_server/src/hot_reload.rs`
 
 - [Breakpoints in shared proc bytecode](debug-server/0005-breakpoints-in-code-that-several-procs-share.md): `restore_breakpoints` loop in `apply`
@@ -587,6 +605,7 @@ file after adding a note or changing an `## Applies to` list.
 - [Blocking client requests while the debugger runs DM](debug-server/0010-no-requests-are-handled-while-the-debugger-runs-dm.md): `Server::process`
 - [Stopping panics and world shutdowns at `guard`](debug-server/0016-panics-and-world-ends-stop-at-guard.md): `Server::recover_from_panic`
 - [Debug server client connections and writer threads](debug-server/0017-client-connections.md): the last test
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): `Server::handle_request`
 
 ### `debug_server/src/server/breakpoints.rs`
 
@@ -646,6 +665,7 @@ file after adding a note or changing an `## Applies to` list.
 
 ### `debug_server/src/server/sessions.rs`
 
+- [Protocol versioning and wire compatibility](cli/0005-protocol-compatibility.md): `ServerThread::run`
 - [Pause lifetime with multiple clients, watchers, and holds](cli/0007-pauses-with-several-clients.md): `recv_request`, `remove_client`, `has_debuggers`
 - [Breakpoints as separate, client-owned instruction claims](cli/0008-breakpoints-are-separate-claims-owned-by-a-client.md): `remove_client`
 - [Stopping and rebooting a world through DM evaluation](cli/0010-ending-and-rebooting-a-world.md): `world_shutting_down`
@@ -899,6 +919,7 @@ file after adding a note or changing an `## Applies to` list.
 
 ### `dmasm/reload/src/reload.rs`
 
+- [Catching and reporting panics in `auxtools check`](cli/0034-catching-panics-in-auxtools-check.md): `Snapshot::compile`, `Snapshot::known_bugs`
 - [Reading static and const variables from global slots](compiler/0004-statics-and-consts-are-read-from-global-slots.md): caller of `chain_targets_in_proc`
 - [Built-in variable defaults from the running world and variable tables](debug-server/0036-built-in-var-defaults-come-from-the-running-world.md): `VAR_TABLE_BUILTINS`
 - [All-or-nothing hot reloads and deferred changes](reload/0001-a-reload-is-applied-whole-or-not-at-all.md): `Plan`, `Changes`, `Changes::deferred`, `Changes::settings_as_built`, `diff`, setting check (`in_world_record`) in `var_default`
@@ -950,6 +971,7 @@ file after adding a note or changing an `## Applies to` list.
 
 ### `editors/vscode/extension.js`
 
+- [Assigning keys to guest logins](debug-server/0050-assigning-keys-to-guest-logins.md): `joinAs`, `GUEST_NUMBERS`
 - [VS Code extension compatibility workarounds](reload/0029-build-and-release-vs-code-extension-workarounds.md): `ensureExecutable`, `ConfigurationProvider.provideDebugConfigurations`, `resolveDebugConfiguration`, `resolveDebugConfigurationWithSubstitutedVariables`
 
 ### `editors/vscode/report.js`

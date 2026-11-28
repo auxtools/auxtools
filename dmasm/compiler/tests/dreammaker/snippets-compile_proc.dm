@@ -777,6 +777,10 @@ var/gx = 1
 /proc/f(a, b, c)
 	animate(a, b, c)
 	return a
+// Guards: animate_takes_its_arguments_from_a_list (compile_proc.rs)
+/proc/f(list/L)
+	animate(arglist(L))
+	return animate(arglist(L))
 // Guards: or_assign_saves_the_cache_for_some_values (compile_proc.rs)
 var/gx = 1
 /datum/t
@@ -789,6 +793,13 @@ var/gx = 1
 // Guards: savefile_input_statement (compile_proc.rs)
 /proc/f(savefile/S, x)
 	S["k"] >> x
+// Guards: a_savefile_is_read_into_a_parenthesised_place (compile_proc.rs)
+/datum/t/var/list/l
+/proc/f(savefile/S, x, datum/t/o)
+	S >> (x)
+	S["k"] >> ((x))
+	S >> (o.l)
+	S >> (o.l[1])
 // Guards: sized_list_var (compile_proc.rs)
 /proc/f(n)
 	var/list/L[n]

@@ -1,4 +1,5 @@
 mod framing;
+pub mod guest;
 mod hello;
 mod ids;
 mod messages;

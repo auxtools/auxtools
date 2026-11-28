@@ -1186,6 +1186,42 @@ fn savefile_input_statement() {
 }
 
 #[test]
+fn animate_takes_its_arguments_from_a_list() {
+    let code = compile(
+        "/proc/f(list/L)\n\tanimate(arglist(L))\n\treturn animate(arglist(L))\n",
+        "",
+        "f",
+    );
+    assert_has(
+        &code,
+        &[
+            "GetVar arg(0)",
+            "Animate",
+            "Pop",
+            "GetVar arg(0)",
+            "Animate",
+            "Ret",
+        ],
+    );
+}
+
+#[test]
+fn a_savefile_is_read_into_a_parenthesised_place() {
+    let plain = compile(
+        "/datum/t/var/list/l\n/proc/f(savefile/S, x, datum/t/o)\n\tS >> x\n\tS[\"k\"] >> x\n\tS >> o.l\n\tS >> o.l[1]\n",
+        "",
+        "f",
+    );
+    let parenthesised = compile(
+        "/datum/t/var/list/l\n/proc/f(savefile/S, x, datum/t/o)\n\tS >> (x)\n\tS[\"k\"] >> ((x))\n\tS >> (o.l)\n\tS >> (o.l[1])\n",
+        "",
+        "f",
+    );
+    assert_has(&plain, &["GetVar arg(0)", "Read", "SetVar arg(1)"]);
+    assert_eq!(parenthesised, plain);
+}
+
+#[test]
 fn a_block_local_const_is_folded_only_in_its_block() {
     let src = "var/const/LIMIT = 10\n/proc/f(x)\n\tif(x)\n\t\tvar/const/LIMIT = 2\n\t\tx = LIMIT + 1\n\treturn LIMIT + 1\n";
     let code = compile(src, "", "f");

@@ -14,7 +14,13 @@ protocol even if no type in `auxtools-protocol` changes.
   change or move. Later versions may append fields after them. An incompatible launcher can
   therefore still read `Hello` and report which protocol version the world speaks.
 - **Append-only `Request` variants:** New variants are always added at the end of `Request` so
-  existing variants keep their bincode indices for older peers.
+  existing variants keep their bincode indices for older peers. Appending a variant keeps older
+  requests working, but an older world cannot decode the new variant, and its reader closes the
+  connection on the first request it cannot decode (`ServerThread::run` in
+  `debug_server/src/server/sessions.rs`). Any request appended after a release without raising
+  `PROTOCOL_VERSION` must therefore not be sent to a world that might lack it: the client must check
+  the world's auxtools version from `Hello` first. No request requires that check yet, because
+  `Request::GuestKey` was appended before the first release that speaks this protocol version.
 - **Bump `PROTOCOL_VERSION` on breaking changes:** Raise `PROTOCOL_VERSION` for any incompatible
   wire change, including changes to dmasm's plan types or instructions. `PROTOCOL_VERSION` is 15 at
   the time of writing. A compile-time assertion keeps it above `LAST_NAMED_PROTOCOL` (12), ensuring
@@ -55,3 +61,4 @@ the world as incompatible rather than not listening.
 - `auxtools-protocol/src/plan_format.rs`: `RECORDED`, `hash`, `shape`,
   `a_plan_of_another_shape_is_another_protocol_version`
 - `auxtools-cli/src/local.rs`: `open`, `auxtools3_protocol`
+- `debug_server/src/server/sessions.rs`: `ServerThread::run`

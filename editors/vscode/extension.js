@@ -1,6 +1,7 @@
 "use strict";
 
 const childProcess = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const vscode = require("vscode");
@@ -419,14 +420,21 @@ async function offerAddress(address, started) {
 	}
 }
 
-async function join(session) {
+const GUEST_NUMBERS = 2 ** 32;
+
+async function joinAs(session) {
+	await join(session, `Guest-${crypto.randomInt(GUEST_NUMBERS)}`);
+}
+
+async function join(session, ckey) {
 	session = session || vscode.debug.activeDebugSession;
 	if (!session || session.type !== DEBUG_TYPE) {
 		vscode.window.showErrorMessage("No active auxtools debug session.");
 		return;
 	}
 	try {
-		const joined = await session.customRequest("auxtoolsJoin", { open: true, closeWithWorld: settings().get("closeDreamSeeker") !== false });
+		const asked = { open: true, closeWithWorld: settings().get("closeDreamSeeker") !== false };
+		const joined = await session.customRequest("auxtoolsJoin", ckey === undefined ? asked : { ...asked, ckey });
 		if (!joined.opened) {
 			await offerAddress(joined.address, false);
 		}
@@ -609,6 +617,7 @@ async function worldMenu(status, profiles) {
 	}
 	const items = [
 		{ label: "$(person-add) Join with DreamSeeker", run: () => join(session) },
+		{ label: "$(person-add) Join with DreamSeeker as a New Guest", detail: "Assign a random key to the next guest login", run: () => joinAs(session) },
 		{ label: "$(plug) Reconnect Clients", run: () => reconnectClients(session) },
 		{ label: "$(debug-restart) Restart", detail: "Run preLaunchTask, then restart the world", run: () => vscode.commands.executeCommand("workbench.action.debug.restart") },
 		{ label: "$(refresh) Reboot World", run: () => reboot() },
@@ -669,6 +678,7 @@ function activate(context) {
 		vscode.commands.registerCommand("auxtools.attach", attach),
 		vscode.commands.registerCommand("auxtools.reconnectClients", () => reconnectClients()),
 		vscode.commands.registerCommand("auxtools.join", () => join()),
+		vscode.commands.registerCommand("auxtools.joinAs", () => joinAs()),
 		vscode.commands.registerCommand("auxtools.reboot", reboot),
 		vscode.commands.registerCommand("auxtools.menu", () => worldMenu(status, profiles)),
 		vscode.commands.registerCommand("auxtools.profile", (session) => profiles.toggle(session)),

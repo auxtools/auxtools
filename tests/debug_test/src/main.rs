@@ -587,6 +587,20 @@ fn record_coverage(client: &mut Client) -> Result<(), String> {
 	}
 }
 
+fn guest_keys(mut client: Client) -> Client {
+	for key in ["Ada Lovelace", "ada"] {
+		let given = client.request(Request::GuestKey { key: key.to_owned() });
+		assert!(matches!(given, Response::GuestKey(Ok(()))), "for {:?}: {:?}", key, given);
+	}
+	let refused = client.request(Request::GuestKey { key: "a<b".to_owned() });
+	let Response::GuestKey(Err(why)) = refused else {
+		panic!("a key with < in it was taken: {:?}", refused);
+	};
+	assert_eq!(why, "a key cannot contain '<'");
+	println!("ok: keys for the next guests are taken, and a key BYOND refuses is not");
+	client
+}
+
 fn coverage(world: &World, mut client: Client) -> Client {
 	let busy = Err("another coverage recording is already running".to_owned());
 	let mut first = world.connect();
@@ -719,6 +733,50 @@ fn profile(world: &World, mut client: Client) -> Client {
 	assert_eq!(totals.codes.len(), 1, "{:?}", totals);
 	assert_eq!(profiled(&totals, "/profiled_loop").total.calls, 1);
 	println!("ok: proc filters");
+
+	let starts = [0, 2].map(|offset| InstructionRef {
+		proc: proc("/profiled_loop"),
+		offset
+	});
+	for start in &starts {
+		let response = client.request(Request::BreakpointSet {
+			id: breakpoint_id(start, true),
+			instruction: start.clone(),
+			condition: None,
+			hit: None,
+			log: None,
+			exact: true
+		});
+		assert!(
+			matches!(response, Response::BreakpointSet {
+				result: BreakpointSetResult::Success { .. }
+			}),
+			"a breakpoint at word {} of /profiled_loop got {:?}",
+			start.offset,
+			response
+		);
+	}
+	let only = ProfileRequest::Start {
+		procs: vec![proc("/profiled_loop")]
+	};
+	assert_eq!(profile_request(&mut client, only), Ok(ProfileReply::Started));
+	assert_eq!(eval(&mut client, None, "profiled_call()"), "500500");
+	let totals = profile_totals(&mut client, ProfileRequest::Stop);
+	let under_breakpoints = profiled(&totals, "/profiled_loop");
+	assert!(looped.line.is_some(), "{:?}", looped);
+	assert_eq!(
+		(&under_breakpoints.file, under_breakpoints.line),
+		(&looped.file, looped.line),
+		"{:?}",
+		under_breakpoints
+	);
+	for start in &starts {
+		let response = client.request(Request::BreakpointUnset {
+			id: breakpoint_id(start, true)
+		});
+		assert!(matches!(response, Response::BreakpointUnset { success: true, .. }), "{:?}", response);
+	}
+	println!("ok: a profiled proc's file and line under breakpoints at its start");
 
 	for order in ["profiled_twin_b(10) + profiled_twin_a(100)", "profiled_twin_a(100) + profiled_twin_b(10)"] {
 		let only = ProfileRequest::Start {
@@ -1399,6 +1457,7 @@ fn main() {
 
 	let client = protocol(&world, client);
 	let client = profile(&world, client);
+	let client = guest_keys(client);
 	let mut client = coverage(&world, client);
 
 	client.send(Request::CatchRuntimes {

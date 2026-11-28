@@ -26,6 +26,18 @@ parameters, drops certain arguments, and accepts argument counts the proc never 
   DreamMaker, whereas a named argument creates an animation step. Thus `animate(obj, x)` with only
   unnamed arguments compiles to `NullAnimate` on the object alone. Evaluating those dropped
   arguments would run code that DreamMaker does not execute.
+- `animate(arglist(L))`, where `arglist()` is the only argument, compiles to the list expression
+  followed by `Animate` with no `NewList` or `NewAssocList`, because the list given to `arglist()`
+  is the argument list. This matches the code DreamMaker emits (compared on BYOND 515.1637 and
+  516.1689), both as a statement and as a value (`return animate(arglist(L))`). This form is
+  handled separately from the single-unnamed-argument `NullAnimate` arm, which would otherwise
+  match a single `arglist()` argument and refuse it with "`arglist()` cannot be used here".
+  DreamMaker 516.1689 also accepts `arglist()` next to other arguments and silently drops
+  arguments: `animate(obj, arglist(L))` compiles to `NullAnimate` on `obj` alone (the same code as
+  `animate(obj, L)`), and `animate(arglist(L), arglist(M))` compiles to the code of
+  `animate(arglist(L))`, while `animate(arglist(L), time = 5)` is refused with "arglist() or named
+  arguments cannot be used here". dmasm refuses all three mixed forms with its "`arglist()` cannot
+  be used here" error and does not reproduce the dropped arguments.
 
 ## Applies to
 

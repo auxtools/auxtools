@@ -152,7 +152,10 @@ pub enum Request {
 		log: Option<Vec<LogPart>>
 	},
 	Breakpoints,
-	Coverage
+	Coverage,
+	GuestKey {
+		key: String
+	}
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -273,7 +276,8 @@ pub enum Response {
 	},
 	Breakpoints(Vec<PlacedBreakpoint>),
 	Coverage(Result<(), String>),
-	CoverageEnded(Coverage)
+	CoverageEnded(Coverage),
+	GuestKey(Result<(), String>)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

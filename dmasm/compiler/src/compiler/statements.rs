@@ -2434,7 +2434,7 @@ fn emit_input(
 ) -> Result<(), CompileError> {
     emit_io_target(compiler, source)?;
     compiler.emit_ins(Instruction::Read);
-    let kind = compiler.emit_inner_expr(place.clone())?;
+    let kind = compiler.emit_inner_expr(strip_parens(place).clone())?;
     if kind == EvalKind::ListRef {
         compiler.emit_ins(Instruction::ListSet);
     } else {

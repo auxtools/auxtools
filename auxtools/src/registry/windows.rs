@@ -492,6 +492,16 @@ pub(super) const RECIPES: &[Recipe] = &[
 		extract: Extract::Offset(20)
 	},
 	Recipe {
+		name: "guest_key_formatter_call",
+		versions: EVERY_BUILD,
+		anchor: Anchor::Signature(
+			SignatureTreatment::NoOffset,
+			"68 ?? ?? ?? ?? 50 E8 ?? ?? ?? ?? 83 C4 0C 8D 8D ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B 85 ?? ?? ?? ??"
+		),
+		hops: &[],
+		extract: Extract::Offset(7)
+	},
+	Recipe {
 		name: "mob_count",
 		versions: EVERY_BUILD,
 		anchor: Anchor::Signature(SignatureTreatment::NoOffset, MOB_LOADER),

@@ -1,5 +1,7 @@
 use std::process::{Child, Command, Stdio};
 
+use auxtools_protocol::guest;
+
 use super::*;
 
 #[derive(serde::Serialize)]
@@ -21,7 +23,8 @@ pub(super) struct JoinArguments {
 	#[serde(default = "yes")]
 	open: bool,
 	#[serde(default)]
-	close_with_world: bool
+	close_with_world: bool,
+	ckey: Option<String>
 }
 
 #[derive(Default)]
@@ -73,10 +76,23 @@ impl Adapter {
 		});
 	}
 
+	fn give_next_guest(&mut self, key: &str) -> Result<(), String> {
+		if let Some(unusable) = guest::unusable(key) {
+			return Err(format!("invalid guest key '{}': {}", key, unusable));
+		}
+		match self.request(&AuxRequest::GuestKey { key: key.to_owned() })? {
+			AuxResponse::GuestKey(given) => given.map_err(|why| format!("cannot assign key '{}' to the next guest: {}", key, why)),
+			other => Err(unexpected(other))
+		}
+	}
+
 	pub(super) fn join(&mut self, args: JoinArguments) -> Handled {
 		let address = self
 			.address()?
 			.ok_or("the world is not listening on a port. Start it with a port, or set \"port\" in the launch configuration.")?;
+		if let Some(key) = &args.ckey {
+			self.give_next_guest(key)?;
+		}
 		if !args.open || !cfg!(windows) {
 			return Ok(serde_json::json!({ "address": address, "opened": false }));
 		}
